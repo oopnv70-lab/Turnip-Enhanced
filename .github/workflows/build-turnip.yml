@@ -139,6 +139,7 @@ jobs:
 
       - name: meson setup
         run: |
+          set +e
           meson setup build-android-aarch64 \
             --cross-file .ci/android-aarch64.txt \
             --native-file .ci/native.txt \
@@ -153,8 +154,19 @@ jobs:
             -Db_lto=true \
             -Db_lto_mode=thin \
             -Dallow-broken-lto=true \
-            -Dstrip=true \
-            -Degl=disabled
+            -Db_strip=true \
+            -Degl=disabled 2>&1 | tee /tmp/setup.log
+          RC=${PIPESTATUS[0]}
+
+          if [ $RC -ne 0 ]; then
+            {
+              echo "## meson setup 失败 (exit $RC)"
+              echo '```'
+              tail -120 /tmp/setup.log
+              echo '```'
+            } >> $GITHUB_STEP_SUMMARY
+            exit $RC
+          fi
 
           echo "=== 检查 ANDROID_STRICT 是否进入 config.h ==="
           if grep -q 'ANDROID_STRICT' build-android-aarch64/config.h 2>/dev/null; then
