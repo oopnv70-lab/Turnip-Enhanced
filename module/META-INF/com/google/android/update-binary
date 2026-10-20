@@ -1,0 +1,40 @@
+#!/sbin/sh
+# ─────────────────────────────────────────────────────────────
+# update-binary
+#
+# 说明（实测，不是猜）：
+# KernelSU 3.3.0 的 ksud 安装模块时**不执行**本文件。它走
+#   module.rs:exec_install_script()
+#   → busybox sh -c "<install_script>"
+# 其中 install_script 由 metamodule::get_install_script() 决定：
+# 本机装了带 metainstall.sh 的 magic_mount_rs，于是实际执行的是
+# /data/adb/modules/magic_mount_rs/metainstall.sh，里面再调
+# install_module → source 我们的 customize.sh。
+#
+# 所以本文件只在 Magisk / 旧版安装器（recovery 刷入）路径下起作用。
+# 保留它是为了：
+#   1. Magisk 兼容
+#   2. zip 结构完整（很多工具按 META-INF 是否存在判断是不是模块包）
+# ─────────────────────────────────────────────────────────────
+
+umask 022
+
+ui_print() { echo "$1"; }
+
+OUTFD=$2
+ZIPFILE=$3
+
+# Magisk 提供 util_functions.sh；没有就说明不是 Magisk 环境
+if [ -f /data/adb/magisk/util_functions.sh ]; then
+  . /data/adb/magisk/util_functions.sh
+  install_module
+elif [ -f /data/adb/ksu/bin/util_functions.sh ]; then
+  . /data/adb/ksu/bin/util_functions.sh
+  install_module
+else
+  ui_print "! 未找到 install_module 实现"
+  ui_print "! 请通过 KernelSU/Magisk 管理器安装本模块"
+  exit 1
+fi
+
+exit 0
