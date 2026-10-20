@@ -1,0 +1,22 @@
+<?xml version="1.0" encoding="utf-8"?>
+<!--
+     android.hardware.vulkan.version-1_4.xml
+
+     照抄 adreno_gpu_driver V842.21-[full] 内的同名文件。
+
+     作用：告诉 PackageManager「本机有支持 Vulkan 1.4 的驱动」。
+     本机 /vendor/etc/permissions/ 下原本只有 version-1_1（4198400）
+     和 version-1_3（4206592），没有 1_4。而 Turnip 编译时
+     TU_API_VERSION 就是 1.4（tu_device.cc:137），chip>=7 时
+     props->apiVersion 直接报 1.4，但如果 feature xml 缺失，
+     应用通过 PackageManager 查 android.hardware.vulkan.version
+     只能拿到 1.3，会误判设备能力。
+
+     数值 4210688 = 0x404000 = VK_MAKE_VERSION(1,4,0)。
+     编码规则：major<<22 | minor<<12 | patch。
+       1.3.0 = 0x403000 = 4206592
+       1.4.0 = 0x404000 = 4210688
+-->
+<permissions>
+    <feature name="android.hardware.vulkan.version" version="4210688" />
+</permissions>
