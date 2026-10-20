@@ -1,5 +1,8 @@
 name: macOS-CI
-on: push
+on:
+  workflow_dispatch:
+  # 上游原本是 on: push；macos-11 runner 已下线，每次 push 必失败，
+  # 改为仅手动触发，避免污染提交状态。
 
 permissions:
   contents: read
