@@ -1,0 +1,228 @@
+name: build-turnip
+
+# Turnip-Enhanced: Mesa freedreno Vulkan -> KernelSU / Magisk module
+#
+# 构建方式：就地构建。本仓库自身就是一份 Mesa 树（版本见根目录 VERSION），
+# workflow 拿 actions/checkout 检出的源码直接 meson setup，
+# 不再从 gitlab.freedesktop.org 下载 stock mesa。
+#
+# 相对上游 ilhan-athn7/freedreno_turnip-CI 的改动：
+#   1. -Dandroid-strict=false  关闭 Android CTS 扩展白名单
+#   2. 模块内补 version-1_4.xml，让 PackageManager 认到 Vulkan 1.4
+#   3. 源码来自本仓库，不下载外网 archive
+
+on:
+  workflow_dispatch:
+    inputs:
+      android_strict:
+        description: 'android-strict (false = 放开扩展白名单, true = CTS 严格)'
+        required: false
+        default: 'false'
+      platform_sdk:
+        description: 'platform-sdk-version（仅 Mesa 侧宏，默认 35）'
+        required: false
+        default: '35'
+  push:
+    branches: [main]
+    paths:
+      - '.github/workflows/build-turnip.yml'
+      - 'module/**'
+      - 'extras/**'
+
+env:
+  ANDROID_STRICT: ${{ github.event.inputs.android_strict || 'false' }}
+  # SDKVER  -> -Dplatform-sdk-version，只写进 config.h 的 ANDROID_API_LEVEL 宏。
+  #            android-strict=false 时白名单整段被 #ifdef 掉，此值不影响扩展
+  #            可见性，保持 Mesa 默认 35。
+  # NDK_API -> NDK clang 前缀 aarch64-linux-androidNN-clang。官方 NDK 的
+  #            meta/platforms.json 上限是 35，写 36 会找不到编译器。
+  SDKVER: ${{ github.event.inputs.platform_sdk || '35' }}
+  NDK_API: '35'
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 180
+
+    steps:
+      - name: 检出源码（本仓库即 Mesa 树）
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      - name: 安装构建依赖
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            build-essential ccache clang llvm ninja-build pkg-config \
+            patchelf zip unzip curl git python3-venv make
+          # Ubuntu 24.04 自带 meson 1.3.2，而本树 meson.build 要求 >= 1.4.0。
+          # 用独立 venv，不动系统 python。
+          python3 -m venv /opt/mesonenv
+          /opt/mesonenv/bin/pip install -q --upgrade pip
+          /opt/mesonenv/bin/pip install -q 'meson>=1.4.0' mako pyyaml packaging
+          echo "/opt/mesonenv/bin" >> $GITHUB_PATH
+          /opt/mesonenv/bin/meson --version
+          ninja --version
+
+      - name: ccache
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: turnip-${{ env.SDKVER }}-${{ env.ANDROID_STRICT }}
+          max-size: 2G
+
+      - name: 下载 Android NDK r29
+        run: |
+          NDK_ZIP=android-ndk-r29-linux.zip
+          curl -fL --retry 3 -o /tmp/$NDK_ZIP \
+            https://dl.google.com/android/repository/$NDK_ZIP
+          sudo mkdir -p /opt/ndk
+          sudo unzip -q /tmp/$NDK_ZIP -d /opt/ndk
+          echo "NDK=/opt/ndk/android-ndk-r29" >> $GITHUB_ENV
+          BIN=/opt/ndk/android-ndk-r29/toolchains/llvm/prebuilt/linux-x86_64/bin
+          echo "=== 确认 API ${NDK_API} 的 clang wrapper ==="
+          ls -l "$BIN/aarch64-linux-android${NDK_API}-clang"
+          echo "=== 该 NDK 支持的最高 API ==="
+          ls "$BIN" | grep -o 'aarch64-linux-android[0-9]*' | \
+            grep -o '[0-9]*$' | sort -n | tail -1
+
+      - name: 确认源码树（证据输出）
+        run: |
+          echo "=== VERSION ==="
+          cat VERSION
+          echo "=== TU_API_VERSION（应为 1.4）==="
+          grep -n 'define TU_API_VERSION' src/freedreno/vulkan/tu_device.cc
+          echo "=== ANDROID_STRICT guard ==="
+          grep -n -A3 'ifdef ANDROID_STRICT' src/vulkan/runtime/vk_physical_device.c
+
+      - name: 生成 cross / native file
+        run: |
+          TC="$NDK/toolchains/llvm/prebuilt/linux-x86_64"
+          mkdir -p .ci
+
+          cat > .ci/android-aarch64.txt <<XEOF
+          [binaries]
+          ar = '$TC/bin/llvm-ar'
+          c = ['ccache', '$TC/bin/aarch64-linux-android${NDK_API}-clang']
+          cpp = ['ccache', '$TC/bin/aarch64-linux-android${NDK_API}-clang++', '-fno-exceptions', '-fno-unwind-tables', '-fno-asynchronous-unwind-tables']
+          c_ld = '$TC/bin/ld.lld'
+          cpp_ld = '$TC/bin/ld.lld'
+          strip = '$TC/bin/aarch64-linux-android-strip'
+          pkg-config = ['env', 'PKG_CONFIG_LIBDIR=$TC/pkg-config', '/usr/bin/pkg-config']
+          [host_machine]
+          system = 'android'
+          cpu_family = 'aarch64'
+          cpu = 'armv8'
+          endian = 'little'
+          XEOF
+
+          # host 侧用系统 clang（NDK 的 clang 默认 target aarch64，编不了 x86_64 生成器）
+          cat > .ci/native.txt <<XEOF
+          [binaries]
+          c = ['ccache', '/usr/bin/clang']
+          cpp = ['ccache', '/usr/bin/clang++']
+          ar = '/usr/bin/llvm-ar'
+          strip = '/usr/bin/llvm-strip'
+          c_ld = '/usr/bin/ld.lld'
+          cpp_ld = '/usr/bin/ld.lld'
+          [build_machine]
+          system = 'linux'
+          cpu_family = 'x86_64'
+          cpu = 'x86_64'
+          endian = 'little'
+          XEOF
+
+          echo '--- android-aarch64.txt ---'; cat .ci/android-aarch64.txt
+          echo '--- native.txt ---'; cat .ci/native.txt
+          ls "$TC/bin/aarch64-linux-android${NDK_API}-clang" || \
+            { echo "NDK 无 API ${NDK_API} 的 clang wrapper"; exit 1; }
+
+      - name: meson setup
+        run: |
+          meson setup build-android-aarch64 \
+            --cross-file .ci/android-aarch64.txt \
+            --native-file .ci/native.txt \
+            -Dbuildtype=release \
+            -Dplatforms=android \
+            -Dplatform-sdk-version="${SDKVER}" \
+            -Dandroid-stub=true \
+            -Dandroid-strict="${ANDROID_STRICT}" \
+            -Dgallium-drivers= \
+            -Dvulkan-drivers=freedreno \
+            -Dfreedreno-kmds=kgsl \
+            -Db_lto=true \
+            -Db_lto_mode=thin \
+            -Dallow-broken-lto=true \
+            -Dstrip=true \
+            -Degl=disabled
+
+          echo "=== 检查 ANDROID_STRICT 是否进入 config.h ==="
+          if grep -q 'ANDROID_STRICT' build-android-aarch64/config.h 2>/dev/null; then
+            echo "警告：config.h 里含 ANDROID_STRICT，白名单仍生效"
+          else
+            echo "OK：ANDROID_STRICT 未进入 config.h"
+          fi
+
+      - name: 编译
+        run: |
+          ninja -C build-android-aarch64
+          ls -lh build-android-aarch64/src/freedreno/vulkan/libvulkan_freedreno.so
+
+      - name: 打包 KSU / Magisk 模块
+        run: |
+          set -e
+          SO=build-android-aarch64/src/freedreno/vulkan/libvulkan_freedreno.so
+          MESA_VER=$(cat VERSION)
+          OUT=out
+          rm -rf $OUT && mkdir -p $OUT
+
+          cp -r module $OUT/pkg
+          mkdir -p $OUT/pkg/system/vendor/lib64/hw
+
+          # soname 必须与文件名一致，否则 loader dlopen 后内部重定位会失败
+          patchelf --set-soname vulkan.turnip.so $SO
+          cp $SO $OUT/pkg/system/vendor/lib64/hw/vulkan.turnip.so
+          ls -lh $OUT/pkg/system/vendor/lib64/hw/vulkan.turnip.so
+
+          sed -i "s/^version=.*/version=${MESA_VER}-enhanced/" $OUT/pkg/module.prop
+          sed -i "s/^versionCode=.*/versionCode=$(echo $MESA_VER | tr -cd '0-9')/" $OUT/pkg/module.prop
+
+          cd $OUT/pkg
+          zip -r -9 ../turnip-enhanced.zip . -x '.git*' > /dev/null
+          cd ../..
+          ls -lh $OUT/turnip-enhanced.zip
+          unzip -l $OUT/turnip-enhanced.zip
+
+      - name: adb 安装用的临时模块（adrenotools，可选）
+        run: |
+          set -e
+          SO=build-android-aarch64/src/freedreno/vulkan/libvulkan_freedreno.so
+          MESA_VER=$(cat VERSION)
+          rm -rf extras/out && mkdir -p extras/out
+          cd extras/out
+          patchelf --set-soname vulkan.freedreno.so $SO
+          cp $SO vulkan.freedreno.so
+          cat > meta.json <<XEOF
+          {
+            "schemaVersion": 1,
+            "name": "Turnip-Enhanced",
+            "description": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
+            "author": "Turnip-Enhanced",
+            "packageVersion": "1",
+            "vendor": "Mesa",
+            "driverVersion": "${MESA_VER}",
+            "minApi": ${SDKVER},
+            "libraryName": "vulkan.freedreno.so"
+          }
+          XEOF
+          zip -9 turnip-adrenotools.zip vulkan.freedreno.so meta.json > /dev/null
+          cd ../..
+          cp extras/out/turnip-adrenotools.zip out/
+          ls -lh out/turnip-adrenotools.zip
+
+      - uses: actions/upload-artifact@v4
+        with:
+          name: turnip-enhanced-${{ github.sha }}-sdk${{ env.SDKVER }}-strict${{ env.ANDROID_STRICT }}
+          path: |
+            out/turnip-enhanced.zip
+            out/turnip-adrenotools.zip
