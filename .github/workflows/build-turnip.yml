@@ -74,13 +74,25 @@ jobs:
           key: turnip-${{ env.SDKVER }}-${{ env.ANDROID_STRICT }}
           max-size: 2G
 
-      - name: 下载 Android NDK r29
+      - name: 缓存 Android NDK r29
+        id: ndk-cache
+        uses: actions/cache@v4
+        with:
+          path: /opt/ndk/android-ndk-r29
+          key: ndk-r29-linux-v1
+
+      - name: 下载 Android NDK r29（仅缓存未命中时）
+        if: steps.ndk-cache.outputs.cache-hit != 'true'
         run: |
           NDK_ZIP=android-ndk-r29-linux.zip
           curl -fL --retry 3 -o /tmp/$NDK_ZIP \
             https://dl.google.com/android/repository/$NDK_ZIP
           sudo mkdir -p /opt/ndk
           sudo unzip -q /tmp/$NDK_ZIP -d /opt/ndk
+          rm -f /tmp/$NDK_ZIP
+
+      - name: 确认 NDK
+        run: |
           echo "NDK=/opt/ndk/android-ndk-r29" >> $GITHUB_ENV
           BIN=/opt/ndk/android-ndk-r29/toolchains/llvm/prebuilt/linux-x86_64/bin
           echo "=== 确认 API ${NDK_API} 的 clang wrapper ==="
