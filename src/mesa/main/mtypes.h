@@ -2597,6 +2597,13 @@ struct gl_renderbuffer
    struct pipe_transfer *transfer; /**< only used when mapping the resource */
 
    /**
+    * The mapping of a resource with a byte-swapped format, and the
+    * host-endian copy of it that is handed out instead.
+    */
+   uint8_t *transfer_map;
+   uint8_t *swapped_map;
+
+   /**
     * Used only when hardware accumulation buffers are not supported.
     */
    bool software;
@@ -2610,6 +2617,11 @@ struct gl_renderbuffer
    bool rtt_layered; /**< whether glFramebufferTexture was called */
    unsigned rtt_nr_samples; /**< from FramebufferTexture2DMultisampleEXT */
    unsigned rtt_numviews;
+
+   /** storage from RenderbufferStorageMultisampleEXT on GLES, whose samples
+    * are implicitly resolved like those of FramebufferTexture2DMultisampleEXT
+    */
+   bool msrtt;
 };
 
 

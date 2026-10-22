@@ -18464,6 +18464,192 @@ void VkEncoder::vkGetPhysicalDeviceSparseImageFormatProperties2KHR(
 }
 
 #endif
+#ifdef VK_KHR_device_group
+void VkEncoder::vkGetDeviceGroupPeerMemoryFeaturesKHR(VkDevice device, uint32_t heapIndex,
+                                                      uint32_t localDeviceIndex,
+                                                      uint32_t remoteDeviceIndex,
+                                                      VkPeerMemoryFeatureFlags* pPeerMemoryFeatures,
+                                                      uint32_t doLock) {
+    (void)doLock;
+    bool queueSubmitWithCommandsEnabled =
+        sFeatureBits & VULKAN_STREAM_FEATURE_QUEUE_SUBMIT_WITH_COMMANDS_BIT;
+    if (!queueSubmitWithCommandsEnabled && doLock) this->lock();
+    auto stream = mImpl->stream();
+    auto pool = mImpl->pool();
+    VkDevice local_device;
+    uint32_t local_heapIndex;
+    uint32_t local_localDeviceIndex;
+    uint32_t local_remoteDeviceIndex;
+    local_device = device;
+    local_heapIndex = heapIndex;
+    local_localDeviceIndex = localDeviceIndex;
+    local_remoteDeviceIndex = remoteDeviceIndex;
+    size_t count = 0;
+    size_t* countPtr = &count;
+    {
+        uint64_t cgen_var_0;
+        (void)cgen_var_0;
+        *countPtr += 1 * 8;
+        *countPtr += sizeof(uint32_t);
+        *countPtr += sizeof(uint32_t);
+        *countPtr += sizeof(uint32_t);
+        *countPtr += sizeof(VkPeerMemoryFeatureFlags);
+    }
+    uint32_t packetSize_vkGetDeviceGroupPeerMemoryFeaturesKHR =
+        4 + 4 + (queueSubmitWithCommandsEnabled ? 4 : 0) + count;
+    uint8_t* streamPtr = stream->reserve(packetSize_vkGetDeviceGroupPeerMemoryFeaturesKHR);
+    uint8_t** streamPtrPtr = &streamPtr;
+    uint32_t opcode_vkGetDeviceGroupPeerMemoryFeaturesKHR =
+        OP_vkGetDeviceGroupPeerMemoryFeaturesKHR;
+    uint32_t seqno;
+    if (queueSubmitWithCommandsEnabled) seqno = ResourceTracker::nextSeqno();
+    memcpy(streamPtr, &opcode_vkGetDeviceGroupPeerMemoryFeaturesKHR, sizeof(uint32_t));
+    streamPtr += sizeof(uint32_t);
+    memcpy(streamPtr, &packetSize_vkGetDeviceGroupPeerMemoryFeaturesKHR, sizeof(uint32_t));
+    streamPtr += sizeof(uint32_t);
+    if (queueSubmitWithCommandsEnabled) {
+        memcpy(streamPtr, &seqno, sizeof(uint32_t));
+        streamPtr += sizeof(uint32_t);
+    }
+    uint64_t cgen_var_0;
+    *&cgen_var_0 = gfxstream_vk_device_to_host_u64((*&local_device));
+    memcpy(*streamPtrPtr, (uint64_t*)&cgen_var_0, 1 * 8);
+    *streamPtrPtr += 1 * 8;
+    memcpy(*streamPtrPtr, (uint32_t*)&local_heapIndex, sizeof(uint32_t));
+    *streamPtrPtr += sizeof(uint32_t);
+    memcpy(*streamPtrPtr, (uint32_t*)&local_localDeviceIndex, sizeof(uint32_t));
+    *streamPtrPtr += sizeof(uint32_t);
+    memcpy(*streamPtrPtr, (uint32_t*)&local_remoteDeviceIndex, sizeof(uint32_t));
+    *streamPtrPtr += sizeof(uint32_t);
+    memcpy(*streamPtrPtr, (VkPeerMemoryFeatureFlags*)pPeerMemoryFeatures,
+           sizeof(VkPeerMemoryFeatureFlags));
+    *streamPtrPtr += sizeof(VkPeerMemoryFeatureFlags);
+    stream->read((VkPeerMemoryFeatureFlags*)pPeerMemoryFeatures, sizeof(VkPeerMemoryFeatureFlags));
+    ++encodeCount;
+    if (0 == encodeCount % POOL_CLEAR_INTERVAL) {
+        pool->freeAll();
+        stream->clearPool();
+    }
+    if (!queueSubmitWithCommandsEnabled && doLock) this->unlock();
+}
+
+void VkEncoder::vkCmdSetDeviceMaskKHR(VkCommandBuffer commandBuffer, uint32_t deviceMask,
+                                      uint32_t doLock) {
+    (void)doLock;
+    bool queueSubmitWithCommandsEnabled =
+        sFeatureBits & VULKAN_STREAM_FEATURE_QUEUE_SUBMIT_WITH_COMMANDS_BIT;
+    if (!queueSubmitWithCommandsEnabled && doLock) this->lock();
+    auto stream = mImpl->stream();
+    auto pool = mImpl->pool();
+    VkCommandBuffer local_commandBuffer;
+    uint32_t local_deviceMask;
+    local_commandBuffer = commandBuffer;
+    local_deviceMask = deviceMask;
+    size_t count = 0;
+    size_t* countPtr = &count;
+    {
+        uint64_t cgen_var_0;
+        (void)cgen_var_0;
+        *countPtr += 1 * 8;
+        *countPtr += sizeof(uint32_t);
+    }
+    uint32_t packetSize_vkCmdSetDeviceMaskKHR = 4 + 4 + count;
+    if (queueSubmitWithCommandsEnabled) packetSize_vkCmdSetDeviceMaskKHR -= 8;
+    uint8_t* streamPtr = stream->reserve(packetSize_vkCmdSetDeviceMaskKHR);
+    uint8_t** streamPtrPtr = &streamPtr;
+    uint32_t opcode_vkCmdSetDeviceMaskKHR = OP_vkCmdSetDeviceMaskKHR;
+    memcpy(streamPtr, &opcode_vkCmdSetDeviceMaskKHR, sizeof(uint32_t));
+    streamPtr += sizeof(uint32_t);
+    memcpy(streamPtr, &packetSize_vkCmdSetDeviceMaskKHR, sizeof(uint32_t));
+    streamPtr += sizeof(uint32_t);
+    if (!queueSubmitWithCommandsEnabled) {
+        uint64_t cgen_var_0;
+        *&cgen_var_0 = gfxstream_vk_command_buffer_to_host_u64((*&local_commandBuffer));
+        memcpy(*streamPtrPtr, (uint64_t*)&cgen_var_0, 1 * 8);
+        *streamPtrPtr += 1 * 8;
+    }
+    memcpy(*streamPtrPtr, (uint32_t*)&local_deviceMask, sizeof(uint32_t));
+    *streamPtrPtr += sizeof(uint32_t);
+    ++encodeCount;
+    if (0 == encodeCount % POOL_CLEAR_INTERVAL) {
+        pool->freeAll();
+        stream->clearPool();
+    }
+    if (!queueSubmitWithCommandsEnabled && doLock) this->unlock();
+}
+
+void VkEncoder::vkCmdDispatchBaseKHR(VkCommandBuffer commandBuffer, uint32_t baseGroupX,
+                                     uint32_t baseGroupY, uint32_t baseGroupZ, uint32_t groupCountX,
+                                     uint32_t groupCountY, uint32_t groupCountZ, uint32_t doLock) {
+    (void)doLock;
+    bool queueSubmitWithCommandsEnabled =
+        sFeatureBits & VULKAN_STREAM_FEATURE_QUEUE_SUBMIT_WITH_COMMANDS_BIT;
+    if (!queueSubmitWithCommandsEnabled && doLock) this->lock();
+    auto stream = mImpl->stream();
+    auto pool = mImpl->pool();
+    VkCommandBuffer local_commandBuffer;
+    uint32_t local_baseGroupX;
+    uint32_t local_baseGroupY;
+    uint32_t local_baseGroupZ;
+    uint32_t local_groupCountX;
+    uint32_t local_groupCountY;
+    uint32_t local_groupCountZ;
+    local_commandBuffer = commandBuffer;
+    local_baseGroupX = baseGroupX;
+    local_baseGroupY = baseGroupY;
+    local_baseGroupZ = baseGroupZ;
+    local_groupCountX = groupCountX;
+    local_groupCountY = groupCountY;
+    local_groupCountZ = groupCountZ;
+    size_t count = 0;
+    size_t* countPtr = &count;
+    {
+        uint64_t cgen_var_0;
+        (void)cgen_var_0;
+        *countPtr += 1 * 8;
+        *countPtr += sizeof(uint32_t);
+        *countPtr += sizeof(uint32_t);
+        *countPtr += sizeof(uint32_t);
+        *countPtr += sizeof(uint32_t);
+        *countPtr += sizeof(uint32_t);
+        *countPtr += sizeof(uint32_t);
+    }
+    uint32_t packetSize_vkCmdDispatchBaseKHR = 4 + 4 + count;
+    if (queueSubmitWithCommandsEnabled) packetSize_vkCmdDispatchBaseKHR -= 8;
+    uint8_t* streamPtr = stream->reserve(packetSize_vkCmdDispatchBaseKHR);
+    uint8_t** streamPtrPtr = &streamPtr;
+    uint32_t opcode_vkCmdDispatchBaseKHR = OP_vkCmdDispatchBaseKHR;
+    memcpy(streamPtr, &opcode_vkCmdDispatchBaseKHR, sizeof(uint32_t));
+    streamPtr += sizeof(uint32_t);
+    memcpy(streamPtr, &packetSize_vkCmdDispatchBaseKHR, sizeof(uint32_t));
+    streamPtr += sizeof(uint32_t);
+    if (!queueSubmitWithCommandsEnabled) {
+        uint64_t cgen_var_0;
+        *&cgen_var_0 = gfxstream_vk_command_buffer_to_host_u64((*&local_commandBuffer));
+        memcpy(*streamPtrPtr, (uint64_t*)&cgen_var_0, 1 * 8);
+        *streamPtrPtr += 1 * 8;
+    }
+    memcpy(*streamPtrPtr, (uint32_t*)&local_baseGroupX, sizeof(uint32_t));
+    *streamPtrPtr += sizeof(uint32_t);
+    memcpy(*streamPtrPtr, (uint32_t*)&local_baseGroupY, sizeof(uint32_t));
+    *streamPtrPtr += sizeof(uint32_t);
+    memcpy(*streamPtrPtr, (uint32_t*)&local_baseGroupZ, sizeof(uint32_t));
+    *streamPtrPtr += sizeof(uint32_t);
+    memcpy(*streamPtrPtr, (uint32_t*)&local_groupCountX, sizeof(uint32_t));
+    *streamPtrPtr += sizeof(uint32_t);
+    memcpy(*streamPtrPtr, (uint32_t*)&local_groupCountY, sizeof(uint32_t));
+    *streamPtrPtr += sizeof(uint32_t);
+    memcpy(*streamPtrPtr, (uint32_t*)&local_groupCountZ, sizeof(uint32_t));
+    *streamPtrPtr += sizeof(uint32_t);
+    ++encodeCount;
+    if (0 == encodeCount % POOL_CLEAR_INTERVAL) {
+        pool->freeAll();
+        stream->clearPool();
+    }
+    if (!queueSubmitWithCommandsEnabled && doLock) this->unlock();
+}
+
+#endif
 #ifdef VK_KHR_maintenance1
 void VkEncoder::vkTrimCommandPoolKHR(VkDevice device, VkCommandPool commandPool,
                                      VkCommandPoolTrimFlags flags, uint32_t doLock) {
@@ -18522,6 +18708,132 @@ void VkEncoder::vkTrimCommandPoolKHR(VkDevice device, VkCommandPool commandPool,
         stream->clearPool();
     }
     if (!queueSubmitWithCommandsEnabled && doLock) this->unlock();
+}
+
+#endif
+#ifdef VK_KHR_device_group_creation
+VkResult VkEncoder::vkEnumeratePhysicalDeviceGroupsKHR(
+    VkInstance instance, uint32_t* pPhysicalDeviceGroupCount,
+    VkPhysicalDeviceGroupProperties* pPhysicalDeviceGroupProperties, uint32_t doLock) {
+    (void)doLock;
+    bool queueSubmitWithCommandsEnabled =
+        sFeatureBits & VULKAN_STREAM_FEATURE_QUEUE_SUBMIT_WITH_COMMANDS_BIT;
+    if (!queueSubmitWithCommandsEnabled && doLock) this->lock();
+    auto stream = mImpl->stream();
+    auto pool = mImpl->pool();
+    VkInstance local_instance;
+    local_instance = instance;
+    size_t count = 0;
+    size_t* countPtr = &count;
+    {
+        uint64_t cgen_var_0;
+        (void)cgen_var_0;
+        *countPtr += 1 * 8;
+        // WARNING PTR CHECK
+        *countPtr += 8;
+        if (pPhysicalDeviceGroupCount) {
+            *countPtr += sizeof(uint32_t);
+        }
+        // WARNING PTR CHECK
+        *countPtr += 8;
+        if (pPhysicalDeviceGroupProperties) {
+            if (pPhysicalDeviceGroupCount) {
+                for (uint32_t i = 0; i < (uint32_t)(*pPhysicalDeviceGroupCount); ++i) {
+                    count_VkPhysicalDeviceGroupProperties(
+                        sFeatureBits, VK_STRUCTURE_TYPE_MAX_ENUM,
+                        (VkPhysicalDeviceGroupProperties*)(pPhysicalDeviceGroupProperties + i),
+                        countPtr);
+                }
+            }
+        }
+    }
+    uint32_t packetSize_vkEnumeratePhysicalDeviceGroupsKHR =
+        4 + 4 + (queueSubmitWithCommandsEnabled ? 4 : 0) + count;
+    uint8_t* streamPtr = stream->reserve(packetSize_vkEnumeratePhysicalDeviceGroupsKHR);
+    uint8_t** streamPtrPtr = &streamPtr;
+    uint32_t opcode_vkEnumeratePhysicalDeviceGroupsKHR = OP_vkEnumeratePhysicalDeviceGroupsKHR;
+    uint32_t seqno;
+    if (queueSubmitWithCommandsEnabled) seqno = ResourceTracker::nextSeqno();
+    memcpy(streamPtr, &opcode_vkEnumeratePhysicalDeviceGroupsKHR, sizeof(uint32_t));
+    streamPtr += sizeof(uint32_t);
+    memcpy(streamPtr, &packetSize_vkEnumeratePhysicalDeviceGroupsKHR, sizeof(uint32_t));
+    streamPtr += sizeof(uint32_t);
+    if (queueSubmitWithCommandsEnabled) {
+        memcpy(streamPtr, &seqno, sizeof(uint32_t));
+        streamPtr += sizeof(uint32_t);
+    }
+    uint64_t cgen_var_0;
+    *&cgen_var_0 = gfxstream_vk_instance_to_host_u64((*&local_instance));
+    memcpy(*streamPtrPtr, (uint64_t*)&cgen_var_0, 1 * 8);
+    *streamPtrPtr += 1 * 8;
+    // WARNING PTR CHECK
+    uint64_t cgen_var_1 = (uint64_t)(uintptr_t)pPhysicalDeviceGroupCount;
+    memcpy((*streamPtrPtr), &cgen_var_1, 8);
+    gfxstream::aemu::Stream::toBe64((uint8_t*)(*streamPtrPtr));
+    *streamPtrPtr += 8;
+    if (pPhysicalDeviceGroupCount) {
+        memcpy(*streamPtrPtr, (uint32_t*)pPhysicalDeviceGroupCount, sizeof(uint32_t));
+        *streamPtrPtr += sizeof(uint32_t);
+    }
+    // WARNING PTR CHECK
+    uint64_t cgen_var_2 = (uint64_t)(uintptr_t)pPhysicalDeviceGroupProperties;
+    memcpy((*streamPtrPtr), &cgen_var_2, 8);
+    gfxstream::aemu::Stream::toBe64((uint8_t*)(*streamPtrPtr));
+    *streamPtrPtr += 8;
+    if (pPhysicalDeviceGroupProperties) {
+        for (uint32_t i = 0; i < (uint32_t)(*pPhysicalDeviceGroupCount); ++i) {
+            reservedmarshal_VkPhysicalDeviceGroupProperties(
+                stream, VK_STRUCTURE_TYPE_MAX_ENUM,
+                (VkPhysicalDeviceGroupProperties*)(pPhysicalDeviceGroupProperties + i),
+                streamPtrPtr);
+        }
+    }
+    // WARNING PTR CHECK
+    uint32_t* check_pPhysicalDeviceGroupCount;
+    (void)check_pPhysicalDeviceGroupCount;
+    check_pPhysicalDeviceGroupCount = (uint32_t*)(uintptr_t)stream->getBe64();
+    if (pPhysicalDeviceGroupCount) {
+        if (!(check_pPhysicalDeviceGroupCount)) {
+            GFXSTREAM_ERROR("fatal: pPhysicalDeviceGroupCount inconsistent between guest and host");
+        }
+        stream->read((uint32_t*)pPhysicalDeviceGroupCount, sizeof(uint32_t));
+    }
+    // WARNING PTR CHECK
+    VkPhysicalDeviceGroupProperties* check_pPhysicalDeviceGroupProperties;
+    (void)check_pPhysicalDeviceGroupProperties;
+    check_pPhysicalDeviceGroupProperties =
+        (VkPhysicalDeviceGroupProperties*)(uintptr_t)stream->getBe64();
+    if (pPhysicalDeviceGroupProperties) {
+        if (!(check_pPhysicalDeviceGroupProperties)) {
+            GFXSTREAM_ERROR(
+                "fatal: pPhysicalDeviceGroupProperties inconsistent between guest and host");
+        }
+        if (pPhysicalDeviceGroupCount) {
+            for (uint32_t i = 0; i < (uint32_t)(*pPhysicalDeviceGroupCount); ++i) {
+                unmarshal_VkPhysicalDeviceGroupProperties(
+                    stream, VK_STRUCTURE_TYPE_MAX_ENUM,
+                    (VkPhysicalDeviceGroupProperties*)(pPhysicalDeviceGroupProperties + i));
+            }
+        }
+    }
+    if (pPhysicalDeviceGroupCount) {
+        if (pPhysicalDeviceGroupProperties) {
+            for (uint32_t i = 0; i < (uint32_t)(*pPhysicalDeviceGroupCount); ++i) {
+                transform_fromhost_VkPhysicalDeviceGroupProperties(
+                    sResourceTracker,
+                    (VkPhysicalDeviceGroupProperties*)(pPhysicalDeviceGroupProperties + i));
+            }
+        }
+    }
+    VkResult vkEnumeratePhysicalDeviceGroupsKHR_VkResult_return = (VkResult)0;
+    stream->read(&vkEnumeratePhysicalDeviceGroupsKHR_VkResult_return, sizeof(VkResult));
+    ++encodeCount;
+    if (0 == encodeCount % POOL_CLEAR_INTERVAL) {
+        pool->freeAll();
+        stream->clearPool();
+    }
+    if (!queueSubmitWithCommandsEnabled && doLock) this->unlock();
+    return vkEnumeratePhysicalDeviceGroupsKHR_VkResult_return;
 }
 
 #endif
@@ -18829,6 +19141,186 @@ VkResult VkEncoder::vkGetSemaphoreFdKHR(VkDevice device, const VkSemaphoreGetFdI
 }
 
 #endif
+#ifdef VK_KHR_push_descriptor
+void VkEncoder::vkCmdPushDescriptorSetKHR(VkCommandBuffer commandBuffer,
+                                          VkPipelineBindPoint pipelineBindPoint,
+                                          VkPipelineLayout layout, uint32_t set,
+                                          uint32_t descriptorWriteCount,
+                                          const VkWriteDescriptorSet* pDescriptorWrites,
+                                          uint32_t doLock) {
+    (void)doLock;
+    bool queueSubmitWithCommandsEnabled =
+        sFeatureBits & VULKAN_STREAM_FEATURE_QUEUE_SUBMIT_WITH_COMMANDS_BIT;
+    if (!queueSubmitWithCommandsEnabled && doLock) this->lock();
+    auto stream = mImpl->stream();
+    auto pool = mImpl->pool();
+    VkCommandBuffer local_commandBuffer;
+    VkPipelineBindPoint local_pipelineBindPoint;
+    VkPipelineLayout local_layout;
+    uint32_t local_set;
+    uint32_t local_descriptorWriteCount;
+    VkWriteDescriptorSet* local_pDescriptorWrites;
+    local_commandBuffer = commandBuffer;
+    local_pipelineBindPoint = pipelineBindPoint;
+    local_layout = layout;
+    local_set = set;
+    local_descriptorWriteCount = descriptorWriteCount;
+    local_pDescriptorWrites = nullptr;
+    if (pDescriptorWrites) {
+        local_pDescriptorWrites = (VkWriteDescriptorSet*)pool->alloc(
+            descriptorWriteCount * sizeof(const VkWriteDescriptorSet));
+        for (uint32_t i = 0; i < (uint32_t)descriptorWriteCount; ++i) {
+            deepcopy_VkWriteDescriptorSet(pool, VK_STRUCTURE_TYPE_MAX_ENUM, pDescriptorWrites + i,
+                                          (VkWriteDescriptorSet*)(local_pDescriptorWrites + i));
+        }
+    }
+    if (local_pDescriptorWrites) {
+        for (uint32_t i = 0; i < (uint32_t)descriptorWriteCount; ++i) {
+            transform_tohost_VkWriteDescriptorSet(
+                sResourceTracker, (VkWriteDescriptorSet*)(local_pDescriptorWrites + i));
+        }
+    }
+    size_t count = 0;
+    size_t* countPtr = &count;
+    {
+        uint64_t cgen_var_0;
+        (void)cgen_var_0;
+        *countPtr += 1 * 8;
+        *countPtr += sizeof(VkPipelineBindPoint);
+        uint64_t cgen_var_1;
+        (void)cgen_var_1;
+        *countPtr += 1 * 8;
+        *countPtr += sizeof(uint32_t);
+        *countPtr += sizeof(uint32_t);
+        for (uint32_t i = 0; i < (uint32_t)descriptorWriteCount; ++i) {
+            count_VkWriteDescriptorSet(sFeatureBits, VK_STRUCTURE_TYPE_MAX_ENUM,
+                                       (VkWriteDescriptorSet*)(local_pDescriptorWrites + i),
+                                       countPtr);
+        }
+    }
+    uint32_t packetSize_vkCmdPushDescriptorSetKHR = 4 + 4 + count;
+    if (queueSubmitWithCommandsEnabled) packetSize_vkCmdPushDescriptorSetKHR -= 8;
+    uint8_t* streamPtr = stream->reserve(packetSize_vkCmdPushDescriptorSetKHR);
+    uint8_t** streamPtrPtr = &streamPtr;
+    uint32_t opcode_vkCmdPushDescriptorSetKHR = OP_vkCmdPushDescriptorSetKHR;
+    memcpy(streamPtr, &opcode_vkCmdPushDescriptorSetKHR, sizeof(uint32_t));
+    streamPtr += sizeof(uint32_t);
+    memcpy(streamPtr, &packetSize_vkCmdPushDescriptorSetKHR, sizeof(uint32_t));
+    streamPtr += sizeof(uint32_t);
+    if (!queueSubmitWithCommandsEnabled) {
+        uint64_t cgen_var_0;
+        *&cgen_var_0 = gfxstream_vk_command_buffer_to_host_u64((*&local_commandBuffer));
+        memcpy(*streamPtrPtr, (uint64_t*)&cgen_var_0, 1 * 8);
+        *streamPtrPtr += 1 * 8;
+    }
+    memcpy(*streamPtrPtr, (VkPipelineBindPoint*)&local_pipelineBindPoint,
+           sizeof(VkPipelineBindPoint));
+    *streamPtrPtr += sizeof(VkPipelineBindPoint);
+    uint64_t cgen_var_0;
+    *&cgen_var_0 = gfxstream_vk_pipeline_layout_to_host_u64((*&local_layout));
+    memcpy(*streamPtrPtr, (uint64_t*)&cgen_var_0, 1 * 8);
+    *streamPtrPtr += 1 * 8;
+    memcpy(*streamPtrPtr, (uint32_t*)&local_set, sizeof(uint32_t));
+    *streamPtrPtr += sizeof(uint32_t);
+    memcpy(*streamPtrPtr, (uint32_t*)&local_descriptorWriteCount, sizeof(uint32_t));
+    *streamPtrPtr += sizeof(uint32_t);
+    for (uint32_t i = 0; i < (uint32_t)descriptorWriteCount; ++i) {
+        reservedmarshal_VkWriteDescriptorSet(stream, VK_STRUCTURE_TYPE_MAX_ENUM,
+                                             (VkWriteDescriptorSet*)(local_pDescriptorWrites + i),
+                                             streamPtrPtr);
+    }
+    ++encodeCount;
+    if (0 == encodeCount % POOL_CLEAR_INTERVAL) {
+        pool->freeAll();
+        stream->clearPool();
+    }
+    if (!queueSubmitWithCommandsEnabled && doLock) this->unlock();
+}
+
+void VkEncoder::vkCmdPushDescriptorSetWithTemplateKHR(
+    VkCommandBuffer commandBuffer, VkDescriptorUpdateTemplate descriptorUpdateTemplate,
+    VkPipelineLayout layout, uint32_t set, const void* pData, uint32_t doLock) {
+    (void)doLock;
+    bool queueSubmitWithCommandsEnabled =
+        sFeatureBits & VULKAN_STREAM_FEATURE_QUEUE_SUBMIT_WITH_COMMANDS_BIT;
+    if (!queueSubmitWithCommandsEnabled && doLock) this->lock();
+    auto stream = mImpl->stream();
+    auto pool = mImpl->pool();
+    VkCommandBuffer local_commandBuffer;
+    VkDescriptorUpdateTemplate local_descriptorUpdateTemplate;
+    VkPipelineLayout local_layout;
+    uint32_t local_set;
+    void* local_pData;
+    local_commandBuffer = commandBuffer;
+    local_descriptorUpdateTemplate = descriptorUpdateTemplate;
+    local_layout = layout;
+    local_set = set;
+    // Avoiding deepcopy for pData
+    local_pData = (void*)pData;
+    size_t count = 0;
+    size_t* countPtr = &count;
+    {
+        uint64_t cgen_var_0;
+        (void)cgen_var_0;
+        *countPtr += 1 * 8;
+        uint64_t cgen_var_1;
+        (void)cgen_var_1;
+        *countPtr += 1 * 8;
+        uint64_t cgen_var_2;
+        (void)cgen_var_2;
+        *countPtr += 1 * 8;
+        *countPtr += sizeof(uint32_t);
+        // WARNING PTR CHECK
+        *countPtr += 8;
+        if (local_pData) {
+            *countPtr += sizeof(uint8_t);
+        }
+    }
+    uint32_t packetSize_vkCmdPushDescriptorSetWithTemplateKHR = 4 + 4 + count;
+    if (queueSubmitWithCommandsEnabled) packetSize_vkCmdPushDescriptorSetWithTemplateKHR -= 8;
+    uint8_t* streamPtr = stream->reserve(packetSize_vkCmdPushDescriptorSetWithTemplateKHR);
+    uint8_t** streamPtrPtr = &streamPtr;
+    uint32_t opcode_vkCmdPushDescriptorSetWithTemplateKHR =
+        OP_vkCmdPushDescriptorSetWithTemplateKHR;
+    memcpy(streamPtr, &opcode_vkCmdPushDescriptorSetWithTemplateKHR, sizeof(uint32_t));
+    streamPtr += sizeof(uint32_t);
+    memcpy(streamPtr, &packetSize_vkCmdPushDescriptorSetWithTemplateKHR, sizeof(uint32_t));
+    streamPtr += sizeof(uint32_t);
+    if (!queueSubmitWithCommandsEnabled) {
+        uint64_t cgen_var_0;
+        *&cgen_var_0 = gfxstream_vk_command_buffer_to_host_u64((*&local_commandBuffer));
+        memcpy(*streamPtrPtr, (uint64_t*)&cgen_var_0, 1 * 8);
+        *streamPtrPtr += 1 * 8;
+    }
+    uint64_t cgen_var_0;
+    *&cgen_var_0 =
+        gfxstream_vk_descriptor_update_template_to_host_u64((*&local_descriptorUpdateTemplate));
+    memcpy(*streamPtrPtr, (uint64_t*)&cgen_var_0, 1 * 8);
+    *streamPtrPtr += 1 * 8;
+    uint64_t cgen_var_1;
+    *&cgen_var_1 = gfxstream_vk_pipeline_layout_to_host_u64((*&local_layout));
+    memcpy(*streamPtrPtr, (uint64_t*)&cgen_var_1, 1 * 8);
+    *streamPtrPtr += 1 * 8;
+    memcpy(*streamPtrPtr, (uint32_t*)&local_set, sizeof(uint32_t));
+    *streamPtrPtr += sizeof(uint32_t);
+    // WARNING PTR CHECK
+    uint64_t cgen_var_2 = (uint64_t)(uintptr_t)local_pData;
+    memcpy((*streamPtrPtr), &cgen_var_2, 8);
+    gfxstream::aemu::Stream::toBe64((uint8_t*)(*streamPtrPtr));
+    *streamPtrPtr += 8;
+    if (local_pData) {
+        memcpy(*streamPtrPtr, (void*)local_pData, sizeof(uint8_t));
+        *streamPtrPtr += sizeof(uint8_t);
+    }
+    ++encodeCount;
+    if (0 == encodeCount % POOL_CLEAR_INTERVAL) {
+        pool->freeAll();
+        stream->clearPool();
+    }
+    if (!queueSubmitWithCommandsEnabled && doLock) this->unlock();
+}
+
+#endif
 #ifdef VK_KHR_descriptor_update_template
 VkResult VkEncoder::vkCreateDescriptorUpdateTemplateKHR(
     VkDevice device, const VkDescriptorUpdateTemplateCreateInfo* pCreateInfo,
@@ -19092,89 +19584,6 @@ void VkEncoder::vkUpdateDescriptorSetWithTemplateKHR(
         *streamPtrPtr += sizeof(uint8_t);
     }
     stream->flush();
-    ++encodeCount;
-    if (0 == encodeCount % POOL_CLEAR_INTERVAL) {
-        pool->freeAll();
-        stream->clearPool();
-    }
-    if (!queueSubmitWithCommandsEnabled && doLock) this->unlock();
-}
-
-void VkEncoder::vkCmdPushDescriptorSetWithTemplateKHR(
-    VkCommandBuffer commandBuffer, VkDescriptorUpdateTemplate descriptorUpdateTemplate,
-    VkPipelineLayout layout, uint32_t set, const void* pData, uint32_t doLock) {
-    (void)doLock;
-    bool queueSubmitWithCommandsEnabled =
-        sFeatureBits & VULKAN_STREAM_FEATURE_QUEUE_SUBMIT_WITH_COMMANDS_BIT;
-    if (!queueSubmitWithCommandsEnabled && doLock) this->lock();
-    auto stream = mImpl->stream();
-    auto pool = mImpl->pool();
-    VkCommandBuffer local_commandBuffer;
-    VkDescriptorUpdateTemplate local_descriptorUpdateTemplate;
-    VkPipelineLayout local_layout;
-    uint32_t local_set;
-    void* local_pData;
-    local_commandBuffer = commandBuffer;
-    local_descriptorUpdateTemplate = descriptorUpdateTemplate;
-    local_layout = layout;
-    local_set = set;
-    // Avoiding deepcopy for pData
-    local_pData = (void*)pData;
-    size_t count = 0;
-    size_t* countPtr = &count;
-    {
-        uint64_t cgen_var_0;
-        (void)cgen_var_0;
-        *countPtr += 1 * 8;
-        uint64_t cgen_var_1;
-        (void)cgen_var_1;
-        *countPtr += 1 * 8;
-        uint64_t cgen_var_2;
-        (void)cgen_var_2;
-        *countPtr += 1 * 8;
-        *countPtr += sizeof(uint32_t);
-        // WARNING PTR CHECK
-        *countPtr += 8;
-        if (local_pData) {
-            *countPtr += sizeof(uint8_t);
-        }
-    }
-    uint32_t packetSize_vkCmdPushDescriptorSetWithTemplateKHR = 4 + 4 + count;
-    if (queueSubmitWithCommandsEnabled) packetSize_vkCmdPushDescriptorSetWithTemplateKHR -= 8;
-    uint8_t* streamPtr = stream->reserve(packetSize_vkCmdPushDescriptorSetWithTemplateKHR);
-    uint8_t** streamPtrPtr = &streamPtr;
-    uint32_t opcode_vkCmdPushDescriptorSetWithTemplateKHR =
-        OP_vkCmdPushDescriptorSetWithTemplateKHR;
-    memcpy(streamPtr, &opcode_vkCmdPushDescriptorSetWithTemplateKHR, sizeof(uint32_t));
-    streamPtr += sizeof(uint32_t);
-    memcpy(streamPtr, &packetSize_vkCmdPushDescriptorSetWithTemplateKHR, sizeof(uint32_t));
-    streamPtr += sizeof(uint32_t);
-    if (!queueSubmitWithCommandsEnabled) {
-        uint64_t cgen_var_0;
-        *&cgen_var_0 = gfxstream_vk_command_buffer_to_host_u64((*&local_commandBuffer));
-        memcpy(*streamPtrPtr, (uint64_t*)&cgen_var_0, 1 * 8);
-        *streamPtrPtr += 1 * 8;
-    }
-    uint64_t cgen_var_0;
-    *&cgen_var_0 =
-        gfxstream_vk_descriptor_update_template_to_host_u64((*&local_descriptorUpdateTemplate));
-    memcpy(*streamPtrPtr, (uint64_t*)&cgen_var_0, 1 * 8);
-    *streamPtrPtr += 1 * 8;
-    uint64_t cgen_var_1;
-    *&cgen_var_1 = gfxstream_vk_pipeline_layout_to_host_u64((*&local_layout));
-    memcpy(*streamPtrPtr, (uint64_t*)&cgen_var_1, 1 * 8);
-    *streamPtrPtr += 1 * 8;
-    memcpy(*streamPtrPtr, (uint32_t*)&local_set, sizeof(uint32_t));
-    *streamPtrPtr += sizeof(uint32_t);
-    // WARNING PTR CHECK
-    uint64_t cgen_var_2 = (uint64_t)(uintptr_t)local_pData;
-    memcpy((*streamPtrPtr), &cgen_var_2, 8);
-    gfxstream::aemu::Stream::toBe64((uint8_t*)(*streamPtrPtr));
-    *streamPtrPtr += 8;
-    if (local_pData) {
-        memcpy(*streamPtrPtr, (void*)local_pData, sizeof(uint8_t));
-        *streamPtrPtr += sizeof(uint8_t);
-    }
     ++encodeCount;
     if (0 == encodeCount % POOL_CLEAR_INTERVAL) {
         pool->freeAll();
@@ -20409,6 +20818,324 @@ void VkEncoder::vkGetDescriptorSetLayoutSupportKHR(
         transform_fromhost_VkDescriptorSetLayoutSupport(sResourceTracker,
                                                         (VkDescriptorSetLayoutSupport*)(pSupport));
     }
+    ++encodeCount;
+    if (0 == encodeCount % POOL_CLEAR_INTERVAL) {
+        pool->freeAll();
+        stream->clearPool();
+    }
+    if (!queueSubmitWithCommandsEnabled && doLock) this->unlock();
+}
+
+#endif
+#ifdef VK_KHR_timeline_semaphore
+VkResult VkEncoder::vkGetSemaphoreCounterValueKHR(VkDevice device, VkSemaphore semaphore,
+                                                  uint64_t* pValue, uint32_t doLock) {
+    (void)doLock;
+    bool queueSubmitWithCommandsEnabled =
+        sFeatureBits & VULKAN_STREAM_FEATURE_QUEUE_SUBMIT_WITH_COMMANDS_BIT;
+    if (!queueSubmitWithCommandsEnabled && doLock) this->lock();
+    auto stream = mImpl->stream();
+    auto pool = mImpl->pool();
+    VkDevice local_device;
+    VkSemaphore local_semaphore;
+    local_device = device;
+    local_semaphore = semaphore;
+    size_t count = 0;
+    size_t* countPtr = &count;
+    {
+        uint64_t cgen_var_0;
+        (void)cgen_var_0;
+        *countPtr += 1 * 8;
+        uint64_t cgen_var_1;
+        (void)cgen_var_1;
+        *countPtr += 1 * 8;
+        *countPtr += sizeof(uint64_t);
+    }
+    uint32_t packetSize_vkGetSemaphoreCounterValueKHR =
+        4 + 4 + (queueSubmitWithCommandsEnabled ? 4 : 0) + count;
+    uint8_t* streamPtr = stream->reserve(packetSize_vkGetSemaphoreCounterValueKHR);
+    uint8_t** streamPtrPtr = &streamPtr;
+    uint32_t opcode_vkGetSemaphoreCounterValueKHR = OP_vkGetSemaphoreCounterValueKHR;
+    uint32_t seqno;
+    if (queueSubmitWithCommandsEnabled) seqno = ResourceTracker::nextSeqno();
+    memcpy(streamPtr, &opcode_vkGetSemaphoreCounterValueKHR, sizeof(uint32_t));
+    streamPtr += sizeof(uint32_t);
+    memcpy(streamPtr, &packetSize_vkGetSemaphoreCounterValueKHR, sizeof(uint32_t));
+    streamPtr += sizeof(uint32_t);
+    if (queueSubmitWithCommandsEnabled) {
+        memcpy(streamPtr, &seqno, sizeof(uint32_t));
+        streamPtr += sizeof(uint32_t);
+    }
+    uint64_t cgen_var_0;
+    *&cgen_var_0 = gfxstream_vk_device_to_host_u64((*&local_device));
+    memcpy(*streamPtrPtr, (uint64_t*)&cgen_var_0, 1 * 8);
+    *streamPtrPtr += 1 * 8;
+    uint64_t cgen_var_1;
+    *&cgen_var_1 = gfxstream_vk_semaphore_to_host_u64((*&local_semaphore));
+    memcpy(*streamPtrPtr, (uint64_t*)&cgen_var_1, 1 * 8);
+    *streamPtrPtr += 1 * 8;
+    memcpy(*streamPtrPtr, (uint64_t*)pValue, sizeof(uint64_t));
+    *streamPtrPtr += sizeof(uint64_t);
+    stream->read((uint64_t*)pValue, sizeof(uint64_t));
+    VkResult vkGetSemaphoreCounterValueKHR_VkResult_return = (VkResult)0;
+    stream->read(&vkGetSemaphoreCounterValueKHR_VkResult_return, sizeof(VkResult));
+    ++encodeCount;
+    if (0 == encodeCount % POOL_CLEAR_INTERVAL) {
+        pool->freeAll();
+        stream->clearPool();
+    }
+    if (!queueSubmitWithCommandsEnabled && doLock) this->unlock();
+    return vkGetSemaphoreCounterValueKHR_VkResult_return;
+}
+
+VkResult VkEncoder::vkWaitSemaphoresKHR(VkDevice device, const VkSemaphoreWaitInfo* pWaitInfo,
+                                        uint64_t timeout, uint32_t doLock) {
+    (void)doLock;
+    bool queueSubmitWithCommandsEnabled =
+        sFeatureBits & VULKAN_STREAM_FEATURE_QUEUE_SUBMIT_WITH_COMMANDS_BIT;
+    if (!queueSubmitWithCommandsEnabled && doLock) this->lock();
+    auto stream = mImpl->stream();
+    auto pool = mImpl->pool();
+    VkDevice local_device;
+    VkSemaphoreWaitInfo* local_pWaitInfo;
+    uint64_t local_timeout;
+    local_device = device;
+    local_pWaitInfo = nullptr;
+    if (pWaitInfo) {
+        local_pWaitInfo = (VkSemaphoreWaitInfo*)pool->alloc(sizeof(const VkSemaphoreWaitInfo));
+        deepcopy_VkSemaphoreWaitInfo(pool, VK_STRUCTURE_TYPE_MAX_ENUM, pWaitInfo,
+                                     (VkSemaphoreWaitInfo*)(local_pWaitInfo));
+    }
+    local_timeout = timeout;
+    if (local_pWaitInfo) {
+        transform_tohost_VkSemaphoreWaitInfo(sResourceTracker,
+                                             (VkSemaphoreWaitInfo*)(local_pWaitInfo));
+    }
+    size_t count = 0;
+    size_t* countPtr = &count;
+    {
+        uint64_t cgen_var_0;
+        (void)cgen_var_0;
+        *countPtr += 1 * 8;
+        count_VkSemaphoreWaitInfo(sFeatureBits, VK_STRUCTURE_TYPE_MAX_ENUM,
+                                  (VkSemaphoreWaitInfo*)(local_pWaitInfo), countPtr);
+        *countPtr += sizeof(uint64_t);
+    }
+    uint32_t packetSize_vkWaitSemaphoresKHR =
+        4 + 4 + (queueSubmitWithCommandsEnabled ? 4 : 0) + count;
+    uint8_t* streamPtr = stream->reserve(packetSize_vkWaitSemaphoresKHR);
+    uint8_t** streamPtrPtr = &streamPtr;
+    uint32_t opcode_vkWaitSemaphoresKHR = OP_vkWaitSemaphoresKHR;
+    uint32_t seqno;
+    if (queueSubmitWithCommandsEnabled) seqno = ResourceTracker::nextSeqno();
+    memcpy(streamPtr, &opcode_vkWaitSemaphoresKHR, sizeof(uint32_t));
+    streamPtr += sizeof(uint32_t);
+    memcpy(streamPtr, &packetSize_vkWaitSemaphoresKHR, sizeof(uint32_t));
+    streamPtr += sizeof(uint32_t);
+    if (queueSubmitWithCommandsEnabled) {
+        memcpy(streamPtr, &seqno, sizeof(uint32_t));
+        streamPtr += sizeof(uint32_t);
+    }
+    uint64_t cgen_var_0;
+    *&cgen_var_0 = gfxstream_vk_device_to_host_u64((*&local_device));
+    memcpy(*streamPtrPtr, (uint64_t*)&cgen_var_0, 1 * 8);
+    *streamPtrPtr += 1 * 8;
+    reservedmarshal_VkSemaphoreWaitInfo(stream, VK_STRUCTURE_TYPE_MAX_ENUM,
+                                        (VkSemaphoreWaitInfo*)(local_pWaitInfo), streamPtrPtr);
+    memcpy(*streamPtrPtr, (uint64_t*)&local_timeout, sizeof(uint64_t));
+    *streamPtrPtr += sizeof(uint64_t);
+    VkResult vkWaitSemaphoresKHR_VkResult_return = (VkResult)0;
+    stream->read(&vkWaitSemaphoresKHR_VkResult_return, sizeof(VkResult));
+    ++encodeCount;
+    if (0 == encodeCount % POOL_CLEAR_INTERVAL) {
+        pool->freeAll();
+        stream->clearPool();
+    }
+    if (!queueSubmitWithCommandsEnabled && doLock) this->unlock();
+    return vkWaitSemaphoresKHR_VkResult_return;
+}
+
+VkResult VkEncoder::vkSignalSemaphoreKHR(VkDevice device, const VkSemaphoreSignalInfo* pSignalInfo,
+                                         uint32_t doLock) {
+    (void)doLock;
+    bool queueSubmitWithCommandsEnabled =
+        sFeatureBits & VULKAN_STREAM_FEATURE_QUEUE_SUBMIT_WITH_COMMANDS_BIT;
+    if (!queueSubmitWithCommandsEnabled && doLock) this->lock();
+    auto stream = mImpl->stream();
+    auto pool = mImpl->pool();
+    VkDevice local_device;
+    VkSemaphoreSignalInfo* local_pSignalInfo;
+    local_device = device;
+    local_pSignalInfo = nullptr;
+    if (pSignalInfo) {
+        local_pSignalInfo =
+            (VkSemaphoreSignalInfo*)pool->alloc(sizeof(const VkSemaphoreSignalInfo));
+        deepcopy_VkSemaphoreSignalInfo(pool, VK_STRUCTURE_TYPE_MAX_ENUM, pSignalInfo,
+                                       (VkSemaphoreSignalInfo*)(local_pSignalInfo));
+    }
+    if (local_pSignalInfo) {
+        transform_tohost_VkSemaphoreSignalInfo(sResourceTracker,
+                                               (VkSemaphoreSignalInfo*)(local_pSignalInfo));
+    }
+    size_t count = 0;
+    size_t* countPtr = &count;
+    {
+        uint64_t cgen_var_0;
+        (void)cgen_var_0;
+        *countPtr += 1 * 8;
+        count_VkSemaphoreSignalInfo(sFeatureBits, VK_STRUCTURE_TYPE_MAX_ENUM,
+                                    (VkSemaphoreSignalInfo*)(local_pSignalInfo), countPtr);
+    }
+    uint32_t packetSize_vkSignalSemaphoreKHR =
+        4 + 4 + (queueSubmitWithCommandsEnabled ? 4 : 0) + count;
+    uint8_t* streamPtr = stream->reserve(packetSize_vkSignalSemaphoreKHR);
+    uint8_t** streamPtrPtr = &streamPtr;
+    uint32_t opcode_vkSignalSemaphoreKHR = OP_vkSignalSemaphoreKHR;
+    uint32_t seqno;
+    if (queueSubmitWithCommandsEnabled) seqno = ResourceTracker::nextSeqno();
+    memcpy(streamPtr, &opcode_vkSignalSemaphoreKHR, sizeof(uint32_t));
+    streamPtr += sizeof(uint32_t);
+    memcpy(streamPtr, &packetSize_vkSignalSemaphoreKHR, sizeof(uint32_t));
+    streamPtr += sizeof(uint32_t);
+    if (queueSubmitWithCommandsEnabled) {
+        memcpy(streamPtr, &seqno, sizeof(uint32_t));
+        streamPtr += sizeof(uint32_t);
+    }
+    uint64_t cgen_var_0;
+    *&cgen_var_0 = gfxstream_vk_device_to_host_u64((*&local_device));
+    memcpy(*streamPtrPtr, (uint64_t*)&cgen_var_0, 1 * 8);
+    *streamPtrPtr += 1 * 8;
+    reservedmarshal_VkSemaphoreSignalInfo(stream, VK_STRUCTURE_TYPE_MAX_ENUM,
+                                          (VkSemaphoreSignalInfo*)(local_pSignalInfo),
+                                          streamPtrPtr);
+    VkResult vkSignalSemaphoreKHR_VkResult_return = (VkResult)0;
+    stream->read(&vkSignalSemaphoreKHR_VkResult_return, sizeof(VkResult));
+    ++encodeCount;
+    if (0 == encodeCount % POOL_CLEAR_INTERVAL) {
+        pool->freeAll();
+        stream->clearPool();
+    }
+    if (!queueSubmitWithCommandsEnabled && doLock) this->unlock();
+    return vkSignalSemaphoreKHR_VkResult_return;
+}
+
+#endif
+#ifdef VK_KHR_dynamic_rendering_local_read
+void VkEncoder::vkCmdSetRenderingAttachmentLocationsKHR(
+    VkCommandBuffer commandBuffer, const VkRenderingAttachmentLocationInfo* pLocationInfo,
+    uint32_t doLock) {
+    (void)doLock;
+    bool queueSubmitWithCommandsEnabled =
+        sFeatureBits & VULKAN_STREAM_FEATURE_QUEUE_SUBMIT_WITH_COMMANDS_BIT;
+    if (!queueSubmitWithCommandsEnabled && doLock) this->lock();
+    auto stream = mImpl->stream();
+    auto pool = mImpl->pool();
+    VkCommandBuffer local_commandBuffer;
+    VkRenderingAttachmentLocationInfo* local_pLocationInfo;
+    local_commandBuffer = commandBuffer;
+    local_pLocationInfo = nullptr;
+    if (pLocationInfo) {
+        local_pLocationInfo = (VkRenderingAttachmentLocationInfo*)pool->alloc(
+            sizeof(const VkRenderingAttachmentLocationInfo));
+        deepcopy_VkRenderingAttachmentLocationInfo(
+            pool, VK_STRUCTURE_TYPE_MAX_ENUM, pLocationInfo,
+            (VkRenderingAttachmentLocationInfo*)(local_pLocationInfo));
+    }
+    if (local_pLocationInfo) {
+        transform_tohost_VkRenderingAttachmentLocationInfo(
+            sResourceTracker, (VkRenderingAttachmentLocationInfo*)(local_pLocationInfo));
+    }
+    size_t count = 0;
+    size_t* countPtr = &count;
+    {
+        uint64_t cgen_var_0;
+        (void)cgen_var_0;
+        *countPtr += 1 * 8;
+        count_VkRenderingAttachmentLocationInfo(
+            sFeatureBits, VK_STRUCTURE_TYPE_MAX_ENUM,
+            (VkRenderingAttachmentLocationInfo*)(local_pLocationInfo), countPtr);
+    }
+    uint32_t packetSize_vkCmdSetRenderingAttachmentLocationsKHR = 4 + 4 + count;
+    if (queueSubmitWithCommandsEnabled) packetSize_vkCmdSetRenderingAttachmentLocationsKHR -= 8;
+    uint8_t* streamPtr = stream->reserve(packetSize_vkCmdSetRenderingAttachmentLocationsKHR);
+    uint8_t** streamPtrPtr = &streamPtr;
+    uint32_t opcode_vkCmdSetRenderingAttachmentLocationsKHR =
+        OP_vkCmdSetRenderingAttachmentLocationsKHR;
+    memcpy(streamPtr, &opcode_vkCmdSetRenderingAttachmentLocationsKHR, sizeof(uint32_t));
+    streamPtr += sizeof(uint32_t);
+    memcpy(streamPtr, &packetSize_vkCmdSetRenderingAttachmentLocationsKHR, sizeof(uint32_t));
+    streamPtr += sizeof(uint32_t);
+    if (!queueSubmitWithCommandsEnabled) {
+        uint64_t cgen_var_0;
+        *&cgen_var_0 = gfxstream_vk_command_buffer_to_host_u64((*&local_commandBuffer));
+        memcpy(*streamPtrPtr, (uint64_t*)&cgen_var_0, 1 * 8);
+        *streamPtrPtr += 1 * 8;
+    }
+    reservedmarshal_VkRenderingAttachmentLocationInfo(
+        stream, VK_STRUCTURE_TYPE_MAX_ENUM,
+        (VkRenderingAttachmentLocationInfo*)(local_pLocationInfo), streamPtrPtr);
+    ++encodeCount;
+    if (0 == encodeCount % POOL_CLEAR_INTERVAL) {
+        pool->freeAll();
+        stream->clearPool();
+    }
+    if (!queueSubmitWithCommandsEnabled && doLock) this->unlock();
+}
+
+void VkEncoder::vkCmdSetRenderingInputAttachmentIndicesKHR(
+    VkCommandBuffer commandBuffer,
+    const VkRenderingInputAttachmentIndexInfo* pInputAttachmentIndexInfo, uint32_t doLock) {
+    (void)doLock;
+    bool queueSubmitWithCommandsEnabled =
+        sFeatureBits & VULKAN_STREAM_FEATURE_QUEUE_SUBMIT_WITH_COMMANDS_BIT;
+    if (!queueSubmitWithCommandsEnabled && doLock) this->lock();
+    auto stream = mImpl->stream();
+    auto pool = mImpl->pool();
+    VkCommandBuffer local_commandBuffer;
+    VkRenderingInputAttachmentIndexInfo* local_pInputAttachmentIndexInfo;
+    local_commandBuffer = commandBuffer;
+    local_pInputAttachmentIndexInfo = nullptr;
+    if (pInputAttachmentIndexInfo) {
+        local_pInputAttachmentIndexInfo = (VkRenderingInputAttachmentIndexInfo*)pool->alloc(
+            sizeof(const VkRenderingInputAttachmentIndexInfo));
+        deepcopy_VkRenderingInputAttachmentIndexInfo(
+            pool, VK_STRUCTURE_TYPE_MAX_ENUM, pInputAttachmentIndexInfo,
+            (VkRenderingInputAttachmentIndexInfo*)(local_pInputAttachmentIndexInfo));
+    }
+    if (local_pInputAttachmentIndexInfo) {
+        transform_tohost_VkRenderingInputAttachmentIndexInfo(
+            sResourceTracker,
+            (VkRenderingInputAttachmentIndexInfo*)(local_pInputAttachmentIndexInfo));
+    }
+    size_t count = 0;
+    size_t* countPtr = &count;
+    {
+        uint64_t cgen_var_0;
+        (void)cgen_var_0;
+        *countPtr += 1 * 8;
+        count_VkRenderingInputAttachmentIndexInfo(
+            sFeatureBits, VK_STRUCTURE_TYPE_MAX_ENUM,
+            (VkRenderingInputAttachmentIndexInfo*)(local_pInputAttachmentIndexInfo), countPtr);
+    }
+    uint32_t packetSize_vkCmdSetRenderingInputAttachmentIndicesKHR = 4 + 4 + count;
+    if (queueSubmitWithCommandsEnabled) packetSize_vkCmdSetRenderingInputAttachmentIndicesKHR -= 8;
+    uint8_t* streamPtr = stream->reserve(packetSize_vkCmdSetRenderingInputAttachmentIndicesKHR);
+    uint8_t** streamPtrPtr = &streamPtr;
+    uint32_t opcode_vkCmdSetRenderingInputAttachmentIndicesKHR =
+        OP_vkCmdSetRenderingInputAttachmentIndicesKHR;
+    memcpy(streamPtr, &opcode_vkCmdSetRenderingInputAttachmentIndicesKHR, sizeof(uint32_t));
+    streamPtr += sizeof(uint32_t);
+    memcpy(streamPtr, &packetSize_vkCmdSetRenderingInputAttachmentIndicesKHR, sizeof(uint32_t));
+    streamPtr += sizeof(uint32_t);
+    if (!queueSubmitWithCommandsEnabled) {
+        uint64_t cgen_var_0;
+        *&cgen_var_0 = gfxstream_vk_command_buffer_to_host_u64((*&local_commandBuffer));
+        memcpy(*streamPtrPtr, (uint64_t*)&cgen_var_0, 1 * 8);
+        *streamPtrPtr += 1 * 8;
+    }
+    reservedmarshal_VkRenderingInputAttachmentIndexInfo(
+        stream, VK_STRUCTURE_TYPE_MAX_ENUM,
+        (VkRenderingInputAttachmentIndexInfo*)(local_pInputAttachmentIndexInfo), streamPtrPtr);
     ++encodeCount;
     if (0 == encodeCount % POOL_CLEAR_INTERVAL) {
         pool->freeAll();

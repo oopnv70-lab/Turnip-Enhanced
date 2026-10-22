@@ -251,7 +251,12 @@ static bool gather_fs_data_pass(struct nir_builder *b,
    }
 
    case nir_intrinsic_load_blend_const_color_rgba:
-      data->fs.blend_consts_needed |= PIPE_MASK_RGBA;
+   case nir_intrinsic_load_blend_const_color_r_float:
+   case nir_intrinsic_load_blend_const_color_g_float:
+   case nir_intrinsic_load_blend_const_color_b_float:
+   case nir_intrinsic_load_blend_const_color_a_float:
+      data->fs.blend_consts_needed |=
+         pco_nir_blend_load_to_mask(intr->intrinsic);
       break;
 
    case nir_intrinsic_load_front_face_op_pco:
@@ -446,6 +451,7 @@ static inline bool is_inline_ubo(unsigned desc_set,
                                  unsigned binding,
                                  const pco_common_data *common)
 {
+   assert(desc_set < ARRAY_SIZE(common->desc_sets));
    const pco_descriptor_set_data *desc_set_data = &common->desc_sets[desc_set];
    assert(desc_set_data->bindings && binding < desc_set_data->binding_count);
 

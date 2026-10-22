@@ -23,41 +23,12 @@ static const struct u_grallocs {
    enum u_gralloc_type type;
    struct u_gralloc *(*create)();
 } u_grallocs[] = {
-#ifdef USE_IMAPPER_STABLEC_API
-   /* Prefer the VINTF-stable AIMapper C interface on Android 15+; it is
-    * the documented gralloc 5 metadata transport and requires no
-    * GPU-specific knowledge.
-    */
-   {.type = U_GRALLOC_TYPE_STABLEC, .create = u_gralloc_stablec_api_create},
-#endif /* USE_IMAPPER_STABLEC_API */
-#ifdef USE_IMAPPER4_PT_API
-   /* Then the gralloc 4 era HIDL IMapper@4.0 passthrough contract: the
-    * vendor-implemented android.hardware.graphics.mapper@4.0-impl*.so is
-    * loaded in-process through the documented extern-C HIDL_FETCH_IMapper
-    * entry point and queried only through standard gralloc4 metadata
-    * keys.  This mirrors how the platform reaches passthrough HALs.
-    */
-   {.type = U_GRALLOC_TYPE_IMAPPER4_PT,
-    .create = u_gralloc_imapper4_pt_api_create},
-#endif /* USE_IMAPPER4_PT_API */
-#ifndef U_GRALLOC_STRICT_STANDARD
    /* Prefer the CrOS API as it is significantly faster than IMapper4 */
    {.type = U_GRALLOC_TYPE_CROS, .create = u_gralloc_cros_api_create},
-#endif /* !U_GRALLOC_STRICT_STANDARD */
 #ifdef USE_IMAPPER4_METADATA_API
    {.type = U_GRALLOC_TYPE_GRALLOC4, .create = u_gralloc_imapper_api_create},
 #endif /* USE_IMAPPER4_METADATA_API */
-#ifndef U_GRALLOC_STRICT_STANDARD
    {.type = U_GRALLOC_TYPE_LIBDRM, .create = u_gralloc_libdrm_create},
-#endif /* !U_GRALLOC_STRICT_STANDARD */
-   /* Legacy Qualcomm gralloc (the gralloc1 / mapper@2 generation, e.g.
-    * SDM845 devices on Android 15) has no standard metadata transport at
-    * all; this backend serves those devices through the vendor perform
-    * protocol and the format table in u_gralloc_qti_semantics.h.  It
-    * self-identifies by the legacy module identity and a working perform
-    * probe before any buffer is decoded, and the standard backends above
-    * are always tried first, so it stays inert on modern devices.
-    */
    {.type = U_GRALLOC_TYPE_QCOM, .create = u_gralloc_qcom_create},
    {.type = U_GRALLOC_TYPE_FALLBACK, .create = u_gralloc_fallback_create},
 };
@@ -91,21 +62,6 @@ u_gralloc_create(enum u_gralloc_type type)
 
          u_gralloc_cache[type].u_gralloc->type = u_grallocs[i].type;
          u_gralloc_cache[type].refcount = 1;
-
-         if (type == U_GRALLOC_TYPE_AUTO) {
-            const char *name = "unknown";
-            switch (u_grallocs[i].type) {
-            case U_GRALLOC_TYPE_CROS:     name = "cros"; break;
-            case U_GRALLOC_TYPE_GRALLOC4: name = "imapper4/5"; break;
-            case U_GRALLOC_TYPE_LIBDRM:   name = "libdrm"; break;
-            case U_GRALLOC_TYPE_QCOM:     name = "gralloc1-qcom"; break;
-            case U_GRALLOC_TYPE_FALLBACK: name = "fallback"; break;
-            case U_GRALLOC_TYPE_STABLEC:  name = "imapper-stable-c"; break;
-            case U_GRALLOC_TYPE_IMAPPER4_PT: name = "imapper4-passthrough"; break;
-            default: break;
-            }
-            mesa_logi("u_gralloc: auto-selected backend: %s", name);
-         }
 
          out_gralloc = u_gralloc_cache[type].u_gralloc;
          goto out;

@@ -919,7 +919,7 @@ jay_process_nir(const struct intel_device_info *devinfo,
       JAY_NIR_PASS(nir_lower_io_to_scalar, nir_var_shader_in, NULL, NULL);
 
       if (!brw_can_coherent_fb_fetch(devinfo))
-         JAY_NIR_PASS(brw_nir_lower_fs_load_output, &key->fs);
+         JAY_NIR_PASS(brw_nir_lower_fs_load_output, &key->fs, 0);
 
       /* Do this lowering before jay_populate_prog_data(). */
       JAY_NIR_PASS(nir_opt_frag_coord_to_pixel_coord);
@@ -1228,15 +1228,17 @@ jay_process_nir_for_simd(const struct intel_device_info *devinfo,
 
       /* ...but this is more subtle. nir_opt_load_skip_helpers flags texturing
        * operations that we can skip for bandwidth savings.  We need divergence
-       * info for this, so we run late.
-       *
-       * We may or may not want to force track_helpers on if this makes
-       * progress. Possibly driconf'ing on furmark makes sense.
+       * info for this, so we run late. Of course, if we don't spawn helper
+       * threads and we don't demote anything, there will never be helpers
+       * active so there's nothing to skip in software.
        */
       struct nir_opt_load_skip_helpers_options skip_helpers = {
          .no_add_divergence = true
       };
-      JAY_NIR_PASS(nir_opt_load_skip_helpers, &skip_helpers);
+      if (params->prog_data->fs.uses_vmask || nir->info.fs.uses_discard) {
+         *track_helpers |=
+            JAY_NIR_PASS(nir_opt_load_skip_helpers, &skip_helpers);
+      }
    } else {
       jay_populate_prog_data(devinfo, nir, params->prog_data, params->key, NULL);
    }

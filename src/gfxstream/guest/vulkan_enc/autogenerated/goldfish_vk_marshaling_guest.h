@@ -1529,8 +1529,41 @@ DEFINE_ALIAS_FUNCTION(unmarshal_VkPhysicalDeviceSparseImageFormatInfo2,
 #define OP_vkGetPhysicalDeviceMemoryProperties2KHR 20203
 #define OP_vkGetPhysicalDeviceSparseImageFormatProperties2KHR 20204
 #endif
+#ifdef VK_KHR_device_group
+DEFINE_ALIAS_FUNCTION(unmarshal_VkMemoryAllocateFlagsInfo, unmarshal_VkMemoryAllocateFlagsInfoKHR)
+
+DEFINE_ALIAS_FUNCTION(unmarshal_VkDeviceGroupRenderPassBeginInfo,
+                      unmarshal_VkDeviceGroupRenderPassBeginInfoKHR)
+
+DEFINE_ALIAS_FUNCTION(unmarshal_VkDeviceGroupCommandBufferBeginInfo,
+                      unmarshal_VkDeviceGroupCommandBufferBeginInfoKHR)
+
+DEFINE_ALIAS_FUNCTION(unmarshal_VkDeviceGroupSubmitInfo, unmarshal_VkDeviceGroupSubmitInfoKHR)
+
+DEFINE_ALIAS_FUNCTION(unmarshal_VkDeviceGroupBindSparseInfo,
+                      unmarshal_VkDeviceGroupBindSparseInfoKHR)
+
+#define OP_vkGetDeviceGroupPeerMemoryFeaturesKHR 20205
+#define OP_vkCmdSetDeviceMaskKHR 20206
+#define OP_vkCmdDispatchBaseKHR 20207
+DEFINE_ALIAS_FUNCTION(unmarshal_VkBindBufferMemoryDeviceGroupInfo,
+                      unmarshal_VkBindBufferMemoryDeviceGroupInfoKHR)
+
+DEFINE_ALIAS_FUNCTION(unmarshal_VkBindImageMemoryDeviceGroupInfo,
+                      unmarshal_VkBindImageMemoryDeviceGroupInfoKHR)
+
+#endif
 #ifdef VK_KHR_maintenance1
 #define OP_vkTrimCommandPoolKHR 20208
+#endif
+#ifdef VK_KHR_device_group_creation
+DEFINE_ALIAS_FUNCTION(unmarshal_VkPhysicalDeviceGroupProperties,
+                      unmarshal_VkPhysicalDeviceGroupPropertiesKHR)
+
+DEFINE_ALIAS_FUNCTION(unmarshal_VkDeviceGroupDeviceCreateInfo,
+                      unmarshal_VkDeviceGroupDeviceCreateInfoKHR)
+
+#define OP_vkEnumeratePhysicalDeviceGroupsKHR 20209
 #endif
 #ifdef VK_KHR_external_memory_capabilities
 DEFINE_ALIAS_FUNCTION(unmarshal_VkExternalMemoryProperties, unmarshal_VkExternalMemoryPropertiesKHR)
@@ -1585,6 +1618,13 @@ void unmarshal_VkSemaphoreGetFdInfoKHR(VulkanStreamGuest* vkStream, VkStructureT
 #define OP_vkImportSemaphoreFdKHR 20218
 #define OP_vkGetSemaphoreFdKHR 20219
 #endif
+#ifdef VK_KHR_push_descriptor
+DEFINE_ALIAS_FUNCTION(unmarshal_VkPhysicalDevicePushDescriptorProperties,
+                      unmarshal_VkPhysicalDevicePushDescriptorPropertiesKHR)
+
+#define OP_vkCmdPushDescriptorSetKHR 20220
+#define OP_vkCmdPushDescriptorSetWithTemplateKHR 20221
+#endif
 #ifdef VK_KHR_shader_float16_int8
 DEFINE_ALIAS_FUNCTION(unmarshal_VkPhysicalDeviceShaderFloat16Int8Features,
                       unmarshal_VkPhysicalDeviceShaderFloat16Int8FeaturesKHR)
@@ -1614,7 +1654,6 @@ DEFINE_ALIAS_FUNCTION(unmarshal_VkDescriptorUpdateTemplateCreateInfo,
 #define OP_vkCreateDescriptorUpdateTemplateKHR 20222
 #define OP_vkDestroyDescriptorUpdateTemplateKHR 20223
 #define OP_vkUpdateDescriptorSetWithTemplateKHR 20224
-#define OP_vkCmdPushDescriptorSetWithTemplateKHR 20221
 #endif
 #ifdef VK_KHR_imageless_framebuffer
 DEFINE_ALIAS_FUNCTION(unmarshal_VkPhysicalDeviceImagelessFramebufferFeatures,
@@ -1774,6 +1813,34 @@ DEFINE_ALIAS_FUNCTION(unmarshal_VkQueueFamilyGlobalPriorityProperties,
                       unmarshal_VkQueueFamilyGlobalPriorityPropertiesKHR)
 
 #endif
+#ifdef VK_KHR_depth_stencil_resolve
+DEFINE_ALIAS_FUNCTION(unmarshal_VkSubpassDescriptionDepthStencilResolve,
+                      unmarshal_VkSubpassDescriptionDepthStencilResolveKHR)
+
+DEFINE_ALIAS_FUNCTION(unmarshal_VkPhysicalDeviceDepthStencilResolveProperties,
+                      unmarshal_VkPhysicalDeviceDepthStencilResolvePropertiesKHR)
+
+#endif
+#ifdef VK_KHR_timeline_semaphore
+DEFINE_ALIAS_FUNCTION(unmarshal_VkPhysicalDeviceTimelineSemaphoreFeatures,
+                      unmarshal_VkPhysicalDeviceTimelineSemaphoreFeaturesKHR)
+
+DEFINE_ALIAS_FUNCTION(unmarshal_VkPhysicalDeviceTimelineSemaphoreProperties,
+                      unmarshal_VkPhysicalDeviceTimelineSemaphorePropertiesKHR)
+
+DEFINE_ALIAS_FUNCTION(unmarshal_VkSemaphoreTypeCreateInfo, unmarshal_VkSemaphoreTypeCreateInfoKHR)
+
+DEFINE_ALIAS_FUNCTION(unmarshal_VkTimelineSemaphoreSubmitInfo,
+                      unmarshal_VkTimelineSemaphoreSubmitInfoKHR)
+
+DEFINE_ALIAS_FUNCTION(unmarshal_VkSemaphoreWaitInfo, unmarshal_VkSemaphoreWaitInfoKHR)
+
+DEFINE_ALIAS_FUNCTION(unmarshal_VkSemaphoreSignalInfo, unmarshal_VkSemaphoreSignalInfoKHR)
+
+#define OP_vkGetSemaphoreCounterValueKHR 229059496
+#define OP_vkWaitSemaphoresKHR 263904357
+#define OP_vkSignalSemaphoreKHR 269919108
+#endif
 #ifdef VK_KHR_vulkan_memory_model
 DEFINE_ALIAS_FUNCTION(unmarshal_VkPhysicalDeviceVulkanMemoryModelFeatures,
                       unmarshal_VkPhysicalDeviceVulkanMemoryModelFeaturesKHR)
@@ -1783,6 +1850,19 @@ DEFINE_ALIAS_FUNCTION(unmarshal_VkPhysicalDeviceVulkanMemoryModelFeatures,
 DEFINE_ALIAS_FUNCTION(unmarshal_VkPhysicalDeviceShaderTerminateInvocationFeatures,
                       unmarshal_VkPhysicalDeviceShaderTerminateInvocationFeaturesKHR)
 
+#endif
+#ifdef VK_KHR_dynamic_rendering_local_read
+DEFINE_ALIAS_FUNCTION(unmarshal_VkPhysicalDeviceDynamicRenderingLocalReadFeatures,
+                      unmarshal_VkPhysicalDeviceDynamicRenderingLocalReadFeaturesKHR)
+
+DEFINE_ALIAS_FUNCTION(unmarshal_VkRenderingAttachmentLocationInfo,
+                      unmarshal_VkRenderingAttachmentLocationInfoKHR)
+
+DEFINE_ALIAS_FUNCTION(unmarshal_VkRenderingInputAttachmentIndexInfo,
+                      unmarshal_VkRenderingInputAttachmentIndexInfoKHR)
+
+#define OP_vkCmdSetRenderingAttachmentLocationsKHR 232117923
+#define OP_vkCmdSetRenderingInputAttachmentIndicesKHR 250486843
 #endif
 #ifdef VK_KHR_buffer_device_address
 DEFINE_ALIAS_FUNCTION(unmarshal_VkPhysicalDeviceBufferDeviceAddressFeatures,

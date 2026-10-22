@@ -1459,6 +1459,8 @@ optimizations.extend([
     )
    ),
 
+   (('bcsel', ('ine', ('iand@32', a, '#b(is_pos_power_of_two)'), 0), b, 0), ('iand', a, b)),
+
    (('b2i32', ('ine', ('iand', 'a@32', '#b(is_pos_power_of_two)'), 0)),
     ('ushr', ('iand', a, b), ('find_lsb', b)), '!options->lower_bitops'),
 
@@ -2223,7 +2225,14 @@ optimizations.extend([
    (('ior', ('ishl', ('u2u32', 'a@8'), 24), ('ior', ('ishl', ('u2u32', 'b@8'), 16), ('ior', ('ishl', ('u2u32', 'c@8'), 8), ('u2u32', 'd@8')))),
     ('pack_32_4x8', ('vec4', d, c, b, a)), 'options->has_pack_32_4x8'),
 
+   # Open-coded packing
    (('ior', ('ishl', a, 16), ('u2u32', 'b@16')), ('pack_32_2x16_split', b, ('u2u16', a)), '!options->lower_pack_32_2x16_split && !options->lower_pack_split'),
+   (('ior', ('ishl', a, 32), ('u2u64', 'b@32')), ('pack_64_2x32_split', b, ('u2u32', a)), '!options->lower_pack_64_2x32_split'),
+   (('ishl', ('u2u32', 'a@16'), 16), ('pack_32_2x16_split', 0, a), '!options->lower_pack_32_2x16_split && !options->lower_pack_split'),
+   (('ishl', ('u2u64', 'a@32'), 32), ('pack_64_2x32_split', 0, a), '!options->lower_pack_64_2x32_split'),
+
+   (('ior', ('pack_32_2x16_split', a, 0), ('pack_32_2x16_split', 0, b)), ('pack_32_2x16_split', a, b)),
+   (('ior', ('pack_64_2x32_split', a, 0), ('pack_64_2x32_split', 0, b)), ('pack_64_2x32_split', a, b)),
 
    # Mixed 16-bit/8-bit loads vectorized to 8-bit vector load and then lowered to 32-bit
    (('ior', ('u2u16', ('unpack_32_4x8', a)), ('ishl', ('u2u16', ('unpack_32_4x8.y', a)), 8)),
@@ -2296,6 +2305,8 @@ optimizations.extend([
 
    (('iadd', ('pack_half_2x16_rtz_split', a, 0), ('pack_half_2x16_rtz_split', 0, b)), ('pack_half_2x16_rtz_split', a, b)),
    (('ior',  ('pack_half_2x16_rtz_split', a, 0), ('pack_half_2x16_rtz_split', 0, b)), ('pack_half_2x16_rtz_split', a, b)),
+   (('ior', ('pack_32_2x16_split', a, 0), ('pack_half_2x16_rtz_split', 0, b)), ('pack_32_2x16_split', a, ('f2f16_rtz', b))),
+   (('ior',  ('pack_half_2x16_rtz_split', a, 0), ('pack_32_2x16_split', 0, b)), ('pack_32_2x16_split', ('f2f16_rtz', a), b)),
 
    (('pack_uint_2x16', ('vec2', ('pack_half_2x16_rtz_split', a, 0), ('pack_half_2x16_rtz_split', b, 0))), ('pack_half_2x16_rtz_split', a, b)),
 

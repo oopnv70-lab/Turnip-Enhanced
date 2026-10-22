@@ -2273,9 +2273,8 @@ void gfxstream_vk_CmdPushDescriptorSetWithTemplate(
     {
         auto vkEnc = gfxstream::vk::ResourceTracker::getCommandBufferEncoder(commandBuffer);
         auto resources = gfxstream::vk::ResourceTracker::get();
-        resources->on_vkCmdPushDescriptorSetWithTemplate(vkEnc, commandBuffer,
-                                                         descriptorUpdateTemplate, layout, set,
-                                                         pData);
+        resources->on_vkCmdPushDescriptorSetWithTemplate(
+            vkEnc, commandBuffer, descriptorUpdateTemplate, layout, set, pData);
     }
 }
 void gfxstream_vk_CmdBindDescriptorSets2(VkCommandBuffer commandBuffer,
@@ -2470,6 +2469,36 @@ void gfxstream_vk_GetPhysicalDeviceSparseImageFormatProperties2KHR(
     }
 }
 #endif
+#ifdef VK_KHR_device_group
+void gfxstream_vk_GetDeviceGroupPeerMemoryFeaturesKHR(
+    VkDevice device, uint32_t heapIndex, uint32_t localDeviceIndex, uint32_t remoteDeviceIndex,
+    VkPeerMemoryFeatureFlags* pPeerMemoryFeatures) {
+    MESA_TRACE_SCOPE("vkGetDeviceGroupPeerMemoryFeaturesKHR");
+    {
+        auto vkEnc = gfxstream::vk::ResourceTracker::getThreadLocalEncoder();
+        vkEnc->vkGetDeviceGroupPeerMemoryFeaturesKHR(device, heapIndex, localDeviceIndex,
+                                                     remoteDeviceIndex, pPeerMemoryFeatures,
+                                                     true /* do lock */);
+    }
+}
+void gfxstream_vk_CmdSetDeviceMaskKHR(VkCommandBuffer commandBuffer, uint32_t deviceMask) {
+    MESA_TRACE_SCOPE("vkCmdSetDeviceMaskKHR");
+    {
+        auto vkEnc = gfxstream::vk::ResourceTracker::getCommandBufferEncoder(commandBuffer);
+        vkEnc->vkCmdSetDeviceMaskKHR(commandBuffer, deviceMask, true /* do lock */);
+    }
+}
+void gfxstream_vk_CmdDispatchBaseKHR(VkCommandBuffer commandBuffer, uint32_t baseGroupX,
+                                     uint32_t baseGroupY, uint32_t baseGroupZ, uint32_t groupCountX,
+                                     uint32_t groupCountY, uint32_t groupCountZ) {
+    MESA_TRACE_SCOPE("vkCmdDispatchBaseKHR");
+    {
+        auto vkEnc = gfxstream::vk::ResourceTracker::getCommandBufferEncoder(commandBuffer);
+        vkEnc->vkCmdDispatchBaseKHR(commandBuffer, baseGroupX, baseGroupY, baseGroupZ, groupCountX,
+                                    groupCountY, groupCountZ, true /* do lock */);
+    }
+}
+#endif
 #ifdef VK_KHR_maintenance1
 void gfxstream_vk_TrimCommandPoolKHR(VkDevice device, VkCommandPool commandPool,
                                      VkCommandPoolTrimFlags flags) {
@@ -2560,6 +2589,32 @@ VkResult gfxstream_vk_GetSemaphoreFdKHR(VkDevice device, const VkSemaphoreGetFdI
     return vkGetSemaphoreFdKHR_VkResult_return;
 }
 #endif
+#ifdef VK_KHR_push_descriptor
+void gfxstream_vk_CmdPushDescriptorSetKHR(VkCommandBuffer commandBuffer,
+                                          VkPipelineBindPoint pipelineBindPoint,
+                                          VkPipelineLayout layout, uint32_t set,
+                                          uint32_t descriptorWriteCount,
+                                          const VkWriteDescriptorSet* pDescriptorWrites) {
+    MESA_TRACE_SCOPE("vkCmdPushDescriptorSetKHR");
+    {
+        auto vkEnc = gfxstream::vk::ResourceTracker::getCommandBufferEncoder(commandBuffer);
+        auto resources = gfxstream::vk::ResourceTracker::get();
+        resources->on_vkCmdPushDescriptorSetKHR(vkEnc, commandBuffer, pipelineBindPoint, layout,
+                                                set, descriptorWriteCount, pDescriptorWrites);
+    }
+}
+void gfxstream_vk_CmdPushDescriptorSetWithTemplateKHR(
+    VkCommandBuffer commandBuffer, VkDescriptorUpdateTemplate descriptorUpdateTemplate,
+    VkPipelineLayout layout, uint32_t set, const void* pData) {
+    MESA_TRACE_SCOPE("vkCmdPushDescriptorSetWithTemplateKHR");
+    {
+        auto vkEnc = gfxstream::vk::ResourceTracker::getCommandBufferEncoder(commandBuffer);
+        auto resources = gfxstream::vk::ResourceTracker::get();
+        resources->on_vkCmdPushDescriptorSetWithTemplateKHR(
+            vkEnc, commandBuffer, descriptorUpdateTemplate, layout, set, pData);
+    }
+}
+#endif
 #ifdef VK_KHR_descriptor_update_template
 VkResult gfxstream_vk_CreateDescriptorUpdateTemplateKHR(
     VkDevice device, const VkDescriptorUpdateTemplateCreateInfo* pCreateInfo,
@@ -2597,18 +2652,6 @@ void gfxstream_vk_UpdateDescriptorSetWithTemplateKHR(
         auto resources = gfxstream::vk::ResourceTracker::get();
         resources->on_vkUpdateDescriptorSetWithTemplateKHR(vkEnc, device, descriptorSet,
                                                            descriptorUpdateTemplate, pData);
-    }
-}
-void gfxstream_vk_CmdPushDescriptorSetWithTemplateKHR(
-    VkCommandBuffer commandBuffer, VkDescriptorUpdateTemplate descriptorUpdateTemplate,
-    VkPipelineLayout layout, uint32_t set, const void* pData) {
-    MESA_TRACE_SCOPE("vkCmdPushDescriptorSetWithTemplateKHR");
-    {
-        auto vkEnc = gfxstream::vk::ResourceTracker::getCommandBufferEncoder(commandBuffer);
-        auto resources = gfxstream::vk::ResourceTracker::get();
-        resources->on_vkCmdPushDescriptorSetWithTemplateKHR(vkEnc, commandBuffer,
-                                                            descriptorUpdateTemplate, layout, set,
-                                                            pData);
     }
 }
 #endif
@@ -2790,6 +2833,74 @@ void gfxstream_vk_GetDescriptorSetLayoutSupportKHR(
         auto vkEnc = gfxstream::vk::ResourceTracker::getThreadLocalEncoder();
         vkEnc->vkGetDescriptorSetLayoutSupportKHR(device, pCreateInfo, pSupport,
                                                   true /* do lock */);
+    }
+}
+#endif
+#ifdef VK_KHR_timeline_semaphore
+VkResult gfxstream_vk_GetSemaphoreCounterValueKHR(VkDevice device, VkSemaphore semaphore,
+                                                  uint64_t* pValue) {
+    MESA_TRACE_SCOPE("vkGetSemaphoreCounterValueKHR");
+    VkResult vkGetSemaphoreCounterValueKHR_VkResult_return = (VkResult)0;
+    {
+        auto vkEnc = gfxstream::vk::ResourceTracker::getThreadLocalEncoder();
+        vkGetSemaphoreCounterValueKHR_VkResult_return =
+            vkEnc->vkGetSemaphoreCounterValueKHR(device, semaphore, pValue, true /* do lock */);
+    }
+    return vkGetSemaphoreCounterValueKHR_VkResult_return;
+}
+VkResult gfxstream_vk_WaitSemaphoresKHR(VkDevice device, const VkSemaphoreWaitInfo* pWaitInfo,
+                                        uint64_t timeout) {
+    MESA_TRACE_SCOPE("vkWaitSemaphoresKHR");
+    VkResult vkWaitSemaphoresKHR_VkResult_return = (VkResult)0;
+    {
+        auto vkEnc = gfxstream::vk::ResourceTracker::getThreadLocalEncoder();
+        std::vector<VkSemaphoreWaitInfo> internal_pWaitInfo(1);
+        std::vector<std::vector<VkSemaphore>> internal_VkSemaphoreWaitInfo_pSemaphores;
+        for (uint32_t i = 0; i < 1; ++i) {
+            internal_pWaitInfo[i] = pWaitInfo[i];
+            /* VkSemaphoreWaitInfo::pSemaphores */
+            internal_VkSemaphoreWaitInfo_pSemaphores.push_back(std::vector<VkSemaphore>());
+            internal_VkSemaphoreWaitInfo_pSemaphores[i] = FilterNoopSemaphores(
+                internal_pWaitInfo[i].pSemaphores, internal_pWaitInfo[i].semaphoreCount);
+            internal_pWaitInfo[i].pSemaphores = internal_VkSemaphoreWaitInfo_pSemaphores[i].data();
+            internal_pWaitInfo[i].semaphoreCount =
+                internal_VkSemaphoreWaitInfo_pSemaphores[i].size();
+        }
+        vkWaitSemaphoresKHR_VkResult_return = vkEnc->vkWaitSemaphoresKHR(
+            device, internal_pWaitInfo.data(), timeout, true /* do lock */);
+    }
+    return vkWaitSemaphoresKHR_VkResult_return;
+}
+VkResult gfxstream_vk_SignalSemaphoreKHR(VkDevice device,
+                                         const VkSemaphoreSignalInfo* pSignalInfo) {
+    MESA_TRACE_SCOPE("vkSignalSemaphoreKHR");
+    VkResult vkSignalSemaphoreKHR_VkResult_return = (VkResult)0;
+    {
+        auto vkEnc = gfxstream::vk::ResourceTracker::getThreadLocalEncoder();
+        vkSignalSemaphoreKHR_VkResult_return =
+            vkEnc->vkSignalSemaphoreKHR(device, pSignalInfo, true /* do lock */);
+    }
+    return vkSignalSemaphoreKHR_VkResult_return;
+}
+#endif
+#ifdef VK_KHR_dynamic_rendering_local_read
+void gfxstream_vk_CmdSetRenderingAttachmentLocationsKHR(
+    VkCommandBuffer commandBuffer, const VkRenderingAttachmentLocationInfo* pLocationInfo) {
+    MESA_TRACE_SCOPE("vkCmdSetRenderingAttachmentLocationsKHR");
+    {
+        auto vkEnc = gfxstream::vk::ResourceTracker::getCommandBufferEncoder(commandBuffer);
+        vkEnc->vkCmdSetRenderingAttachmentLocationsKHR(commandBuffer, pLocationInfo,
+                                                       true /* do lock */);
+    }
+}
+void gfxstream_vk_CmdSetRenderingInputAttachmentIndicesKHR(
+    VkCommandBuffer commandBuffer,
+    const VkRenderingInputAttachmentIndexInfo* pInputAttachmentIndexInfo) {
+    MESA_TRACE_SCOPE("vkCmdSetRenderingInputAttachmentIndicesKHR");
+    {
+        auto vkEnc = gfxstream::vk::ResourceTracker::getCommandBufferEncoder(commandBuffer);
+        vkEnc->vkCmdSetRenderingInputAttachmentIndicesKHR(commandBuffer, pInputAttachmentIndexInfo,
+                                                          true /* do lock */);
     }
 }
 #endif

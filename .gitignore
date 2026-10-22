@@ -7,5 +7,3 @@
 /build
 .venv/
 *.mda.tar
-/android-aarch64.txt
-/native.txt

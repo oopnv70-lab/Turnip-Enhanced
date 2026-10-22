@@ -713,9 +713,25 @@ class VkEncoder {
         VkPhysicalDevice physicalDevice, const VkPhysicalDeviceSparseImageFormatInfo2* pFormatInfo,
         uint32_t* pPropertyCount, VkSparseImageFormatProperties2* pProperties, uint32_t doLock);
 #endif
+#ifdef VK_KHR_device_group
+    void vkGetDeviceGroupPeerMemoryFeaturesKHR(VkDevice device, uint32_t heapIndex,
+                                               uint32_t localDeviceIndex,
+                                               uint32_t remoteDeviceIndex,
+                                               VkPeerMemoryFeatureFlags* pPeerMemoryFeatures,
+                                               uint32_t doLock);
+    void vkCmdSetDeviceMaskKHR(VkCommandBuffer commandBuffer, uint32_t deviceMask, uint32_t doLock);
+    void vkCmdDispatchBaseKHR(VkCommandBuffer commandBuffer, uint32_t baseGroupX,
+                              uint32_t baseGroupY, uint32_t baseGroupZ, uint32_t groupCountX,
+                              uint32_t groupCountY, uint32_t groupCountZ, uint32_t doLock);
+#endif
 #ifdef VK_KHR_maintenance1
     void vkTrimCommandPoolKHR(VkDevice device, VkCommandPool commandPool,
                               VkCommandPoolTrimFlags flags, uint32_t doLock);
+#endif
+#ifdef VK_KHR_device_group_creation
+    VkResult vkEnumeratePhysicalDeviceGroupsKHR(
+        VkInstance instance, uint32_t* pPhysicalDeviceGroupCount,
+        VkPhysicalDeviceGroupProperties* pPhysicalDeviceGroupProperties, uint32_t doLock);
 #endif
 #ifdef VK_KHR_external_memory_capabilities
     void vkGetPhysicalDeviceExternalBufferPropertiesKHR(
@@ -736,6 +752,16 @@ class VkEncoder {
     VkResult vkGetSemaphoreFdKHR(VkDevice device, const VkSemaphoreGetFdInfoKHR* pGetFdInfo,
                                  int* pFd, uint32_t doLock);
 #endif
+#ifdef VK_KHR_push_descriptor
+    void vkCmdPushDescriptorSetKHR(VkCommandBuffer commandBuffer,
+                                   VkPipelineBindPoint pipelineBindPoint, VkPipelineLayout layout,
+                                   uint32_t set, uint32_t descriptorWriteCount,
+                                   const VkWriteDescriptorSet* pDescriptorWrites, uint32_t doLock);
+    void vkCmdPushDescriptorSetWithTemplateKHR(VkCommandBuffer commandBuffer,
+                                               VkDescriptorUpdateTemplate descriptorUpdateTemplate,
+                                               VkPipelineLayout layout, uint32_t set,
+                                               const void* pData, uint32_t doLock);
+#endif
 #ifdef VK_KHR_descriptor_update_template
     VkResult vkCreateDescriptorUpdateTemplateKHR(
         VkDevice device, const VkDescriptorUpdateTemplateCreateInfo* pCreateInfo,
@@ -748,10 +774,6 @@ class VkEncoder {
     void vkUpdateDescriptorSetWithTemplateKHR(VkDevice device, VkDescriptorSet descriptorSet,
                                               VkDescriptorUpdateTemplate descriptorUpdateTemplate,
                                               const void* pData, uint32_t doLock);
-    void vkCmdPushDescriptorSetWithTemplateKHR(VkCommandBuffer commandBuffer,
-                                               VkDescriptorUpdateTemplate descriptorUpdateTemplate,
-                                               VkPipelineLayout layout, uint32_t set,
-                                               const void* pData, uint32_t doLock);
 #endif
 #ifdef VK_KHR_create_renderpass2
     VkResult vkCreateRenderPass2KHR(VkDevice device, const VkRenderPassCreateInfo2* pCreateInfo,
@@ -813,6 +835,22 @@ class VkEncoder {
                                             const VkDescriptorSetLayoutCreateInfo* pCreateInfo,
                                             VkDescriptorSetLayoutSupport* pSupport,
                                             uint32_t doLock);
+#endif
+#ifdef VK_KHR_timeline_semaphore
+    VkResult vkGetSemaphoreCounterValueKHR(VkDevice device, VkSemaphore semaphore, uint64_t* pValue,
+                                           uint32_t doLock);
+    VkResult vkWaitSemaphoresKHR(VkDevice device, const VkSemaphoreWaitInfo* pWaitInfo,
+                                 uint64_t timeout, uint32_t doLock);
+    VkResult vkSignalSemaphoreKHR(VkDevice device, const VkSemaphoreSignalInfo* pSignalInfo,
+                                  uint32_t doLock);
+#endif
+#ifdef VK_KHR_dynamic_rendering_local_read
+    void vkCmdSetRenderingAttachmentLocationsKHR(
+        VkCommandBuffer commandBuffer, const VkRenderingAttachmentLocationInfo* pLocationInfo,
+        uint32_t doLock);
+    void vkCmdSetRenderingInputAttachmentIndicesKHR(
+        VkCommandBuffer commandBuffer,
+        const VkRenderingInputAttachmentIndexInfo* pInputAttachmentIndexInfo, uint32_t doLock);
 #endif
 #ifdef VK_KHR_buffer_device_address
     VkDeviceAddress vkGetBufferDeviceAddressKHR(VkDevice device,

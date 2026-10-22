@@ -552,8 +552,8 @@ add_gpus([
             [A6XXRegs.REG_A6XX_PC_MODE_CNTL, 0x1f],
             [A6XXRegs.REG_A6XX_PC_POWER_CNTL, 2],
             [A6XXRegs.REG_A6XX_VFD_POWER_CNTL, 2],
-            # this seems to be a chicken bit that fixes cubic filtering:
-            [A6XXRegs.REG_A6XX_TPL1_DBG_ECO_CNTL, 0x00108000],
+            # bit 24 seems to be a chicken bit that fixes cubic filtering:
+            [A6XXRegs.REG_A6XX_TPL1_DBG_ECO_CNTL, 0x01008000],
             [A6XXRegs.REG_A6XX_GRAS_DBG_ECO_CNTL, 0],
             [A6XXRegs.REG_A6XX_SP_CHICKEN_BITS, 0x00001400],
             [A6XXRegs.REG_A6XX_SP_DBG_ECO_CNTL, 0x01000000],
@@ -928,9 +928,7 @@ a730_raw_magic_regs = [
 a740_raw_magic_regs = [
         [A6XXRegs.REG_A6XX_UCHE_CACHE_WAYS, 0x00040004],
         [A6XXRegs.REG_A6XX_TPL1_DBG_ECO_CNTL, 0x11100000],
-        # Value the platform firmware programs on a740; bit 18 is added
-        # conditionally through enable_tp_ubwc_flag_hint.
-        [A6XXRegs.REG_A6XX_TPL1_DBG_ECO_CNTL1, 0x00040700],
+        [A6XXRegs.REG_A6XX_TPL1_DBG_ECO_CNTL1, 0x00040724],
 
         [A6XXRegs.REG_A6XX_SP_CHICKEN_BITS, 0x10001400],
         [A6XXRegs.REG_A7XX_SP_CHICKEN_BITS_1, 0x00400400],
@@ -1237,7 +1235,7 @@ add_gpus([
         GPUId(chip_id=0xffff43050c01, name="Adreno X1-85"),
     ], A6xxGPUInfo(
         CHIP.A7XX,
-        [a7xx_base, a7xx_gen2, GPUProps(enable_tp_ubwc_flag_hint = True)],
+        [a7xx_base, a7xx_gen2],
         num_ccu = 6,
         tile_align_w = 96,
         tile_align_h = 32,
@@ -1331,8 +1329,6 @@ add_gpus([
     ))
 
 add_gpus([
-        GPUId(chip_id=0x43051400, name="FD750"), # KGSL, pineapple v1 DTS chipid
-        GPUId(chip_id=0xffff43051400, name="FD750"), # Default no-speedbin fallback
         GPUId(chip_id=0x43051401, name="FD750"), # KGSL, no speedbin data
         GPUId(chip_id=0xffff43051401, name="FD750"), # Default no-speedbin fallback
         GPUId(chip_id=0xffff43051701, name="Adreno (TM) 753"),
@@ -1533,6 +1529,7 @@ add_gpus([
     ))
 
 add_gpus([
+        GPUId(chip_id=0xffff44030a20, name="Adreno (TM) 829"),
         GPUId(chip_id=0x44030a20, name="Adreno (TM) 829"), # KGSL
     ], A6xxGPUInfo(
         CHIP.A8XX,

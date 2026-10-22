@@ -9,8 +9,6 @@
 
 #include "tu_image.h"
 
-#include <inttypes.h>
-
 #include "drm-uapi/drm_fourcc.h"
 
 #include "util/format/u_format.h"
@@ -34,10 +32,6 @@
 #include "tu_rmv.h"
 #include "tu_subsampled_image.h"
 #include "tu_wsi.h"
-
-static_assert((int)VK_ANDROID_YUV10_NONE == (int)FDL_YUV10_NONE, "");
-static_assert((int)VK_ANDROID_YUV10_TIGHT == (int)FDL_YUV10_TIGHT, "");
-static_assert((int)VK_ANDROID_YUV10_P010 == (int)FDL_YUV10_P010, "");
 
 uint32_t
 tu6_plane_count(VkFormat format)
@@ -195,7 +189,6 @@ tu_image_view_init(struct tu_device *device,
    assert(iview->vk.format != VK_FORMAT_UNDEFINED);
 
    iview->image = image;
-   iview->has_software_ycbcr = false;
 
    const struct fdl_layout *layouts[3];
 
@@ -290,46 +283,6 @@ tu_image_view_init(struct tu_device *device,
    }
 
    TU_CALLX(device, fdl6_view_init)(&iview->view, layouts, &args, device->use_z24uint_s8uint);
-
-   if (TU_DEBUG(IMAGE_TRACE) || (TU_DEBUG(IMG_BIG) && image->vk.extent.width >= 512)) {
-      const struct fdl6_view *v = &iview->view;
-      mesa_logi("TU_IMAGE_TRACE:   view img_id=%" PRIu64 " fmt=%s ubwc=%u pitch=%u "
-                "base=%" PRIx64 " flag=%" PRIx64 " ls=%u ubls=%u fb_pitch=%08x",
-                image->id, util_format_name(image->layout[0].format), v->ubwc_enabled,
-                v->pitch, v->base_addr, v->ubwc_addr, v->layer_size,
-                v->ubwc_layer_size, v->FLAG_BUFFER_PITCH);
-      mesa_logi("TU_IMAGE_TRACE:   view-d0 img_id=%" PRIu64 " d0=%08x d1=%08x d2=%08x "
-                "d3=%08x d4=%08x d5=%08x d6=%08x",
-                image->id, v->descriptor[0], v->descriptor[1], v->descriptor[2],
-                v->descriptor[3], v->descriptor[4], v->descriptor[5], v->descriptor[6]);
-      mesa_logi("TU_IMAGE_TRACE:   view-d1 img_id=%" PRIu64 " d7=%08x d8=%08x d9=%08x "
-                "d10=%08x d11=%08x d12=%08x",
-                image->id, v->descriptor[7], v->descriptor[8], v->descriptor[9],
-                v->descriptor[10], v->descriptor[11], v->descriptor[12]);
-   }
-
-   if (conversion &&
-       tu_format_uses_software_ycbcr(conversion->state.format) &&
-       image->vk.format == conversion->state.format &&
-       aspect_mask == VK_IMAGE_ASPECT_COLOR_BIT &&
-       pCreateInfo->viewType == VK_IMAGE_VIEW_TYPE_2D &&
-       iview->vk.level_count == 1 && iview->vk.layer_count == 1) {
-      /* An R8 texel-buffer view is used for each plane.  Unlike an ordinary
-       * 2D texture descriptor, it gives the hardware an exact byte bound and
-       * does not impose a hidden row-pitch granularity.  Restrict this path
-       * to a single linear 2D subresource; this covers Android YV12 imports
-       * and avoids pretending that tiled or array-layer addressing is flat.
-       */
-      iview->has_software_ycbcr = true;
-      for (uint32_t plane = 0; plane < TU_MAX_PLANE_COUNT; plane++) {
-         const struct fdl_layout *layout = &image->layout[plane];
-         if (layout->tile_mode != TILE6_LINEAR || layout->ubwc ||
-             layout->cpp != 1) {
-            iview->has_software_ycbcr = false;
-            break;
-         }
-      }
-   }
 
    if (image->vk.format == VK_FORMAT_D32_SFLOAT_S8_UINT) {
       VkImageAspectFlags other_aspect =
@@ -567,94 +520,6 @@ format_list_ubwc_possible(struct tu_device *dev,
    return true;
 }
 
-static bool
-tu_is_android_exact_linear_color_import(struct tu_image *image,
-                                        uint64_t modifier,
-                                        const VkSubresourceLayout *plane_layouts)
-{
-   const VkImageUsageFlags supported_usage =
-      VK_IMAGE_USAGE_TRANSFER_SRC_BIT | VK_IMAGE_USAGE_TRANSFER_DST_BIT |
-      VK_IMAGE_USAGE_SAMPLED_BIT | VK_IMAGE_USAGE_STORAGE_BIT |
-      VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT |
-      VK_IMAGE_USAGE_ATTACHMENT_FEEDBACK_LOOP_BIT_EXT;
-   const bool is_android_buffer =
-      vk_image_is_android_hardware_buffer(&image->vk) ||
-      vk_image_is_android_native_buffer(&image->vk) ||
-      vk_image_is_android_native_buffer_alias(&image->vk);
-
-   if (!is_android_buffer || !plane_layouts ||
-       modifier != DRM_FORMAT_MOD_LINEAR ||
-       tu6_plane_count(image->vk.format) != 1 ||
-       !vk_format_is_color(image->vk.format) ||
-       vk_format_is_depth_or_stencil(image->vk.format) ||
-       vk_format_is_compressed(image->vk.format) ||
-       image->vk.image_type != VK_IMAGE_TYPE_2D ||
-       image->vk.samples != VK_SAMPLE_COUNT_1_BIT ||
-       image->vk.mip_levels != 1 || image->vk.array_layers != 1 ||
-       image->vk.extent.depth != 1 ||
-       (image->vk.usage & ~supported_usage))
-      return false;
-
-   const enum pipe_format format = tu6_plane_format(image->vk.format, 0);
-   if (format == PIPE_FORMAT_NONE)
-      return false;
-
-   const uint64_t pitch = plane_layouts[0].rowPitch;
-   const uint64_t offset = plane_layouts[0].offset;
-   const uint64_t min_pitch =
-      util_format_get_stride(format, image->vk.extent.width);
-   const uint64_t size = pitch * image->vk.extent.height;
-
-   return pitch >= min_pitch && pitch <= UINT32_MAX &&
-          offset <= UINT32_MAX && size <= UINT32_MAX &&
-          offset + size <= UINT32_MAX;
-}
-
-static bool
-tu_is_android_yv12_import(struct tu_image *image, uint64_t modifier, const VkSubresourceLayout *plane_layouts)
-{
-   const bool is_android_buffer = vk_image_is_android_hardware_buffer(&image->vk) ||
-                                  vk_image_is_android_native_buffer(&image->vk) ||
-                                  vk_image_is_android_native_buffer_alias(&image->vk);
-
-   if (!plane_layouts || modifier != DRM_FORMAT_MOD_LINEAR || !is_android_buffer ||
-       image->vk.format != VK_FORMAT_G8_B8_R8_3PLANE_420_UNORM || image->vk.image_type != VK_IMAGE_TYPE_2D ||
-       image->vk.samples != VK_SAMPLE_COUNT_1_BIT || image->vk.mip_levels != 1 || image->vk.array_layers != 1 ||
-       image->vk.extent.depth != 1 || image->vk.usage != VK_IMAGE_USAGE_SAMPLED_BIT || (image->vk.extent.width & 1) ||
-       (image->vk.extent.height & 1))
-      return false;
-
-   const uint64_t y_pitch = plane_layouts[0].rowPitch;
-   const uint64_t cb_pitch = plane_layouts[1].rowPitch;
-   const uint64_t cr_pitch = plane_layouts[2].rowPitch;
-
-   if (!y_pitch || !cb_pitch || y_pitch > UINT32_MAX || cb_pitch > UINT32_MAX || cr_pitch != cb_pitch ||
-       y_pitch < image->vk.extent.width || cb_pitch < y_pitch / 2 ||
-       cb_pitch < image->vk.extent.width / 2 || (y_pitch & 15) ||
-       (cb_pitch & 15))
-      return false;
-
-   const uint64_t height = image->vk.extent.height;
-   if (height > UINT64_MAX / y_pitch || height / 2 > UINT64_MAX / cb_pitch)
-      return false;
-
-   const uint64_t min_y_size = y_pitch * height;
-   const uint64_t min_chroma_size = cb_pitch * (height / 2);
-   const uint64_t y_size = plane_layouts[2].offset;
-   if (plane_layouts[1].offset < y_size)
-      return false;
-
-   const uint64_t chroma_size = plane_layouts[1].offset - y_size;
-   if (y_size < min_y_size || chroma_size < min_chroma_size ||
-       y_size > UINT32_MAX || chroma_size > (UINT32_MAX - y_size) / 2)
-      return false;
-
-   /* vk_android has already changed DRM Y-V-U plane order into Vulkan's
-    * logical Y-U-V order at this point.
-    */
-   return plane_layouts[0].offset == 0;
-}
-
 template <chip CHIP>
 VkResult
 tu_image_init(struct tu_device *device, struct tu_image *image,
@@ -836,7 +701,6 @@ tu_image_init(struct tu_device *device, struct tu_image *image,
 
    /* Layout computation begins here */
    enum a6xx_tile_mode tile_mode = TILE6_3;
-   image->android_external_no_gmem_padding = false;
 #if DETECT_OS_LINUX || DETECT_OS_BSD
    image->vk.drm_format_mod = modifier;
 #endif
@@ -858,8 +722,7 @@ tu_image_init(struct tu_device *device, struct tu_image *image,
     * UBWC, then override how the image was created.
     */
    bool force_ubwc = false;
-   if (fourcc_mod_is_vendor(modifier, QCOM) &&
-       (modifier & DRM_FORMAT_MOD_QCOM_COMPRESSED)) {
+   if (modifier == DRM_FORMAT_MOD_QCOM_COMPRESSED) {
       assert(!force_linear_tile);
       ubwc_enabled = true;
       force_ubwc = true;
@@ -878,28 +741,6 @@ tu_image_init(struct tu_device *device, struct tu_image *image,
     */
    assert(!(image->vk.create_flags & VK_IMAGE_CREATE_SPARSE_RESIDENCY_BIT) ||
           tile_mode == TILE6_3);
-
-   const bool android_exact_linear_color_import =
-      tu_is_android_exact_linear_color_import(image, modifier, plane_layouts) &&
-      !TU_DEBUG(NO_EXACT_AHB);
-   image->android_external_no_gmem_padding = android_exact_linear_color_import;
-
-   const bool vendor_plane_no_padding =
-      plane_layouts != NULL && modifier == DRM_FORMAT_MOD_LINEAR &&
-      tu6_plane_count(image->vk.format) == 1 &&
-      image->vk.image_type == VK_IMAGE_TYPE_2D &&
-      image->vk.samples == VK_SAMPLE_COUNT_1_BIT &&
-      image->vk.mip_levels == 1 && image->vk.array_layers == 1 &&
-      image->vk.extent.depth == 1;
-
-   /* Android YV12 guarantees only 16-byte row-pitch alignment.  Accept that
-    * layout only for this exact single-level, sampled-only shared-buffer
-    * shape.  Sampling is later lowered to bounded texel-buffer loads, so the
-    * relaxed validation is never used for an ordinary R8 2D texture access
-    * with an unsupported pitch.
-    */
-   const bool android_yv12_import =
-      tu_is_android_yv12_import(image, modifier, plane_layouts);
 
    for (uint32_t i = 0; i < tu6_plane_count(image->vk.format); i++) {
       struct fdl_layout *layout = &image->layout[i];
@@ -920,11 +761,7 @@ tu_image_init(struct tu_device *device, struct tu_image *image,
          height0 += device->physical_device->info->tile_align_h;
       }
 
-      struct fdl_explicit_layout plane_layout = {
-         .pitch_alignment = android_yv12_import ? 16u : 0u,
-         .skip_last_level_padding =
-            android_yv12_import || vendor_plane_no_padding,
-      };
+      struct fdl_explicit_layout plane_layout;
 
       if (plane_layouts) {
          /* Reject mipmap and 3D images; fdl6_layout_image only accepts
@@ -962,7 +799,6 @@ tu_image_init(struct tu_device *device, struct tu_image *image,
             VK_IMAGE_CREATE_SPARSE_RESIDENCY_BIT,
          .force_disable_linear_fallback = force_disable_linear_fallback,
          .plane = i,
-         .yuv10_mode = plane_layouts ? FDL_YUV10_NONE : image->yuv10_mode,
       };
 
       if (!fdl6_layout_image(layout, &device->physical_device->dev_info,
@@ -1031,124 +867,12 @@ tu_image_init(struct tu_device *device, struct tu_image *image,
          image->vk.array_layers * sizeof(struct tu_subsampled_metadata);
    }
 
-   if (TU_DEBUG(IMAGE_TRACE) || (TU_DEBUG(IMG_BIG) && image->vk.extent.width >= 512)) {
-      mesa_logi("TU_IMAGE_TRACE: id=%" PRIu64 " fmt=%s extent=%ux%ux%u mips=%u "
-                "layers=%u samples=%u tiling=%u modifier=0x%" PRIx64
-                " ahb_format=0x%x usage=0x%" PRIx64 " flags=0x%x size=%" PRIu64,
-                image->id, util_format_name(image->layout[0].format),
-                image->vk.extent.width, image->vk.extent.height,
-                image->vk.extent.depth, image->vk.mip_levels,
-                image->vk.array_layers, image->vk.samples,
-                (unsigned)image->vk.tiling,
-                (uint64_t)image->vk.drm_format_mod, image->vk.ahb_format,
-                (uint64_t)image->vk.usage, (unsigned)image->vk.create_flags,
-                image->total_size);
-
-      for (uint32_t p = 0; p < tu6_plane_count(image->vk.format); p++) {
-         const struct fdl_layout *l = &image->layout[p];
-         mesa_logi("TU_IMAGE_TRACE: id=%" PRIu64 " plane%u pf=%s tile_mode=%u "
-                   "ubwc=%u tile_all=%u pitch0=%u slice0_off=%" PRIu64
-                   " slice0_pitch=%u ubwc0_off=%" PRIu64 " ubwc0_pitch=%u "
-                   "ubwc0_size=%u layer_size=%" PRIu64,
-                   image->id, p, util_format_name(l->format), l->tile_mode,
-                   l->ubwc, l->tile_all, l->pitch0,
-                   (uint64_t)l->slices[0].offset, fdl_pitch(l, 0),
-                   (uint64_t)l->ubwc_slices[0].offset, fdl_ubwc_pitch(l, 0),
-                   l->ubwc_slices[0].size0, l->layer_size);
-      }
-   }
-
    return VK_SUCCESS;
 }
 TU_GENX(tu_image_init);
 
-/*
- * Cross-check the DRM fourcc reported by gralloc metadata against the
- * Vulkan multi-planar format chosen at image creation.  Only pairings whose
- * plane layout fdl can derive authoritatively from (fourcc, modifier,
- * dimensions) are accepted by the unverified-plane recovery below;
- * everything else fails closed.
- */
-bool
-tu_drm_fourcc_matches_format(VkFormat vk_format, uint32_t fourcc)
-{
-   /* A missing fourcc (DRM_FORMAT_INVALID) is accepted only for shapes
-    * whose layout is unambiguous without it: single-plane concrete
-    * formats, whose identity is then given by the platform buffer format
-    * (the Vulkan/Android format equivalence is authoritative, and fdl
-    * validates that it can lay the format out).  Multi-planar formats
-    * need the fourcc for the plane order, and external formats need it
-    * to resolve at all, so both fail closed.
-    */
-   if (fourcc == 0)
-      return vk_format != VK_FORMAT_UNDEFINED &&
-             tu6_plane_count(vk_format) == 1;
-
-   /* External-format images are created with VK_FORMAT_UNDEFINED and
-    * resolve their real format from the AHB properties (which are
-    * derived from this very fourcc), so accept it here; the concrete
-    * layout is validated when fdl computes it from the resolved format.
-    */
-   if (vk_format == VK_FORMAT_UNDEFINED)
-      return true;
-
-   switch (fourcc) {
-   case DRM_FORMAT_NV12:
-   case DRM_FORMAT_NV21:
-      /* NV21 shares the NV12 two-plane layout; the Cb/Cr order is handled
-       * by the ycbcr conversion swizzle, not by plane geometry.
-       */
-      return vk_format == VK_FORMAT_G8_B8R8_2PLANE_420_UNORM;
-   case DRM_FORMAT_YVU420:
-      return vk_format == VK_FORMAT_G8_B8_R8_3PLANE_420_UNORM;
-   case fourcc_code('A', 'B', '2', '4'): /* AB24 = RGBA byte order */
-   case fourcc_code('X', 'B', '2', '4'): /* XB24 = RGBX byte order */
-      return vk_format == VK_FORMAT_R8G8B8A8_UNORM;
-   case DRM_FORMAT_ABGR2101010:
-   case DRM_FORMAT_XBGR2101010:
-      return vk_format == VK_FORMAT_A2B10G10R10_UNORM_PACK32;
-   case fourcc_code('A', 'R', '3', '0'): /* AR30 = BGRA bit order */
-   case fourcc_code('X', 'R', '3', '0'):
-      return vk_format == VK_FORMAT_A2R10G10B10_UNORM_PACK32;
-   case fourcc_code('A', 'B', '1', '6'): /* AB16 float */
-   case fourcc_code('X', 'B', '1', '6'):
-   case DRM_FORMAT_ABGR16161616F: /* AB4H float */
-   case DRM_FORMAT_XBGR16161616F:
-      return vk_format == VK_FORMAT_R16G16B16A16_SFLOAT;
-   case DRM_FORMAT_RGB565:
-      return vk_format == VK_FORMAT_R5G6B5_UNORM_PACK16;
-   case DRM_FORMAT_BGR565:
-      return vk_format == VK_FORMAT_B5G6R5_UNORM_PACK16;
-   case DRM_FORMAT_AYUV:
-      return vk_format == VK_FORMAT_R8G8B8A8_UNORM;
-   default:
-      return false;
-   }
-}
-
-bool
-tu_recovered_layout_is_provable(const struct vk_android_drm_format_info *drm)
-{
-   /* A zero fourcc without the standard-metadata "unverified" signal comes
-    * from a transport that simply did not map the format; its layout must
-    * keep failing closed as before.
-    */
-   if (drm->drm_fourcc == 0 && !drm->fourcc_unverified)
-      return false;
-
-   if (!drm->fourcc_unverified)
-      return true;
-
-   const uint64_t modifier = drm->planes_contradictory
-                                ? DRM_FORMAT_MOD_QCOM_COMPRESSED
-                                : drm->modifier;
-   return modifier == DRM_FORMAT_MOD_LINEAR ||
-          modifier == DRM_FORMAT_MOD_QCOM_COMPRESSED;
-}
-
 /* Deferred ANB image support for ANB v8+ aliased images. */
 #ifdef VK_USE_PLATFORM_ANDROID_KHR
-
 static VkResult
 tu_android_get_wsi_memory(struct tu_device *dev,
                           const VkBindImageMemoryInfo *bind_info,
@@ -1171,96 +895,11 @@ tu_android_get_wsi_memory(struct tu_device *dev,
 
    VkImageDrmFormatModifierExplicitCreateInfoEXT eci;
    VkSubresourceLayout a_plane_layouts[TU_MAX_PLANE_COUNT];
-   const VkSubresourceLayout *plane_layouts = a_plane_layouts;
-   uint64_t modifier;
-   struct vk_android_drm_format_info drm = {0};
-   bool drm_from_layout = false;
-
-   /* Ask for the recovery description in the same metadata pass: for a
-    * compressed (UBWC) buffer the dedicated query below would repeat the
-    * identical vendor queries for the same handle.  The helper only
-    * serves it when its backend allows that (gralloc-4 passthrough);
-    * otherwise drm_from_layout stays false and the dedicated query runs
-    * exactly as before.
-    */
-   result = vk_android_get_anb_layout_with_format(
-      img->vk.android_deferred_create_info, &eci, a_plane_layouts,
-      TU_MAX_PLANE_COUNT, &drm, &drm_from_layout);
-   if (result == VK_ERROR_FEATURE_NOT_PRESENT) {
-      /*
-       * The gralloc metadata transport identified the buffer but could not
-       * supply authoritative plane geometry (typical for UBWC on gralloc-4
-       * era vendors).  Recover the DRM format/modifier through the same
-       * standardized query and let fdl compute the layout from
-       * (fourcc, modifier, dimensions) exactly as it does for the
-       * driver's own allocations.  Anything inconsistent fails closed.
-       */
-      if ((!drm_from_layout &&
-           vk_android_get_anb_drm_format(
-              img->vk.android_deferred_create_info, &drm) != VK_SUCCESS) ||
-          !drm.planes_unverified ||
-          !tu_drm_fourcc_matches_format(
-             img->vk.android_deferred_create_info->format, drm.drm_fourcc) ||
-          !tu_recovered_layout_is_provable(&drm)) {
-         mesa_loge("tu: ANB recovery rejected (vk_format=%d fourcc=0x%x "
-                   "modifier=0x%llx unverified=%d fourcc_unverified=%d)",
-                   (int)img->vk.android_deferred_create_info->format,
-                   drm.drm_fourcc, (unsigned long long)drm.modifier,
-                   (int)drm.planes_unverified,
-                   (int)drm.fourcc_unverified);
-         return VK_ERROR_INVALID_EXTERNAL_HANDLE;
-      }
-
-      if (drm.fourcc_unverified)
-         mesa_logw_once("tu: ANB import without a DRM fourcc; using the "
-                        "platform format (vk_format=%d) with modifier 0x%llx",
-                        (int)img->vk.android_deferred_create_info->format,
-                        (unsigned long long)drm.modifier);
-
-      /* The transport marked the geometry unverified (compressed UBWC on
-       * gralloc-4 era vendors): the driver's own layout library is the
-       * authority for the plane count and layout of the recovered
-       * (fourcc, modifier) pair, exactly as for its own allocations.
-       * A contradicted "linear" claim is Adreno UBWC metadata preceding
-       * the payload.
-       */
-      eci.drmFormatModifierPlaneCount = (uint32_t)tu6_plane_count(
-         img->vk.android_deferred_create_info->format);
-      modifier = drm.planes_contradictory ? DRM_FORMAT_MOD_QCOM_COMPRESSED
-                                          : drm.modifier;
-      eci.drmFormatModifier = modifier;
-      plane_layouts = NULL;
-      img->yuv10_mode = (enum fdl_yuv10_mode)drm.yuv10_mode;
-      if (TU_DEBUG(IMAGE_TRACE))
-         mesa_logi("TU_IMAGE_TRACE: anb-bind recovery vk_format=%d "
-                   "fourcc=0x%x modifier=0x%llx unverified=%d contradictory=%d "
-                   "fourcc_unverified=%d -> modifier=0x%llx layout=fdl planes=%u",
-                   (int)img->vk.android_deferred_create_info->format,
-                   drm.drm_fourcc, (unsigned long long)drm.modifier,
-                   (int)drm.planes_unverified, (int)drm.planes_contradictory,
-                   (int)drm.fourcc_unverified, (unsigned long long)modifier,
-                   (unsigned)eci.drmFormatModifierPlaneCount);
-   } else if (result != VK_SUCCESS) {
+   result = vk_android_get_anb_layout(img->vk.android_deferred_create_info,
+                                      &eci, a_plane_layouts,
+                                      TU_MAX_PLANE_COUNT);
+   if (result != VK_SUCCESS)
       return result;
-   } else {
-      modifier = eci.drmFormatModifier;
-      if (TU_DEBUG(IMAGE_TRACE))
-         mesa_logi("TU_IMAGE_TRACE: anb-bind vendor-layout modifier=0x%llx "
-                   "planes=%u",
-                   (unsigned long long)modifier,
-                   (unsigned)eci.drmFormatModifierPlaneCount);
-   }
-
-   if (eci.drmFormatModifierPlaneCount !=
-       tu6_plane_count(img->vk.android_deferred_create_info->format)) {
-      mesa_loge("tu: ANB plane count mismatch (vendor=%u driver=%u "
-                "modifier=0x%llx)",
-                eci.drmFormatModifierPlaneCount,
-                (unsigned)tu6_plane_count(
-                   img->vk.android_deferred_create_info->format),
-                (unsigned long long)eci.drmFormatModifier);
-      return VK_ERROR_INVALID_EXTERNAL_HANDLE;
-   }
 
    VkExternalMemoryImageCreateInfo external_info = {
       .sType = VK_STRUCTURE_TYPE_EXTERNAL_MEMORY_IMAGE_CREATE_INFO,
@@ -1271,7 +910,7 @@ tu_android_get_wsi_memory(struct tu_device *dev,
 
    result = TU_CALLX(dev, tu_image_init)(
       dev, img, img->vk.android_deferred_create_info,
-      modifier, plane_layouts, TU_IMAGE_ID_ASSIGN);
+      eci.drmFormatModifier, a_plane_layouts, TU_IMAGE_ID_ASSIGN);
    if (result != VK_SUCCESS)
       return result;
 
@@ -1366,80 +1005,13 @@ tu_CreateImage(VkDevice _device,
    VkImageDrmFormatModifierExplicitCreateInfoEXT eci;
    VkSubresourceLayout a_plane_layouts[TU_MAX_PLANE_COUNT];
    if (vk_image_is_android_native_buffer(&image->vk)) {
-      /* Same single-pass recovery description as the deferred bind path
-       * in tu_android_get_wsi_memory.
-       */
-      struct vk_android_drm_format_info drm = {0};
-      bool drm_from_layout = false;
-      result = vk_android_get_anb_layout_with_format(
-         pCreateInfo, &eci, a_plane_layouts, TU_MAX_PLANE_COUNT, &drm,
-         &drm_from_layout);
-      if (result == VK_ERROR_FEATURE_NOT_PRESENT) {
-         /* Vendor metadata resolved the buffer's DRM format/modifier but
-          * did not supply geometry we consume (compressed layouts are
-          * recomputed by fdl; see tu_android_get_wsi_memory).
-          */
-         if ((!drm_from_layout &&
-              vk_android_get_anb_drm_format(pCreateInfo, &drm) != VK_SUCCESS) ||
-             !drm.planes_unverified ||
-             !tu_drm_fourcc_matches_format(pCreateInfo->format,
-                                           drm.drm_fourcc) ||
-             !tu_recovered_layout_is_provable(&drm)) {
-            mesa_loge("tu: ANB create recovery rejected (vk_format=%d "
-                      "fourcc=0x%x modifier=0x%llx fourcc_unverified=%d)",
-                      (int)pCreateInfo->format, drm.drm_fourcc,
-                      (unsigned long long)drm.modifier,
-                      (int)drm.fourcc_unverified);
-            result = VK_ERROR_INVALID_EXTERNAL_HANDLE;
-            goto fail;
-         }
-         eci.drmFormatModifierPlaneCount =
-            (uint32_t)tu6_plane_count(pCreateInfo->format);
-         if (drm.fourcc_unverified)
-            mesa_logw_once("tu: ANB import without a DRM fourcc; using the "
-                           "platform format (vk_format=%d) with modifier "
-                           "0x%llx",
-                           (int)pCreateInfo->format,
-                           (unsigned long long)drm.modifier);
-         /* contradicted "linear" == Adreno UBWC metadata region (see the
-          * bind-site recovery for the same policy).
-          */
-         modifier = drm.planes_contradictory ? DRM_FORMAT_MOD_QCOM_COMPRESSED
-                                             : drm.modifier;
-         eci.drmFormatModifier = modifier;
-         plane_layouts = NULL;
-         image->yuv10_mode = (enum fdl_yuv10_mode)drm.yuv10_mode;
-         if (TU_DEBUG(IMAGE_TRACE))
-            mesa_logi("TU_IMAGE_TRACE: anb-create recovery vk_format=%d "
-                      "fourcc=0x%x modifier=0x%llx unverified=%d "
-                      "contradictory=%d fourcc_unverified=%d -> modifier=0x%llx "
-                      "layout=fdl planes=%u",
-                      (int)pCreateInfo->format, drm.drm_fourcc,
-                      (unsigned long long)drm.modifier,
-                      (int)drm.planes_unverified, (int)drm.planes_contradictory,
-                      (int)drm.fourcc_unverified, (unsigned long long)modifier,
-                      (unsigned)eci.drmFormatModifierPlaneCount);
-      } else if (result != VK_SUCCESS) {
+      result = vk_android_get_anb_layout(
+         pCreateInfo, &eci, a_plane_layouts, TU_MAX_PLANE_COUNT);
+      if (result != VK_SUCCESS)
          goto fail;
-      } else {
-         if (eci.drmFormatModifierPlaneCount !=
-             tu6_plane_count(pCreateInfo->format)) {
-            mesa_loge("tu: ANB create plane count mismatch (vendor=%u "
-                      "driver=%u modifier=0x%llx)",
-                      eci.drmFormatModifierPlaneCount,
-                      (unsigned)tu6_plane_count(pCreateInfo->format),
-                      (unsigned long long)eci.drmFormatModifier);
-            result = VK_ERROR_INVALID_EXTERNAL_HANDLE;
-            goto fail;
-         }
-         plane_layouts = a_plane_layouts;
-         modifier = eci.drmFormatModifier;
-      }
-      if (TU_DEBUG(IMAGE_TRACE))
-         mesa_logi("TU_IMAGE_TRACE: anb-create vendor-layout modifier=0x%llx "
-                   "planes=%u",
-                   (unsigned long long)modifier,
-                   (unsigned)eci.drmFormatModifierPlaneCount);
+
+      plane_layouts = a_plane_layouts;
+      modifier = eci.drmFormatModifier;
    }
 
    result = TU_CALLX(device, tu_image_init)(device, image, pCreateInfo,
@@ -1563,20 +1135,6 @@ tu_image_bind(struct tu_device *device,
    }
 
    assert(mem);
-
-   const bool is_android_buffer =
-      vk_image_is_android_hardware_buffer(&image->vk) ||
-      vk_image_is_android_native_buffer(&image->vk) ||
-      vk_image_is_android_native_buffer_alias(&image->vk);
-   if (is_android_buffer && mem->bo &&
-       (offset > mem->bo->size ||
-        image->total_size > mem->bo->size - offset)) {
-      return vk_errorf(device, VK_ERROR_INVALID_EXTERNAL_HANDLE,
-                       "Android image binding exceeds dma-buf size "
-                       "(%" PRIu64 " + %" PRIu64 " > %" PRIu64 ")",
-                       offset, image->total_size, mem->bo->size);
-   }
-
    image->mem = mem;
    image->mem_offset = offset;
    image->iova = mem->iova + offset;
@@ -1860,9 +1418,7 @@ tu_GetDeviceImageMemoryRequirements(
    struct tu_image image = {0};
 
    vk_image_init(&device->vk, &image.vk, pInfo->pCreateInfo);
-   TU_CALLX(device, tu_image_init)(device, &image, pInfo->pCreateInfo,
-                                   DRM_FORMAT_MOD_INVALID, NULL,
-                                   TU_IMAGE_ID_NONE);
+   TU_CALLX(device, tu_image_init)(device, &image, pInfo->pCreateInfo, DRM_FORMAT_MOD_INVALID, NULL, TU_IMAGE_ID_NONE);
 
    tu_get_image_memory_requirements(device, &image, pMemoryRequirements);
 }
@@ -1879,9 +1435,7 @@ tu_GetDeviceImageSparseMemoryRequirements(
    struct tu_image image = {0};
 
    vk_image_init(&device->vk, &image.vk, pInfo->pCreateInfo);
-   TU_CALLX(device, tu_image_init)(device, &image, pInfo->pCreateInfo,
-                                   DRM_FORMAT_MOD_INVALID, NULL,
-                                   TU_IMAGE_ID_NONE);
+   TU_CALLX(device, tu_image_init)(device, &image, pInfo->pCreateInfo, DRM_FORMAT_MOD_INVALID, NULL, TU_IMAGE_ID_NONE);
 
    tu_get_image_sparse_memory_requirements(device, &image,
                                            pSparseMemoryRequirementCount,
@@ -1972,9 +1526,7 @@ tu_GetDeviceImageSubresourceLayoutKHR(VkDevice _device,
    struct tu_image image = {0};
 
    vk_image_init(&device->vk, &image.vk, pInfo->pCreateInfo);
-   TU_CALLX(device, tu_image_init)(device, &image, pInfo->pCreateInfo,
-                                   DRM_FORMAT_MOD_INVALID, NULL,
-                                   TU_IMAGE_ID_NONE);
+   TU_CALLX(device, tu_image_init)(device, &image, pInfo->pCreateInfo, DRM_FORMAT_MOD_INVALID, NULL, TU_IMAGE_ID_NONE);
 
    tu_get_image_subresource_layout(&image, pInfo->pSubresource, pLayout);
 }
@@ -2210,3 +1762,4 @@ tu_bind_sparse_image(struct tu_device *device, void *submit,
                          prev_bo_offset, bind_range);
    }
 }
+

@@ -297,7 +297,8 @@ option(
   'moltenvk-dir',
   type : 'string',
   value : '',
-  description : 'Location of the MoltenVk SDK. Default: '
+  description : 'Location of the MoltenVK SDK, macOS only. ' +
+                'Also enables MoltenVK-specific configuration.'
 )
 
 option(
@@ -913,7 +914,7 @@ option(
 option(
   'panfrost-rust',
   type : 'boolean',
-  value : false,
+  value : true,
   description : 'Build panfrost Rust components.'
 )
 

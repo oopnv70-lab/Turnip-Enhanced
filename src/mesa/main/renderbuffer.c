@@ -484,6 +484,22 @@ _mesa_map_renderbuffer(struct gl_context *ctx,
                            rb->surface.level,
                            rb->surface.first_layer,
                            transfer_flags, x, y2, w, h, &rb->transfer);
+   if (map &&
+       util_format_description(rb->texture->format)->is_byte_swapped) {
+      /* rb->Format is host-endian */
+      rb->swapped_map = malloc((size_t)rb->transfer->stride * h);
+      if (rb->swapped_map) {
+         rb->transfer_map = map;
+         if (mode & GL_MAP_READ_BIT)
+            util_format_byte_swap_rect(rb->texture->format, rb->swapped_map,
+                                       map, rb->transfer->stride, w, h);
+         map = rb->swapped_map;
+      } else {
+         pipe_texture_unmap(pipe, rb->transfer);
+         rb->transfer = NULL;
+         map = NULL;
+      }
+   }
    if (map) {
       if (invert) {
          *rowStrideOut = -(int) rb->transfer->stride;
@@ -509,6 +525,17 @@ _mesa_unmap_renderbuffer(struct gl_context *ctx,
    if (rb->software) {
       /* software-allocated renderbuffer (probably an accum buffer) */
       return;
+   }
+
+   if (rb->swapped_map) {
+      if (rb->transfer->usage & PIPE_MAP_WRITE)
+         util_format_byte_swap_rect(rb->texture->format, rb->transfer_map,
+                                    rb->swapped_map, rb->transfer->stride,
+                                    rb->transfer->box.width,
+                                    rb->transfer->box.height);
+      free(rb->swapped_map);
+      rb->swapped_map = NULL;
+      rb->transfer_map = NULL;
    }
 
    pipe_texture_unmap(pipe, rb->transfer);
@@ -553,6 +580,12 @@ void
 _mesa_update_renderbuffer_surface(struct gl_context *ctx,
                                   struct gl_renderbuffer *rb)
 {
+   /* st_finalize_texture may have moved the image to a new resource, for
+    * example when glGenerateMipmap needs storage for more levels
+    */
+   if (rb->is_rtt && rb->TexImage->pt && rb->TexImage->pt != rb->texture)
+      pipe_resource_reference(&rb->texture, rb->TexImage->pt);
+
    struct pipe_resource *resource = rb->texture;
    const struct gl_texture_object *stTexObj = NULL;
    unsigned rtt_width = rb->Width;

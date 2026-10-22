@@ -19,7 +19,6 @@
 #include "util/disk_cache.h"
 #include "util/driconf.h"
 #include "util/hex.h"
-#include "util/os_file.h"
 #include "util/os_misc.h"
 #include "util/u_atomic.h"
 #include "util/u_debug.h"
@@ -27,10 +26,9 @@
 #include "vk_android.h"
 #include "vk_debug_utils.h"
 #include "vk_physical_device.h"
-#include "vk_sampler.h"
-#include "vk_semaphore.h"
 #include "vk_shader_module.h"
 #include "vk_util.h"
+#include "vk_sampler.h"
 
 #include "common/freedreno_uuid.h"
 #include "fdl/freedreno_layout.h"
@@ -40,7 +38,6 @@
 #include "tu_cs.h"
 #include "tu_descriptor_set.h"
 #include "tu_dynamic_rendering.h"
-#include "tu_formats.h"
 #include "tu_image.h"
 #include "tu_pass.h"
 #include "tu_query_pool.h"
@@ -209,14 +206,6 @@ get_device_extensions(const struct tu_physical_device *device,
                       struct vk_device_extension_table *ext)
 {
    bool has_gralloc = vk_android_get_ugralloc() != NULL;
-   /* A fallback gralloc object is non-NULL even when it cannot decode camera
-    * YUV buffers.  External-format resolve requires authoritative FourCC,
-    * modifier, and plane-layout metadata in addition to GPU format support.
-    */
-   bool has_external_format_resolve =
-      has_gralloc && vk_android_gralloc_supports_explicit_yuv_layout() &&
-      tu_external_format_resolve_supported(
-         device->info, VK_FORMAT_G8_B8R8_2PLANE_420_UNORM, TILE6_LINEAR);
    /* device->has_raytracing contains the value of the SW fuse. If the
     * device doesn't have a fuse (i.e. a740), we have to ignore it because
     * kgsl returns false. If it does have a fuse, enable raytracing if the
@@ -425,7 +414,6 @@ get_device_extensions(const struct tu_physical_device *device,
 
       /* For Graphics Flight Recorder (GFR) */
       .AMD_buffer_marker = true,
-      .ANDROID_external_format_resolve = has_external_format_resolve,
       .ANDROID_external_memory_android_hardware_buffer = has_gralloc,
       .ANDROID_native_buffer = has_gralloc,
       .ARM_rasterization_order_attachment_access = true,
@@ -955,10 +943,6 @@ tu_get_features(struct tu_physical_device *pdevice,
 
    /* VK_EXT_custom_resolve */
    features->customResolve = true;
-
-   /* VK_ANDROID_external_format_resolve */
-   features->externalFormatResolve =
-      pdevice->vk.supported_extensions.ANDROID_external_format_resolve;
 
    /* QCOM_multiview_per_view_viewports */
    features->multiviewPerViewViewports = true;
@@ -1533,7 +1517,7 @@ tu_get_properties(struct tu_physical_device *pdevice,
 
    /* VK_KHR_maintenance6 */
    props->blockTexelViewCompatibleMultipleLayers = true;
-   props->maxCombinedImageSamplerDescriptorCount = TU_MAX_PLANE_COUNT;
+   props->maxCombinedImageSamplerDescriptorCount = 1;
    props->fragmentShadingRateClampCombinerInputs = true;
 
    /* VK_KHR_maintenance7 */
@@ -1675,460 +1659,7 @@ tu_get_properties(struct tu_physical_device *pdevice,
     * larger alignments anyway.
     */
    props->maxBufferDeviceAddressAllocationAlignment = 1 << 20;
-
-#if DETECT_OS_ANDROID
-   /* VK_ANDROID_external_format_resolve */
-   props->nullColorAttachmentWithExternalFormatResolve = VK_FALSE;
-   props->externalFormatResolveChromaOffsetX = VK_CHROMA_LOCATION_MIDPOINT;
-   props->externalFormatResolveChromaOffsetY = VK_CHROMA_LOCATION_MIDPOINT;
-#endif
 }
-
-#if DETECT_OS_ANDROID
-static bool
-tu_ahb_external_format_resolve_supported(
-   struct tu_device *device,
-   const struct AHardwareBuffer *buffer,
-   VkFormat format)
-{
-   const struct vk_format_ycbcr_info *ycbcr_info =
-      vk_format_get_ycbcr_info(format);
-   if (!ycbcr_info)
-      return false;
-
-   VkImageDrmFormatModifierExplicitCreateInfoEXT modifier_info;
-   VkSubresourceLayout plane_layouts[TU_MAX_PLANE_COUNT];
-   VkResult result = vk_android_get_ahb_layout(
-      const_cast<struct AHardwareBuffer *>(buffer), &modifier_info,
-      plane_layouts, TU_MAX_PLANE_COUNT);
-   if (result == VK_ERROR_FEATURE_NOT_PRESENT) {
-      /*
-       * The metadata transport does not report authoritative plane
-       * geometry for this buffer (UBWC on gralloc-4 era vendors).  This
-       * capability query consumes only the modifier, so recover it from
-       * the standardized DRM-format query; the geometry question is
-       * moot here and the plane-count cross-check would reject valid
-       * UBWC buffers whose vendor layouts omit the metadata plane.
-       */
-      struct vk_android_drm_format_info drm;
-      if (vk_android_get_ahb_drm_format(
-             const_cast<struct AHardwareBuffer *>(buffer), format,
-             &drm) != VK_SUCCESS ||
-          !drm.planes_unverified ||
-          !tu_drm_fourcc_matches_format(format, drm.drm_fourcc))
-         return false;
-      /* Adreno interpretation of a contradicted "linear" claim: the
-       * leading region is UBWC metadata; the buffer is compressed.
-       */
-      modifier_info.drmFormatModifier =
-         drm.planes_contradictory ? DRM_FORMAT_MOD_QCOM_COMPRESSED
-                                  : drm.modifier;
-      if (TU_DEBUG(IMAGE_TRACE))
-         mesa_logi("TU_IMAGE_TRACE: ahb-efr-probe vk_format=%d fourcc=0x%x "
-                   "modifier=0x%llx unverified=%d contradictory=%d "
-                   "fourcc_unverified=%d -> modifier=0x%llx",
-                   (int)format, drm.drm_fourcc, (unsigned long long)drm.modifier,
-                   (int)drm.planes_unverified, (int)drm.planes_contradictory,
-                   (int)drm.fourcc_unverified,
-                   (unsigned long long)modifier_info.drmFormatModifier);
-   } else if (result != VK_SUCCESS ||
-              modifier_info.drmFormatModifierPlaneCount !=
-                 ycbcr_info->n_planes) {
-      return false;
-   }
-
-   enum a6xx_tile_mode tile_mode;
-   switch (modifier_info.drmFormatModifier) {
-   case DRM_FORMAT_MOD_LINEAR:
-      tile_mode = TILE6_LINEAR;
-      break;
-   case DRM_FORMAT_MOD_QCOM_COMPRESSED:
-      tile_mode = TILE6_3;
-      if (!ubwc_possible(
-             device, format, VK_IMAGE_TYPE_2D, 0,
-             VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
-                VK_IMAGE_USAGE_SAMPLED_BIT,
-             0, device->physical_device->info, VK_SAMPLE_COUNT_1_BIT, 1,
-             device->use_z24uint_s8uint))
-         return false;
-      break;
-   default:
-      return false;
-   }
-
-   return tu_external_format_resolve_supported(
-      device->physical_device->info, format, tile_mode);
-}
-#endif
-
-#if DETECT_OS_ANDROID
-struct tu_tencent_anb_acquire_replay {
-   struct list_head link;
-   struct vk_semaphore *semaphore;
-   const struct vk_sync_type *sync_type;
-   int sync_file_fd;
-};
-
-static bool
-tu_tencent_anb_acquire_replay_enabled(const struct tu_device *device)
-{
-   return device->instance->drirc.misc.tencent_anb_acquire_semaphore_replay;
-}
-
-static bool
-tu_tencent_anb_acquire_replay_pending(struct tu_device *device)
-{
-   mtx_lock(&device->tencent_anb_acquire_replay_mutex);
-   bool pending = !list_is_empty(&device->tencent_anb_acquire_replays);
-   mtx_unlock(&device->tencent_anb_acquire_replay_mutex);
-
-   return pending;
-}
-
-static struct tu_tencent_anb_acquire_replay *
-tu_tencent_anb_acquire_replay_take(struct tu_device *device, struct vk_semaphore *semaphore)
-{
-   struct tu_tencent_anb_acquire_replay *found = NULL;
-
-   mtx_lock(&device->tencent_anb_acquire_replay_mutex);
-   list_for_each_entry (struct tu_tencent_anb_acquire_replay, replay, &device->tencent_anb_acquire_replays, link) {
-      if (replay->semaphore == semaphore) {
-         list_del(&replay->link);
-         found = replay;
-         break;
-      }
-   }
-   mtx_unlock(&device->tencent_anb_acquire_replay_mutex);
-
-   if (!found)
-      return NULL;
-
-   return found;
-}
-
-static void
-tu_tencent_anb_acquire_replay_free(struct tu_device *device, struct tu_tencent_anb_acquire_replay *replay)
-{
-   if (replay->sync_file_fd >= 0)
-      close(replay->sync_file_fd);
-   vk_free(&device->vk.alloc, replay);
-}
-
-static bool
-tu_tencent_anb_acquire_replay_discard(struct tu_device *device, struct vk_semaphore *semaphore)
-{
-   if (!semaphore)
-      return false;
-
-   struct tu_tencent_anb_acquire_replay *replay = tu_tencent_anb_acquire_replay_take(device, semaphore);
-   if (!replay)
-      return false;
-
-   tu_tencent_anb_acquire_replay_free(device, replay);
-   return true;
-}
-
-static void
-tu_tencent_anb_acquire_replay_store(struct tu_device *device,
-                                    struct vk_semaphore *semaphore,
-                                    const struct vk_sync_type *sync_type,
-                                    int sync_file_fd)
-{
-   struct tu_tencent_anb_acquire_replay *replay = (struct tu_tencent_anb_acquire_replay *) vk_alloc(
-      &device->vk.alloc, sizeof(*replay), alignof(struct tu_tencent_anb_acquire_replay),
-      VK_SYSTEM_ALLOCATION_SCOPE_DEVICE);
-   if (!replay) {
-      if (sync_file_fd >= 0)
-         close(sync_file_fd);
-      mesa_logw_once("Turnip: failed to allocate the com.tencent.mm "
-                     "AHB semaphore replay");
-      return;
-   }
-
-   replay->semaphore = semaphore;
-   replay->sync_type = sync_type;
-   replay->sync_file_fd = sync_file_fd;
-
-   struct tu_tencent_anb_acquire_replay *old = NULL;
-   mtx_lock(&device->tencent_anb_acquire_replay_mutex);
-   list_for_each_entry (struct tu_tencent_anb_acquire_replay, entry, &device->tencent_anb_acquire_replays, link) {
-      if (entry->semaphore == semaphore) {
-         list_del(&entry->link);
-         old = entry;
-         break;
-      }
-   }
-   list_addtail(&replay->link, &device->tencent_anb_acquire_replays);
-   mtx_unlock(&device->tencent_anb_acquire_replay_mutex);
-
-   if (old)
-      tu_tencent_anb_acquire_replay_free(device, old);
-}
-
-static void
-tu_tencent_anb_acquire_replay_finish(struct tu_device *device)
-{
-   while (true) {
-      mtx_lock(&device->tencent_anb_acquire_replay_mutex);
-      if (list_is_empty(&device->tencent_anb_acquire_replays)) {
-         mtx_unlock(&device->tencent_anb_acquire_replay_mutex);
-         return;
-      }
-
-      struct tu_tencent_anb_acquire_replay *replay =
-         list_first_entry(&device->tencent_anb_acquire_replays, struct tu_tencent_anb_acquire_replay, link);
-      list_del(&replay->link);
-      mtx_unlock(&device->tencent_anb_acquire_replay_mutex);
-
-      tu_tencent_anb_acquire_replay_free(device, replay);
-   }
-}
-
-static thread_local uint32_t tu_tencent_anb_acquire_image_depth;
-
-/*
- * com.tencent.mm's custom Flutter AHB renderer imports a temporary sync-file
- * payload into the binary semaphore passed to vkAcquireImageANDROID (named
- * "AHBRenderReadySemaphore" when its debug naming is enabled), then submits
- * two waits for that payload.  That is invalid Vulkan: the first wait consumes
- * the temporary payload and restores the semaphore's unsignaled permanent
- * payload.  Qualcomm's proprietary driver happens to tolerate it, so preserve
- * one real copy of this acquire dependency for the second wait.
- *
- * The shipped renderer does not enable debug naming, so use the
- * vkAcquireImageANDROID nesting depth as the reliable discriminator and use
- * the known name as an additional filter whenever one is present.  Keep the
- * copy as a sync-file fd and only allocate a second vk_sync if the invalid
- * second wait actually occurs.  The exact com.tencent.mm drirc match is
- * mandatory; this must never become general binary-semaphore behavior.
- */
-VKAPI_ATTR VkResult VKAPI_CALL
-tu_AcquireImageANDROID(VkDevice _device, VkImage image, int nativeFenceFd, VkSemaphore _semaphore, VkFence fence)
-{
-   VK_FROM_HANDLE(tu_device, device, _device);
-
-   if (!tu_tencent_anb_acquire_replay_enabled(device))
-      return vk_common_AcquireImageANDROID(_device, image, nativeFenceFd, _semaphore, fence);
-
-   tu_tencent_anb_acquire_image_depth++;
-   VkResult result = vk_common_AcquireImageANDROID(_device, image, nativeFenceFd, _semaphore, fence);
-   tu_tencent_anb_acquire_image_depth--;
-
-   return result;
-}
-
-VKAPI_ATTR VkResult VKAPI_CALL
-tu_ImportSemaphoreFdKHR(VkDevice _device, const VkImportSemaphoreFdInfoKHR *pImportSemaphoreFdInfo)
-{
-   VK_FROM_HANDLE(tu_device, device, _device);
-   VK_FROM_HANDLE(vk_semaphore, semaphore, pImportSemaphoreFdInfo->semaphore);
-
-   const char *object_name = semaphore ? semaphore->base.object_name : NULL;
-   const bool name_matches = !object_name || strcmp(object_name, "AHBRenderReadySemaphore") == 0;
-   const bool want_replay = tu_tencent_anb_acquire_replay_enabled(device) && tu_tencent_anb_acquire_image_depth > 0 &&
-                            semaphore && semaphore->type == VK_SEMAPHORE_TYPE_BINARY &&
-                            (pImportSemaphoreFdInfo->flags & VK_SEMAPHORE_IMPORT_TEMPORARY_BIT) &&
-                            pImportSemaphoreFdInfo->handleType == VK_EXTERNAL_SEMAPHORE_HANDLE_TYPE_SYNC_FD_BIT &&
-                            name_matches;
-
-   bool can_replay = want_replay;
-   int replay_fd = -1;
-   if (want_replay && pImportSemaphoreFdInfo->fd >= 0) {
-      replay_fd = os_dupfd_cloexec(pImportSemaphoreFdInfo->fd);
-      if (replay_fd < 0) {
-         can_replay = false;
-         mesa_logw_once("Turnip: failed to duplicate the com.tencent.mm "
-                        "AHB acquire sync-file import: %s",
-                        strerror(errno));
-      }
-   }
-
-   VkResult result = vk_common_ImportSemaphoreFdKHR(_device, pImportSemaphoreFdInfo);
-   if (result != VK_SUCCESS) {
-      if (replay_fd >= 0)
-         close(replay_fd);
-      return result;
-   }
-
-   if (tu_tencent_anb_acquire_replay_enabled(device))
-      tu_tencent_anb_acquire_replay_discard(device, semaphore);
-
-   if (!can_replay)
-      return result;
-
-   if (unlikely(!semaphore->temporary)) {
-      if (replay_fd >= 0)
-         close(replay_fd);
-      mesa_logw_once("Turnip: com.tencent.mm AHB acquire sync-file import "
-                     "completed without a temporary semaphore payload");
-      return result;
-   }
-
-   tu_tencent_anb_acquire_replay_store(device, semaphore, semaphore->temporary->type, replay_fd);
-   return result;
-}
-
-VKAPI_ATTR VkResult VKAPI_CALL
-tu_GetSemaphoreFdKHR(VkDevice _device, const VkSemaphoreGetFdInfoKHR *pGetFdInfo, int *pFd)
-{
-   VK_FROM_HANDLE(tu_device, device, _device);
-
-   VkResult result = vk_common_GetSemaphoreFdKHR(_device, pGetFdInfo, pFd);
-   if (result == VK_SUCCESS && tu_tencent_anb_acquire_replay_enabled(device)) {
-      VK_FROM_HANDLE(vk_semaphore, semaphore, pGetFdInfo->semaphore);
-      tu_tencent_anb_acquire_replay_discard(device, semaphore);
-   }
-
-   return result;
-}
-
-VKAPI_ATTR void VKAPI_CALL
-tu_DestroySemaphore(VkDevice _device, VkSemaphore _semaphore, const VkAllocationCallbacks *pAllocator)
-{
-   VK_FROM_HANDLE(tu_device, device, _device);
-   VK_FROM_HANDLE(vk_semaphore, semaphore, _semaphore);
-
-   if (tu_tencent_anb_acquire_replay_enabled(device))
-      tu_tencent_anb_acquire_replay_discard(device, semaphore);
-
-   vk_common_DestroySemaphore(_device, _semaphore, pAllocator);
-}
-
-static void
-tu_tencent_anb_acquire_replay_prepare_submit(struct tu_device *device, const VkSubmitInfo2 *submit)
-{
-   for (uint32_t i = 0; i < submit->waitSemaphoreInfoCount; i++) {
-      VK_FROM_HANDLE(vk_semaphore, semaphore, submit->pWaitSemaphoreInfos[i].semaphore);
-      if (!semaphore || semaphore->type != VK_SEMAPHORE_TYPE_BINARY || semaphore->temporary)
-         continue;
-
-      struct tu_tencent_anb_acquire_replay *replay = tu_tencent_anb_acquire_replay_take(device, semaphore);
-      if (replay) {
-         struct vk_sync *sync = NULL;
-         VkResult result = vk_sync_create(&device->vk, replay->sync_type, (enum vk_sync_flags) 0, 0, &sync);
-         if (result == VK_SUCCESS) {
-            result = vk_sync_import_sync_file(&device->vk, sync, replay->sync_file_fd);
-         }
-
-         tu_tencent_anb_acquire_replay_free(device, replay);
-
-         if (result == VK_SUCCESS) {
-            semaphore->temporary = sync;
-            mesa_logi_once("Turnip: applying the com.tencent.mm AHB "
-                           "semaphore replay workaround");
-         } else {
-            if (sync)
-               vk_sync_destroy(&device->vk, sync);
-            mesa_logw_once("Turnip: failed to replay the com.tencent.mm "
-                           "AHB semaphore payload");
-         }
-      }
-   }
-
-   /* A signal starts a new binary-semaphore lifetime.  Never carry an old
-    * AHB replay across it.
-    */
-   for (uint32_t i = 0; i < submit->signalSemaphoreInfoCount; i++) {
-      VK_FROM_HANDLE(vk_semaphore, semaphore, submit->pSignalSemaphoreInfos[i].semaphore);
-      tu_tencent_anb_acquire_replay_discard(device, semaphore);
-   }
-}
-
-VKAPI_ATTR VkResult VKAPI_CALL
-tu_QueueSubmit2(VkQueue _queue, uint32_t submitCount, const VkSubmitInfo2 *pSubmits, VkFence fence)
-{
-   VK_FROM_HANDLE(tu_queue, queue, _queue);
-   struct tu_device *device = queue->device;
-
-   if (submitCount == 0 || !tu_tencent_anb_acquire_replay_enabled(device) ||
-       !tu_tencent_anb_acquire_replay_pending(device)) {
-      return vk_common_QueueSubmit2(_queue, submitCount, pSubmits, fence);
-   }
-
-   /* vk_common_QueueSubmit2 consumes all temporary payloads while building
-    * its internal submissions.  Process submit infos in order while replay
-    * records exist so a later submit can observe the first wait's consume.
-    */
-   for (uint32_t i = 0; i < submitCount; i++) {
-      if (!tu_tencent_anb_acquire_replay_pending(device)) {
-         return vk_common_QueueSubmit2(_queue, submitCount - i, &pSubmits[i], fence);
-      }
-
-      tu_tencent_anb_acquire_replay_prepare_submit(device, &pSubmits[i]);
-
-      VkFence submit_fence = i == submitCount - 1 ? fence : VK_NULL_HANDLE;
-      VkResult result = vk_common_QueueSubmit2(_queue, 1, &pSubmits[i], submit_fence);
-      if (result != VK_SUCCESS)
-         return result;
-   }
-
-   return VK_SUCCESS;
-}
-
-VKAPI_ATTR VkResult VKAPI_CALL
-tu_GetAndroidHardwareBufferPropertiesANDROID(
-   VkDevice _device,
-   const struct AHardwareBuffer *buffer,
-   VkAndroidHardwareBufferPropertiesANDROID *pProperties)
-{
-   VK_FROM_HANDLE(tu_device, device, _device);
-
-   VkAndroidHardwareBufferFormatResolvePropertiesANDROID *format_resolve =
-      vk_find_struct(pProperties->pNext,
-                     ANDROID_HARDWARE_BUFFER_FORMAT_RESOLVE_PROPERTIES_ANDROID);
-   if (!format_resolve) {
-      return vk_common_GetAndroidHardwareBufferPropertiesANDROID(
-         _device, buffer, pProperties);
-   }
-
-   VkAndroidHardwareBufferFormatProperties2ANDROID *format_prop2 =
-      vk_find_struct(pProperties->pNext,
-                     ANDROID_HARDWARE_BUFFER_FORMAT_PROPERTIES_2_ANDROID);
-   VkAndroidHardwareBufferFormatPropertiesANDROID *format_prop =
-      vk_find_struct(pProperties->pNext,
-                     ANDROID_HARDWARE_BUFFER_FORMAT_PROPERTIES_ANDROID);
-
-   /* The common implementation may use a private temporary when the caller
-    * only asks for resolve properties.  Inject our own temporary so Turnip
-    * can apply its per-format and per-modifier capability check afterwards.
-    */
-   void *original_pnext = pProperties->pNext;
-   VkAndroidHardwareBufferFormatProperties2ANDROID local_prop2 = {
-      .sType =
-         VK_STRUCTURE_TYPE_ANDROID_HARDWARE_BUFFER_FORMAT_PROPERTIES_2_ANDROID,
-      .pNext = original_pnext,
-   };
-   if (!format_prop2) {
-      format_prop2 = &local_prop2;
-      pProperties->pNext = format_prop2;
-   }
-
-   VkResult result = vk_common_GetAndroidHardwareBufferPropertiesANDROID(
-      _device, buffer, pProperties);
-   pProperties->pNext = original_pnext;
-   if (result != VK_SUCCESS)
-      return result;
-
-   if (format_resolve->colorAttachmentFormat != VK_FORMAT_UNDEFINED &&
-       !tu_ahb_external_format_resolve_supported(
-          device, buffer, (VkFormat) format_prop2->externalFormat)) {
-      format_resolve->colorAttachmentFormat = VK_FORMAT_UNDEFINED;
-      format_prop2->formatFeatures &=
-         ~VK_FORMAT_FEATURE_2_COLOR_ATTACHMENT_BIT;
-      if (format_prop)
-         format_prop->formatFeatures &= ~VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT;
-   }
-
-   return VK_SUCCESS;
-}
-
-VKAPI_ATTR VkResult VKAPI_CALL
-tu_QueueSubmit2KHR(VkQueue queue, uint32_t submitCount, const VkSubmitInfo2 *pSubmits, VkFence fence)
-{
-   return tu_QueueSubmit2(queue, submitCount, pSubmits, fence);
-}
-
-#endif
 
 static const struct vk_pipeline_cache_object_ops *const cache_import_ops[] = {
    &tu_shader_ops,
@@ -2180,15 +1711,6 @@ tu_physical_device_init(struct tu_physical_device *device,
 
    const struct fd_dev_info info = fd_dev_info(&device->dev_id);
    assert(info.chip);
-
-   if (TU_DEBUG(IMAGE_TRACE) || TU_DEBUG(IMG_BIG))
-      mesa_logi("TU_IMAGE_TRACE: dev chip=%x tp_ubwc_flag_hint=%d "
-                "ubwc_linear_mipmap_fallback=%d hbb=%d swizzle=0x%x macrotile=%d"
-                " drv=%s mod=c4c5c7p4 wfi=%d eco=%d",
-                info.chip, info.props.enable_tp_ubwc_flag_hint,
-                info.props.has_ubwc_linear_mipmap_fallback, info.highest_bank_bit,
-                info.ubwc_swizzle, info.macrotile_mode, MESA_GIT_SHA1,
-                (int)!!TU_DEBUG(BLIT_WFI), (int)!!TU_DEBUG(BLIT_ECO));
 
    /* Print a suffix if raytracing is disabled by the SW fuse, in an attempt
     * to avoid confusion when apps don't work.
@@ -3269,9 +2791,6 @@ tu_device_get_timestamp(struct vk_device *vk_device, uint64_t *timestamp)
 static void
 tu_device_destroy_mutexes(struct tu_device *device)
 {
-#if DETECT_OS_ANDROID
-   mtx_destroy(&device->tencent_anb_acquire_replay_mutex);
-#endif
    mtx_destroy(&device->bo_mutex);
    mtx_destroy(&device->pipeline_mutex);
    mtx_destroy(&device->kgsl_profiling_mutex);
@@ -3405,10 +2924,6 @@ tu_CreateDevice(VkPhysicalDevice physicalDevice,
    mtx_init(&device->mutex, mtx_plain);
    mtx_init(&device->copy_timestamp_cs_pool_mutex, mtx_plain);
    mtx_init(&device->softfloat_mutex, mtx_plain);
-#if DETECT_OS_ANDROID
-   list_inithead(&device->tencent_anb_acquire_replays);
-   mtx_init(&device->tencent_anb_acquire_replay_mutex, mtx_plain);
-#endif
 #ifdef HAVE_PERFETTO
    tu_perfetto_init_state(&device->perfetto);
 #endif
@@ -3502,6 +3017,7 @@ tu_CreateDevice(VkPhysicalDevice physicalDevice,
          .storage_8bit = physical_device->info->props.storage_8bit,
          .shared_push_consts = !TU_DEBUG(PUSH_CONSTS_PER_STAGE),
          .uche_trap_base = physical_device->uche_trap_base,
+         .lower_draw_id = physical_device->info->chip >= A8XX,
       };
       device->compiler = ir3_compiler_create(
          NULL, &physical_device->dev_id, physical_device->info, &ir3_options);
@@ -3817,9 +3333,6 @@ fail_queues:
 #ifdef HAVE_PERFETTO
    tu_perfetto_destroy_state(&device->perfetto);
 #endif
-#if DETECT_OS_ANDROID
-   tu_tencent_anb_acquire_replay_finish(device);
-#endif
    tu_device_destroy_mutexes(device);
    tu_drm_device_finish(device);
    vk_device_finish(&device->vk);
@@ -3926,9 +3439,6 @@ tu_DestroyDevice(VkDevice _device, const VkAllocationCallbacks *pAllocator)
          vk_free(&device->vk.alloc, device->queues[i]);
    }
 
-#if DETECT_OS_ANDROID
-   tu_tencent_anb_acquire_replay_finish(device);
-#endif
    tu_drm_device_finish(device);
 
    if (device->physical_device->has_set_iova)
@@ -4325,94 +3835,11 @@ tu_AllocateMemory(VkDevice _device,
        vk_image_is_android_hardware_buffer(&mem->image->vk)) {
       VkImageDrmFormatModifierExplicitCreateInfoEXT eci;
       VkSubresourceLayout a_plane_layouts[TU_MAX_PLANE_COUNT];
-      const VkSubresourceLayout *plane_layouts = a_plane_layouts;
-      uint64_t modifier;
-
-      result = vk_android_get_ahb_layout(
-         mem->vk.ahardware_buffer, &eci, a_plane_layouts,
-         TU_MAX_PLANE_COUNT);
-      if (result == VK_ERROR_FEATURE_NOT_PRESENT) {
-         /*
-          * The metadata transport identified the buffer but does not
-          * report authoritative plane geometry (gralloc-4 era vendors
-          * with UBWC).  Recover the DRM format through the same
-          * standardized query and let fdl compute the layout from
-          * (fourcc, modifier, dimensions), as for driver-owned
-          * allocations.  Inconsistent formats fail closed.
-          */
-         struct vk_android_drm_format_info drm = {0};
-         if (vk_android_get_ahb_drm_format(
-                mem->vk.ahardware_buffer, mem->image->vk.format,
-                &drm) != VK_SUCCESS ||
-             !drm.planes_unverified ||
-             !tu_drm_fourcc_matches_format(mem->image->vk.format,
-                                           drm.drm_fourcc) ||
-             !tu_recovered_layout_is_provable(&drm)) {
-            mesa_loge("tu: AHB recovery rejected (vk_format=%d fourcc=0x%x "
-                      "modifier=0x%llx unverified=%d fourcc_unverified=%d)",
-                      (int)mem->image->vk.format, drm.drm_fourcc,
-                      (unsigned long long)drm.modifier,
-                      (int)drm.planes_unverified,
-                      (int)drm.fourcc_unverified);
-            vk_device_memory_destroy(&device->vk, pAllocator, &mem->vk);
-            return VK_ERROR_INVALID_EXTERNAL_HANDLE;
-         }
-
-         if (drm.fourcc_unverified)
-            mesa_logw_once("tu: AHB import without a DRM fourcc; using the "
-                           "platform format (vk_format=%d) with modifier "
-                           "0x%llx",
-                           (int)mem->image->vk.format,
-                           (unsigned long long)drm.modifier);
-
-         /* Adreno interpretation of a contradicted "linear" claim: the
-          * leading region is UBWC metadata.
-          */
-         const uint64_t recovered_modifier =
-            drm.planes_contradictory ? DRM_FORMAT_MOD_QCOM_COMPRESSED
-                                     : drm.modifier;
-
-         /* Unverified geometry: the driver's own layout library owns the
-          * plane count for the recovered (fourcc, modifier) pair.
-          */
-         eci = {
-            .sType =
-               VK_STRUCTURE_TYPE_IMAGE_DRM_FORMAT_MODIFIER_EXPLICIT_CREATE_INFO_EXT,
-            .drmFormatModifier = recovered_modifier,
-            .drmFormatModifierPlaneCount =
-               (uint32_t)tu6_plane_count(mem->image->vk.format),
-            .pPlaneLayouts = NULL,
-         };
-         modifier = recovered_modifier;
-         plane_layouts = NULL;
-         mem->image->yuv10_mode = (enum fdl_yuv10_mode)drm.yuv10_mode;
-         if (TU_DEBUG(IMAGE_TRACE))
-            mesa_logi("TU_IMAGE_TRACE: ahb-bind recovery vk_format=%d "
-                      "fourcc=0x%x modifier=0x%llx unverified=%d "
-                      "contradictory=%d fourcc_unverified=%d -> modifier=0x%llx "
-                      "layout=fdl planes=%u",
-                      (int)mem->image->vk.format, drm.drm_fourcc,
-                      (unsigned long long)drm.modifier,
-                      (int)drm.planes_unverified, (int)drm.planes_contradictory,
-                      (int)drm.fourcc_unverified,
-                      (unsigned long long)recovered_modifier,
-                      (unsigned)eci.drmFormatModifierPlaneCount);
-      } else if (result != VK_SUCCESS) {
+      result = vk_android_get_ahb_layout(mem->vk.ahardware_buffer, &eci,
+                                         a_plane_layouts, TU_MAX_PLANE_COUNT);
+      if (result != VK_SUCCESS) {
          vk_device_memory_destroy(&device->vk, pAllocator, &mem->vk);
          return result;
-      } else {
-         modifier = eci.drmFormatModifier;
-         if (TU_DEBUG(IMAGE_TRACE))
-            mesa_logi("TU_IMAGE_TRACE: ahb-bind vendor-layout modifier=0x%llx "
-                      "planes=%u",
-                      (unsigned long long)modifier,
-                      (unsigned)eci.drmFormatModifierPlaneCount);
-      }
-
-      if (eci.drmFormatModifierPlaneCount !=
-          tu6_plane_count(mem->image->vk.format)) {
-         vk_device_memory_destroy(&device->vk, pAllocator, &mem->vk);
-         return VK_ERROR_INVALID_EXTERNAL_HANDLE;
       }
 
       assert(mem->image->vk.android_deferred_create_info);
@@ -4428,7 +3855,7 @@ tu_AllocateMemory(VkDevice _device,
 
       result = TU_CALLX(device, tu_image_init)(
          device, mem->image, mem->image->vk.android_deferred_create_info,
-         modifier, plane_layouts, TU_IMAGE_ID_ASSIGN);
+         eci.drmFormatModifier, a_plane_layouts, TU_IMAGE_ID_ASSIGN);
       if (result != VK_SUCCESS) {
          vk_device_memory_destroy(&device->vk, pAllocator, &mem->vk);
          return result;
@@ -4640,26 +4067,23 @@ tu_get_msrtss_temporary(struct tu_device *dev,
    return VK_SUCCESS;
 }
 
-/* Allocate memory and setup images for driver-internal attachments.  MSRTSS
- * color images use the existing lazy temporary allocation.  Direct external
- * format resolve sources need real, framebuffer-private storage because they
- * are sampled from sysmem and multiple video buffers can be in flight.
+/* Allocate lazy memory and setup images for transient attachments that are
+ * implicitly created by MSRTSS. The lifetime of these are tied to the
+ * framebuffer with render passes or the command buffer with dynamic
+ * rendering.
  */
 static VkResult
-tu_init_internal_attachments(struct tu_device *device,
-                             const struct tu_render_pass *pass,
-                             const struct tu_framebuffer *fb,
-                             const struct VkFramebufferAttachmentImageInfo *attachment_info,
-                             const struct tu_image_view **attachments,
-                             struct tu_image *images,
-                             struct tu_image_view *iviews,
-                             struct tu_device_memory **depth_mem_out,
-                             struct tu_device_memory **color_mem_out)
+tu_init_msrtss_attachments(struct tu_device *device,
+                           const struct tu_render_pass *pass,
+                           const struct tu_framebuffer *fb,
+                           const struct VkFramebufferAttachmentImageInfo *attachment_info,
+                           const struct tu_image_view **attachments,
+                           struct tu_image *images,
+                           struct tu_image_view *iviews,
+                           struct tu_device_memory **depth_mem_out,
+                           struct tu_device_memory **color_mem_out)
 {
-   assert(!pass->has_direct_external_format_resolve || !pass->has_msrtss);
-
    uint64_t depth_size = 0, color_size = 0;
-   VkResult result = VK_SUCCESS;
 
    /* First, create images and calculate size requirement. */
    for (unsigned i = 0; i < pass->attachment_count - pass->user_attachment_count; i++) {
@@ -4683,11 +4107,8 @@ tu_init_internal_attachments(struct tu_device *device,
          .samples = att->samples,
          .tiling = VK_IMAGE_TILING_OPTIMAL,
          .usage = is_ds ? VK_IMAGE_USAGE_DEPTH_STENCIL_ATTACHMENT_BIT :
-            pass->has_direct_external_format_resolve ?
-               (VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
-                VK_IMAGE_USAGE_SAMPLED_BIT) :
-               (VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
-                VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT),
+            (VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
+             VK_IMAGE_USAGE_TRANSIENT_ATTACHMENT_BIT),
       };
 
       /* In case we're using dynamic rendering, reset the image struct from
@@ -4701,11 +4122,8 @@ tu_init_internal_attachments(struct tu_device *device,
        */
       vk_image_init(&device->vk, &images[i].vk, &image_info);
 
-      result = TU_CALLX(device, tu_image_init)(
-         device, &images[i], &image_info, DRM_FORMAT_MOD_INVALID, NULL,
-         TU_IMAGE_ID_INTERNAL);
-      if (result != VK_SUCCESS)
-         return result;
+      TU_CALLX(device, tu_image_init)(device, &images[i], &image_info, DRM_FORMAT_MOD_INVALID, NULL,
+                                      TU_IMAGE_ID_INTERNAL);
 
       if (is_ds) {
          depth_size = align64(depth_size, images[i].layout[0].base_align);
@@ -4722,6 +4140,8 @@ tu_init_internal_attachments(struct tu_device *device,
     * separate allocations for depth and color. For now this at least avoids
     * allocating memory for color attachments.
     */
+   VkResult result = VK_SUCCESS;
+
    struct tu_device_memory *depth_mem = NULL, *color_mem = NULL;
    if (depth_size != 0) {
       result =
@@ -4731,14 +4151,8 @@ tu_init_internal_attachments(struct tu_device *device,
    }
 
    if (color_size != 0) {
-      if (pass->has_direct_external_format_resolve) {
-         result = tu_create_memory(device, &color_mem, 0,
-                                   TU_BO_ALLOC_INTERNAL_RESOURCE, color_size,
-                                   "Direct external format resolve");
-      } else {
-         result =
-            tu_get_msrtss_temporary(device, &color_mem, color_size, false);
-      }
+      result =
+         tu_get_msrtss_temporary(device, &color_mem, color_size, false);
       if (result != VK_SUCCESS) {
          if (depth_size != 0)
             tu_destroy_memory(device, depth_mem);
@@ -4801,66 +4215,6 @@ tu_init_internal_attachments(struct tu_device *device,
    return VK_SUCCESS;
 }
 
-static bool
-tu_direct_external_format_framebuffer_supported(
-   struct tu_device *device,
-   const struct tu_render_pass *pass,
-   const struct tu_framebuffer *fb)
-{
-   if (!pass->has_direct_external_format_resolve)
-      return true;
-
-   if (pass->user_attachment_count != 1 || fb->layers != 1 ||
-       !fb->attachments[0])
-      return false;
-
-   const struct tu_render_pass_attachment *att = &pass->attachments[0];
-   const struct tu_image_view *view = fb->attachments[0];
-   struct tu_image *image = view->image;
-   const VkFormat format = static_cast<VkFormat>(att->external_format);
-   const struct vk_format_ycbcr_info *ycbcr_info =
-      vk_format_get_ycbcr_info(format);
-
-   if (!ycbcr_info || ycbcr_info->n_planes > TU_MAX_PLANE_COUNT ||
-       view->vk.format != format || image->vk.format != format ||
-       !vk_image_is_android_hardware_buffer(&image->vk) ||
-       !(image->vk.usage & VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT) ||
-       !image->mem || !image->mem->bo ||
-       image->vk.samples != VK_SAMPLE_COUNT_1_BIT ||
-       image->vk.mip_levels != 1 || image->vk.array_layers != 1 ||
-       view->vk.view_type != VK_IMAGE_VIEW_TYPE_2D ||
-       view->vk.base_mip_level != 0 || view->vk.level_count != 1 ||
-       view->vk.base_array_layer != 0 || view->vk.layer_count != 1 ||
-       view->vk.extent.width != fb->width ||
-       view->vk.extent.height != fb->height ||
-       view->vk.extent.depth != 1)
-      return false;
-
-   const enum a6xx_tile_mode tile_mode =
-      static_cast<enum a6xx_tile_mode>(image->layout[0].tile_mode);
-   if (!tu_external_format_resolve_supported(
-          device->physical_device->info, format, tile_mode))
-      return false;
-
-   if (image->layout[0].ubwc &&
-       !ubwc_possible(device, format, VK_IMAGE_TYPE_2D, 0,
-                      VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT |
-                         VK_IMAGE_USAGE_SAMPLED_BIT,
-                      0, device->physical_device->info,
-                      VK_SAMPLE_COUNT_1_BIT, 1,
-                      device->use_z24uint_s8uint))
-      return false;
-
-   for (uint32_t i = 0; i < ycbcr_info->n_planes; i++) {
-      if (image->layout[i].nr_samples != 1 ||
-          image->layout[i].tile_mode != image->layout[0].tile_mode ||
-          image->layout[i].ubwc != image->layout[0].ubwc)
-         return false;
-   }
-
-   return true;
-}
-
 VKAPI_ATTR VkResult VKAPI_CALL
 tu_CreateFramebuffer(VkDevice _device,
                      const VkFramebufferCreateInfo *pCreateInfo,
@@ -4880,7 +4234,7 @@ tu_CreateFramebuffer(VkDevice _device,
 
    bool imageless = pCreateInfo->flags & VK_FRAMEBUFFER_CREATE_IMAGELESS_BIT;
 
-   uint32_t internal_attachment_count = pass->attachment_count -
+   uint32_t msrtss_attachment_count = pass->attachment_count -
       pass->user_attachment_count;
    struct tu_image_view **attachments;
    struct tu_image *images;
@@ -4889,12 +4243,12 @@ tu_CreateFramebuffer(VkDevice _device,
    vk_multialloc_add(&ma, &framebuffer, struct tu_framebuffer, 1);
    vk_multialloc_add(&ma, &attachments, struct tu_image_view *,
                      (imageless ? 0 : pCreateInfo->attachmentCount) +
-                     internal_attachment_count);
-   if (internal_attachment_count) {
+                     msrtss_attachment_count);
+   if (msrtss_attachment_count) {
       vk_multialloc_add(&ma, &images, struct tu_image,
-                        internal_attachment_count);
+                        msrtss_attachment_count);
       vk_multialloc_add(&ma, &iviews, struct tu_image_view,
-                        internal_attachment_count);
+                        msrtss_attachment_count);
    }
    if (!vk_object_multizalloc(
       &device->vk, &ma, pAllocator, VK_OBJECT_TYPE_FRAMEBUFFER))
@@ -4913,28 +4267,6 @@ tu_CreateFramebuffer(VkDevice _device,
          struct tu_image_view *iview = tu_image_view_from_handle(_iview);
          framebuffer->attachments[i] = iview;
       }
-   }
-
-   if (pass->has_direct_external_format_resolve &&
-       (imageless || pCreateInfo->attachmentCount !=
-                       pass->user_attachment_count ||
-        !tu_direct_external_format_framebuffer_supported(
-           device, pass, framebuffer))) {
-      mesa_loge_once("Rejecting unsupported direct external-format "
-                     "framebuffer; no GPU commands were emitted");
-      vk_object_free(&device->vk, pAllocator, framebuffer);
-      return vk_error(device, VK_ERROR_UNKNOWN);
-   }
-
-   if (pass->has_direct_external_format_resolve) {
-      const struct tu_image *image = framebuffer->attachments[0]->image;
-      mesa_logi_once("Lowering direct external-format color attachment to "
-                     "RGBA8 plus external resolve (%ux%u, format=%u, "
-                     "tile=%u, ubwc=%u)",
-                     framebuffer->width, framebuffer->height,
-                     static_cast<uint32_t>(image->vk.format),
-                     static_cast<uint32_t>(image->layout[0].tile_mode),
-                     static_cast<uint32_t>(image->layout[0].ubwc));
    }
 
    if (pass->has_fdm) {
@@ -4979,30 +4311,30 @@ tu_CreateFramebuffer(VkDevice _device,
 
    tu_framebuffer_init_tiling_config(framebuffer, device, pass);
 
-   /* Allocate extra images that are tied to the VkFramebuffer. */
-   if (internal_attachment_count > 0) {
+   /* For MSRTSS, allocate extra images that are tied to the VkFramebuffer */
+   if (msrtss_attachment_count > 0) {
       const VkFramebufferAttachmentsCreateInfo *fb_att_info =
          vk_find_struct_const(pCreateInfo->pNext,
                               FRAMEBUFFER_ATTACHMENTS_CREATE_INFO);
       VkResult result =
-         tu_init_internal_attachments(device,
-                                      pass, framebuffer,
-                                      imageless ? fb_att_info->pAttachmentImageInfos : NULL,
-                                      imageless ? NULL :
-                                      framebuffer->attachments,
-                                      images, iviews,
-                                      &framebuffer->depth_mem,
-                                      &framebuffer->color_mem);
+         tu_init_msrtss_attachments(device,
+                                    pass, framebuffer,
+                                    imageless ? fb_att_info->pAttachmentImageInfos : NULL,
+                                    imageless ? NULL :
+                                    framebuffer->attachments,
+                                    images, iviews,
+                                    &framebuffer->depth_mem,
+                                    &framebuffer->color_mem);
       if (result != VK_SUCCESS) {
          vk_object_free(&device->vk, pAllocator, framebuffer);
          return vk_error(device, result);
       }
 
       /* With imageless attachments, the only attachments in the framebuffer
-       * are driver-internal attachments. Without imageless attachments, they
-       * are after the user's attachments.
+       * are MSRTSS attachments. Without imageless attachments, they are after
+       * the user's attachments.
        */
-      for (uint32_t i = 0; i < internal_attachment_count; i++) {
+      for (uint32_t i = 0; i < msrtss_attachment_count; i++) {
          uint32_t fb_idx = i + (imageless ? 0 : pCreateInfo->attachmentCount);
          framebuffer->attachments[fb_idx] = &iviews[i];
       }
@@ -5052,12 +4384,12 @@ tu_setup_dynamic_msrtss(struct tu_cmd_buffer *cmd_buffer)
       struct tu_device_memory *depth_mem = NULL, *color_mem = NULL;
 
       VkResult result =
-         tu_init_internal_attachments(cmd_buffer->device,
-                                      pass, framebuffer, NULL,
-                                      cmd_buffer->dynamic_attachments,
-                                      cmd_buffer->dynamic_msrtss_images,
-                                      cmd_buffer->dynamic_msrtss_iviews,
-                                      &depth_mem, &color_mem);
+         tu_init_msrtss_attachments(cmd_buffer->device,
+                                    pass, framebuffer, NULL,
+                                    cmd_buffer->dynamic_attachments,
+                                    cmd_buffer->dynamic_msrtss_images,
+                                    cmd_buffer->dynamic_msrtss_iviews,
+                                    &depth_mem, &color_mem);
 
       if (result != VK_SUCCESS) {
          return vk_error(cmd_buffer, result);

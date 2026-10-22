@@ -95,7 +95,6 @@ struct ac_video_dec_codec_caps {
 
       struct {
          bool profile2;
-         bool profile2_tier3;
       } av1;
 
       struct {
@@ -210,6 +209,8 @@ struct ac_video_proc_caps {
    bool flip_horizontal;
    bool flip_vertical;
    bool blend_global_alpha;
+   bool blend_luma_key;
+   bool sharpening;
 };
 
 enum ac_video_write_memory_support {

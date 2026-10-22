@@ -2194,6 +2194,64 @@ DEFINE_ALIAS_FUNCTION(transform_fromhost_VkPhysicalDeviceSparseImageFormatInfo2,
                       transform_fromhost_VkPhysicalDeviceSparseImageFormatInfo2KHR)
 
 #endif
+#ifdef VK_KHR_device_group
+DEFINE_ALIAS_FUNCTION(transform_tohost_VkMemoryAllocateFlagsInfo,
+                      transform_tohost_VkMemoryAllocateFlagsInfoKHR)
+
+DEFINE_ALIAS_FUNCTION(transform_fromhost_VkMemoryAllocateFlagsInfo,
+                      transform_fromhost_VkMemoryAllocateFlagsInfoKHR)
+
+DEFINE_ALIAS_FUNCTION(transform_tohost_VkDeviceGroupRenderPassBeginInfo,
+                      transform_tohost_VkDeviceGroupRenderPassBeginInfoKHR)
+
+DEFINE_ALIAS_FUNCTION(transform_fromhost_VkDeviceGroupRenderPassBeginInfo,
+                      transform_fromhost_VkDeviceGroupRenderPassBeginInfoKHR)
+
+DEFINE_ALIAS_FUNCTION(transform_tohost_VkDeviceGroupCommandBufferBeginInfo,
+                      transform_tohost_VkDeviceGroupCommandBufferBeginInfoKHR)
+
+DEFINE_ALIAS_FUNCTION(transform_fromhost_VkDeviceGroupCommandBufferBeginInfo,
+                      transform_fromhost_VkDeviceGroupCommandBufferBeginInfoKHR)
+
+DEFINE_ALIAS_FUNCTION(transform_tohost_VkDeviceGroupSubmitInfo,
+                      transform_tohost_VkDeviceGroupSubmitInfoKHR)
+
+DEFINE_ALIAS_FUNCTION(transform_fromhost_VkDeviceGroupSubmitInfo,
+                      transform_fromhost_VkDeviceGroupSubmitInfoKHR)
+
+DEFINE_ALIAS_FUNCTION(transform_tohost_VkDeviceGroupBindSparseInfo,
+                      transform_tohost_VkDeviceGroupBindSparseInfoKHR)
+
+DEFINE_ALIAS_FUNCTION(transform_fromhost_VkDeviceGroupBindSparseInfo,
+                      transform_fromhost_VkDeviceGroupBindSparseInfoKHR)
+
+DEFINE_ALIAS_FUNCTION(transform_tohost_VkBindBufferMemoryDeviceGroupInfo,
+                      transform_tohost_VkBindBufferMemoryDeviceGroupInfoKHR)
+
+DEFINE_ALIAS_FUNCTION(transform_fromhost_VkBindBufferMemoryDeviceGroupInfo,
+                      transform_fromhost_VkBindBufferMemoryDeviceGroupInfoKHR)
+
+DEFINE_ALIAS_FUNCTION(transform_tohost_VkBindImageMemoryDeviceGroupInfo,
+                      transform_tohost_VkBindImageMemoryDeviceGroupInfoKHR)
+
+DEFINE_ALIAS_FUNCTION(transform_fromhost_VkBindImageMemoryDeviceGroupInfo,
+                      transform_fromhost_VkBindImageMemoryDeviceGroupInfoKHR)
+
+#endif
+#ifdef VK_KHR_device_group_creation
+DEFINE_ALIAS_FUNCTION(transform_tohost_VkPhysicalDeviceGroupProperties,
+                      transform_tohost_VkPhysicalDeviceGroupPropertiesKHR)
+
+DEFINE_ALIAS_FUNCTION(transform_fromhost_VkPhysicalDeviceGroupProperties,
+                      transform_fromhost_VkPhysicalDeviceGroupPropertiesKHR)
+
+DEFINE_ALIAS_FUNCTION(transform_tohost_VkDeviceGroupDeviceCreateInfo,
+                      transform_tohost_VkDeviceGroupDeviceCreateInfoKHR)
+
+DEFINE_ALIAS_FUNCTION(transform_fromhost_VkDeviceGroupDeviceCreateInfo,
+                      transform_fromhost_VkDeviceGroupDeviceCreateInfoKHR)
+
+#endif
 #ifdef VK_KHR_external_memory_capabilities
 DEFINE_ALIAS_FUNCTION(transform_tohost_VkExternalMemoryProperties,
                       transform_tohost_VkExternalMemoryPropertiesKHR)
@@ -2286,6 +2344,14 @@ void transform_tohost_VkSemaphoreGetFdInfoKHR(ResourceTracker* resourceTracker,
 
 void transform_fromhost_VkSemaphoreGetFdInfoKHR(ResourceTracker* resourceTracker,
                                                 VkSemaphoreGetFdInfoKHR* toTransform);
+
+#endif
+#ifdef VK_KHR_push_descriptor
+DEFINE_ALIAS_FUNCTION(transform_tohost_VkPhysicalDevicePushDescriptorProperties,
+                      transform_tohost_VkPhysicalDevicePushDescriptorPropertiesKHR)
+
+DEFINE_ALIAS_FUNCTION(transform_fromhost_VkPhysicalDevicePushDescriptorProperties,
+                      transform_fromhost_VkPhysicalDevicePushDescriptorPropertiesKHR)
 
 #endif
 #ifdef VK_KHR_shader_float16_int8
@@ -2618,6 +2684,57 @@ DEFINE_ALIAS_FUNCTION(transform_fromhost_VkQueueFamilyGlobalPriorityProperties,
                       transform_fromhost_VkQueueFamilyGlobalPriorityPropertiesKHR)
 
 #endif
+#ifdef VK_KHR_depth_stencil_resolve
+DEFINE_ALIAS_FUNCTION(transform_tohost_VkSubpassDescriptionDepthStencilResolve,
+                      transform_tohost_VkSubpassDescriptionDepthStencilResolveKHR)
+
+DEFINE_ALIAS_FUNCTION(transform_fromhost_VkSubpassDescriptionDepthStencilResolve,
+                      transform_fromhost_VkSubpassDescriptionDepthStencilResolveKHR)
+
+DEFINE_ALIAS_FUNCTION(transform_tohost_VkPhysicalDeviceDepthStencilResolveProperties,
+                      transform_tohost_VkPhysicalDeviceDepthStencilResolvePropertiesKHR)
+
+DEFINE_ALIAS_FUNCTION(transform_fromhost_VkPhysicalDeviceDepthStencilResolveProperties,
+                      transform_fromhost_VkPhysicalDeviceDepthStencilResolvePropertiesKHR)
+
+#endif
+#ifdef VK_KHR_timeline_semaphore
+DEFINE_ALIAS_FUNCTION(transform_tohost_VkPhysicalDeviceTimelineSemaphoreFeatures,
+                      transform_tohost_VkPhysicalDeviceTimelineSemaphoreFeaturesKHR)
+
+DEFINE_ALIAS_FUNCTION(transform_fromhost_VkPhysicalDeviceTimelineSemaphoreFeatures,
+                      transform_fromhost_VkPhysicalDeviceTimelineSemaphoreFeaturesKHR)
+
+DEFINE_ALIAS_FUNCTION(transform_tohost_VkPhysicalDeviceTimelineSemaphoreProperties,
+                      transform_tohost_VkPhysicalDeviceTimelineSemaphorePropertiesKHR)
+
+DEFINE_ALIAS_FUNCTION(transform_fromhost_VkPhysicalDeviceTimelineSemaphoreProperties,
+                      transform_fromhost_VkPhysicalDeviceTimelineSemaphorePropertiesKHR)
+
+DEFINE_ALIAS_FUNCTION(transform_tohost_VkSemaphoreTypeCreateInfo,
+                      transform_tohost_VkSemaphoreTypeCreateInfoKHR)
+
+DEFINE_ALIAS_FUNCTION(transform_fromhost_VkSemaphoreTypeCreateInfo,
+                      transform_fromhost_VkSemaphoreTypeCreateInfoKHR)
+
+DEFINE_ALIAS_FUNCTION(transform_tohost_VkTimelineSemaphoreSubmitInfo,
+                      transform_tohost_VkTimelineSemaphoreSubmitInfoKHR)
+
+DEFINE_ALIAS_FUNCTION(transform_fromhost_VkTimelineSemaphoreSubmitInfo,
+                      transform_fromhost_VkTimelineSemaphoreSubmitInfoKHR)
+
+DEFINE_ALIAS_FUNCTION(transform_tohost_VkSemaphoreWaitInfo, transform_tohost_VkSemaphoreWaitInfoKHR)
+
+DEFINE_ALIAS_FUNCTION(transform_fromhost_VkSemaphoreWaitInfo,
+                      transform_fromhost_VkSemaphoreWaitInfoKHR)
+
+DEFINE_ALIAS_FUNCTION(transform_tohost_VkSemaphoreSignalInfo,
+                      transform_tohost_VkSemaphoreSignalInfoKHR)
+
+DEFINE_ALIAS_FUNCTION(transform_fromhost_VkSemaphoreSignalInfo,
+                      transform_fromhost_VkSemaphoreSignalInfoKHR)
+
+#endif
 #ifdef VK_KHR_vulkan_memory_model
 DEFINE_ALIAS_FUNCTION(transform_tohost_VkPhysicalDeviceVulkanMemoryModelFeatures,
                       transform_tohost_VkPhysicalDeviceVulkanMemoryModelFeaturesKHR)
@@ -2632,6 +2749,26 @@ DEFINE_ALIAS_FUNCTION(transform_tohost_VkPhysicalDeviceShaderTerminateInvocation
 
 DEFINE_ALIAS_FUNCTION(transform_fromhost_VkPhysicalDeviceShaderTerminateInvocationFeatures,
                       transform_fromhost_VkPhysicalDeviceShaderTerminateInvocationFeaturesKHR)
+
+#endif
+#ifdef VK_KHR_dynamic_rendering_local_read
+DEFINE_ALIAS_FUNCTION(transform_tohost_VkPhysicalDeviceDynamicRenderingLocalReadFeatures,
+                      transform_tohost_VkPhysicalDeviceDynamicRenderingLocalReadFeaturesKHR)
+
+DEFINE_ALIAS_FUNCTION(transform_fromhost_VkPhysicalDeviceDynamicRenderingLocalReadFeatures,
+                      transform_fromhost_VkPhysicalDeviceDynamicRenderingLocalReadFeaturesKHR)
+
+DEFINE_ALIAS_FUNCTION(transform_tohost_VkRenderingAttachmentLocationInfo,
+                      transform_tohost_VkRenderingAttachmentLocationInfoKHR)
+
+DEFINE_ALIAS_FUNCTION(transform_fromhost_VkRenderingAttachmentLocationInfo,
+                      transform_fromhost_VkRenderingAttachmentLocationInfoKHR)
+
+DEFINE_ALIAS_FUNCTION(transform_tohost_VkRenderingInputAttachmentIndexInfo,
+                      transform_tohost_VkRenderingInputAttachmentIndexInfoKHR)
+
+DEFINE_ALIAS_FUNCTION(transform_fromhost_VkRenderingInputAttachmentIndexInfo,
+                      transform_fromhost_VkRenderingInputAttachmentIndexInfoKHR)
 
 #endif
 #ifdef VK_KHR_buffer_device_address

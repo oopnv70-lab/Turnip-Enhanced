@@ -1289,6 +1289,33 @@ DEFINE_ALIAS_FUNCTION(count_VkPhysicalDeviceSparseImageFormatInfo2,
                       count_VkPhysicalDeviceSparseImageFormatInfo2KHR)
 
 #endif
+#ifdef VK_KHR_device_group
+DEFINE_ALIAS_FUNCTION(count_VkMemoryAllocateFlagsInfo, count_VkMemoryAllocateFlagsInfoKHR)
+
+DEFINE_ALIAS_FUNCTION(count_VkDeviceGroupRenderPassBeginInfo,
+                      count_VkDeviceGroupRenderPassBeginInfoKHR)
+
+DEFINE_ALIAS_FUNCTION(count_VkDeviceGroupCommandBufferBeginInfo,
+                      count_VkDeviceGroupCommandBufferBeginInfoKHR)
+
+DEFINE_ALIAS_FUNCTION(count_VkDeviceGroupSubmitInfo, count_VkDeviceGroupSubmitInfoKHR)
+
+DEFINE_ALIAS_FUNCTION(count_VkDeviceGroupBindSparseInfo, count_VkDeviceGroupBindSparseInfoKHR)
+
+DEFINE_ALIAS_FUNCTION(count_VkBindBufferMemoryDeviceGroupInfo,
+                      count_VkBindBufferMemoryDeviceGroupInfoKHR)
+
+DEFINE_ALIAS_FUNCTION(count_VkBindImageMemoryDeviceGroupInfo,
+                      count_VkBindImageMemoryDeviceGroupInfoKHR)
+
+#endif
+#ifdef VK_KHR_device_group_creation
+DEFINE_ALIAS_FUNCTION(count_VkPhysicalDeviceGroupProperties,
+                      count_VkPhysicalDeviceGroupPropertiesKHR)
+
+DEFINE_ALIAS_FUNCTION(count_VkDeviceGroupDeviceCreateInfo, count_VkDeviceGroupDeviceCreateInfoKHR)
+
+#endif
 #ifdef VK_KHR_external_memory_capabilities
 DEFINE_ALIAS_FUNCTION(count_VkExternalMemoryProperties, count_VkExternalMemoryPropertiesKHR)
 
@@ -1333,6 +1360,11 @@ void count_VkImportSemaphoreFdInfoKHR(uint32_t featureBits, VkStructureType root
 
 void count_VkSemaphoreGetFdInfoKHR(uint32_t featureBits, VkStructureType rootType,
                                    const VkSemaphoreGetFdInfoKHR* toCount, size_t* count);
+
+#endif
+#ifdef VK_KHR_push_descriptor
+DEFINE_ALIAS_FUNCTION(count_VkPhysicalDevicePushDescriptorProperties,
+                      count_VkPhysicalDevicePushDescriptorPropertiesKHR)
 
 #endif
 #ifdef VK_KHR_shader_float16_int8
@@ -1499,6 +1531,30 @@ DEFINE_ALIAS_FUNCTION(count_VkQueueFamilyGlobalPriorityProperties,
                       count_VkQueueFamilyGlobalPriorityPropertiesKHR)
 
 #endif
+#ifdef VK_KHR_depth_stencil_resolve
+DEFINE_ALIAS_FUNCTION(count_VkSubpassDescriptionDepthStencilResolve,
+                      count_VkSubpassDescriptionDepthStencilResolveKHR)
+
+DEFINE_ALIAS_FUNCTION(count_VkPhysicalDeviceDepthStencilResolveProperties,
+                      count_VkPhysicalDeviceDepthStencilResolvePropertiesKHR)
+
+#endif
+#ifdef VK_KHR_timeline_semaphore
+DEFINE_ALIAS_FUNCTION(count_VkPhysicalDeviceTimelineSemaphoreFeatures,
+                      count_VkPhysicalDeviceTimelineSemaphoreFeaturesKHR)
+
+DEFINE_ALIAS_FUNCTION(count_VkPhysicalDeviceTimelineSemaphoreProperties,
+                      count_VkPhysicalDeviceTimelineSemaphorePropertiesKHR)
+
+DEFINE_ALIAS_FUNCTION(count_VkSemaphoreTypeCreateInfo, count_VkSemaphoreTypeCreateInfoKHR)
+
+DEFINE_ALIAS_FUNCTION(count_VkTimelineSemaphoreSubmitInfo, count_VkTimelineSemaphoreSubmitInfoKHR)
+
+DEFINE_ALIAS_FUNCTION(count_VkSemaphoreWaitInfo, count_VkSemaphoreWaitInfoKHR)
+
+DEFINE_ALIAS_FUNCTION(count_VkSemaphoreSignalInfo, count_VkSemaphoreSignalInfoKHR)
+
+#endif
 #ifdef VK_KHR_vulkan_memory_model
 DEFINE_ALIAS_FUNCTION(count_VkPhysicalDeviceVulkanMemoryModelFeatures,
                       count_VkPhysicalDeviceVulkanMemoryModelFeaturesKHR)
@@ -1507,6 +1563,17 @@ DEFINE_ALIAS_FUNCTION(count_VkPhysicalDeviceVulkanMemoryModelFeatures,
 #ifdef VK_KHR_shader_terminate_invocation
 DEFINE_ALIAS_FUNCTION(count_VkPhysicalDeviceShaderTerminateInvocationFeatures,
                       count_VkPhysicalDeviceShaderTerminateInvocationFeaturesKHR)
+
+#endif
+#ifdef VK_KHR_dynamic_rendering_local_read
+DEFINE_ALIAS_FUNCTION(count_VkPhysicalDeviceDynamicRenderingLocalReadFeatures,
+                      count_VkPhysicalDeviceDynamicRenderingLocalReadFeaturesKHR)
+
+DEFINE_ALIAS_FUNCTION(count_VkRenderingAttachmentLocationInfo,
+                      count_VkRenderingAttachmentLocationInfoKHR)
+
+DEFINE_ALIAS_FUNCTION(count_VkRenderingInputAttachmentIndexInfo,
+                      count_VkRenderingInputAttachmentIndexInfoKHR)
 
 #endif
 #ifdef VK_KHR_buffer_device_address

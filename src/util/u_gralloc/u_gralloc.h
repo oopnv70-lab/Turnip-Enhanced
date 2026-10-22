@@ -31,30 +31,6 @@ struct u_gralloc_buffer_handle {
    int pixel_stride;
 };
 
-/* Flag for u_gralloc_buffer_basic_info.flags: plane offsets/strides were not
- * authoritatively provided by the gralloc metadata service and must not be
- * used for explicit-layout imports; consumers needing exact compressed plane
- * geometry should recompute it with their layout library or fail closed.
- */
-#define U_GRALLOC_BUFFER_INFO_PLANES_UNVERIFIED (1u << 0)
-
-/* Flag for u_gralloc_buffer_basic_info.flags: the reported modifier is
- * contradicted by independent standard metadata, either by plane geometry
- * (a "linear" buffer whose first plane does not start at offset 0) or by a
- * non-NONE COMPRESSION value combined with a linear/unknown modifier.  The
- * modifier claim is untrustworthy; consumers with authoritative layout
- * knowledge may reinterpret it.
- */
-#define U_GRALLOC_BUFFER_INFO_PLANES_CONTRADICTORY (1u << 1)
-
-/* Flag for u_gralloc_buffer_basic_info.flags: the standard PIXEL_FORMAT_FOURCC
- * key was absent, unsupported, or reported as DRM_FORMAT_INVALID (0).  The
- * buffer format cannot be resolved from that scalar key; consumers resolve it
- * from the platform buffer format (e.g. the Vulkan/Android format equivalence
- * table) or from verified plane layouts, and fail closed otherwise.
- */
-#define U_GRALLOC_BUFFER_INFO_FOURCC_UNVERIFIED (1u << 2)
-
 struct u_gralloc_buffer_basic_info {
    uint32_t drm_fourcc;
    uint64_t modifier;
@@ -66,8 +42,6 @@ struct u_gralloc_buffer_basic_info {
 
    uint64_t alloc_size;
    uint64_t layer_count;
-
-   uint32_t flags;
 };
 
 struct u_gralloc_buffer_color_info {
@@ -84,8 +58,6 @@ enum u_gralloc_type {
    U_GRALLOC_TYPE_LIBDRM,
    U_GRALLOC_TYPE_QCOM,
    U_GRALLOC_TYPE_FALLBACK,
-   U_GRALLOC_TYPE_STABLEC,
-   U_GRALLOC_TYPE_IMAPPER4_PT,
    U_GRALLOC_TYPE_COUNT,
 };
 

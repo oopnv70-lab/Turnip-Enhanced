@@ -15,7 +15,6 @@ files_u_gralloc = files(
   'u_gralloc_cros_api.c',
   'u_gralloc_libdrm.c',
   'u_gralloc_qcom.c',
-  'u_gralloc_qti_semantics.c',
 )
 
 if dep_android_ui.found()
@@ -32,31 +31,6 @@ elif dep_android_mapper4.found()
   deps_for_u_gralloc += dep_android_mapper4
 endif
 
-inc_u_gralloc_stablec = []
-if with_platform_android and get_option('platform-sdk-version') >= 35
-  # The IMapper stable-C (AIMapper) HAL is the documented gralloc 5
-  # metadata transport.  Its interface header is vendored under
-  # stablec/include unmodified from AOSP hardware/interfaces.
-  files_u_gralloc += files('u_gralloc_stablec_api.cpp')
-  c_args_for_u_gralloc += '-DUSE_IMAPPER_STABLEC_API'
-  cpp_args_for_u_gralloc += '-DUSE_IMAPPER_STABLEC_API'
-  inc_u_gralloc_stablec += include_directories('stablec/include')
-  # Gralloc 4 era devices expose the same standard metadata through the
-  # HIDL IMapper@4.0 passthrough contract (extern-C HIDL_FETCH_IMapper
-  # in the vendor hw module).  Framework-private libui linkage stays
-  # excluded; the fallback NDK/hw-module path remains for gralloc <= 3,
-  # and the legacy QCOM backend stays available for gralloc1-generation
-  # devices, which have no standard transport at all (it self-identifies
-  # before use and is only tried after the standard backends, see
-  # u_gralloc.c).
-  files_u_gralloc += files('u_gralloc_imapper4_pt_api.cpp')
-  c_args_for_u_gralloc += '-DUSE_IMAPPER4_PT_API'
-  cpp_args_for_u_gralloc += '-DUSE_IMAPPER4_PT_API'
-  c_args_for_u_gralloc += '-DU_GRALLOC_STRICT_STANDARD'
-  cpp_args_for_u_gralloc += '-DU_GRALLOC_STRICT_STANDARD'
-  options_for_u_gralloc += 'cpp_std=c++17'
-endif
-
 if with_freedreno_vk or with_gallium_freedreno
   c_args_for_u_gralloc += '-DHAS_FREEDRENO'
 endif
@@ -64,7 +38,7 @@ endif
 _libmesa_u_gralloc = static_library(
   '_mesa_u_gralloc',
   [files_u_gralloc],
-  include_directories : [inc_include, inc_util] + inc_u_gralloc_stablec,
+  include_directories : [inc_include, inc_util],
   c_args : c_args_for_u_gralloc,
   cpp_args : cpp_args_for_u_gralloc,
   override_options : options_for_u_gralloc,

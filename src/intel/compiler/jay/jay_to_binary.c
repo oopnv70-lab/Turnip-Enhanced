@@ -422,21 +422,24 @@ emit(struct jay_codegen *jc,
       break;
 
    case JAY_OPCODE_DESWIZZLE_ODD: {
+      unsigned stride = jay_ugpr_per_grf(f->shader) * 4;
       bool hi = I->simd_offs == 0 ? true : jay_deswizzle_odd_src2_hi(I);
       gen->chan_offset = 0;
       gen->src[0] =
          gen_byte_offset(jc->devinfo,
                          to_gen_operand(f, I, I->simd_offs, 0, false),
-                         hi ? 64 : 0);
+                         hi ? stride : 0);
       break;
    }
 
-   case JAY_OPCODE_DESWIZZLE_EVEN:
-      gen->exec_size = 16;
-      gen->dst = gen_byte_offset(jc->devinfo, gen->dst, 64);
+   case JAY_OPCODE_DESWIZZLE_EVEN: {
+      unsigned stride = jay_ugpr_per_grf(f->shader) * 4;
+      gen->exec_size = jc->devinfo->ver < 20 ? 8 : 16;
+      gen->dst = gen_byte_offset(jc->devinfo, gen->dst, stride);
       gen->src[0] = gen_byte_offset(jc->devinfo, gen->src[0],
-                                    jay_deswizzle_even_src_hi(I) * 64);
+                                    jay_deswizzle_even_src_hi(I) * stride);
       break;
+   }
 
    case JAY_OPCODE_CVT: {
       unsigned index = jay_cvt_index(I);
@@ -770,7 +773,7 @@ jay_to_binary(jay_shader *s,
          }
 
          jay_foreach_inst_in_block(block, I) {
-            // jay_print_inst(stdout, f, (jay_inst *) I);
+            // jay_print_inst(stderr, f, (jay_inst *) I);
 
             assert(jc.num_insts < jc.insts_cap);
             emit(&jc, &jc.insts[jc.num_insts++], f, I);
@@ -859,7 +862,7 @@ jay_to_binary(jay_shader *s,
       };
 
       if (debug) {
-         print_params.fp = stdout;
+         print_params.fp = stderr;
          gen_print(&print_params);
       }
 

@@ -367,8 +367,10 @@ struct radv_shader_binary_legacy {
    uint32_t disasm_size;
    uint32_t stats_size;
    uint32_t debug_info_size;
+   uint32_t symbols_size;
+   uint32_t padding;
 
-   /* data has size of stats_size + code_size + ir_size + disasm_size + 2,
+   /* data has size of stats_size + code_size + symbols_size + ir_size + disasm_size + 2,
     * where the +2 is for 0 of the ir strings. */
    uint8_t data[0];
 };
@@ -618,7 +620,6 @@ struct radv_compiler_info {
       uint64_t trap_excp_flags;
       struct vk_debug_report *debug_report;
       struct radv_debug_nir *debug_nir;
-      struct radv_shader_abort_data *shader_abort;
       simple_mtx_t *shader_dump_mtx;
       bool keep_shader_info;
       bool capture_shaders;
@@ -849,9 +850,22 @@ void radv_shader_combine_cfg_tes_gs(const struct radv_device *device, const stru
                                     const struct radv_shader *gs, uint32_t *rsrc1_out, uint32_t *rsrc2_out,
                                     uint32_t *rsrc4_out);
 
-const struct radv_userdata_info *radv_get_user_sgpr_info(const struct radv_shader *shader, int idx);
+static inline const struct radv_userdata_info *
+radv_get_user_sgpr_info(const struct radv_shader *shader, int idx)
+{
+   return &shader->info.user_sgprs_locs.shader_data[idx];
+}
 
-uint32_t radv_get_user_sgpr_loc(const struct radv_shader *shader, int idx);
+static inline uint32_t
+radv_get_user_sgpr_loc(const struct radv_shader *shader, int idx)
+{
+   const struct radv_userdata_info *loc = radv_get_user_sgpr_info(shader, idx);
+
+   if (loc->sgpr_idx == -1)
+      return 0;
+
+   return shader->info.user_data_0 + loc->sgpr_idx * 4;
+}
 
 uint32_t radv_get_user_sgpr(const struct radv_shader *shader, int idx);
 

@@ -241,20 +241,8 @@ fdl6_view_init(struct fdl6_view *view, const struct fdl_layout **layouts,
    enum a6xx_tile_mode tile_mode = (enum a6xx_tile_mode)fdl_tile_mode(layout, args->base_miplevel);
 
    if (ubwc_enabled && util_format_is_yuv(args->format) &&
-       util_format_get_num_planes(args->format) == 2)
+       util_format_get_num_planes(args->format) == 2) {
       texture_format = FMT6_R8_G8B8_2PLANE_420_UNORM;
-
-   /* The combined two-plane YCbCr formats used for imported external
-    * images are described as PLANAR2 with an RGB colorspace, so
-    * util_format_is_yuv() does not match them.  Select the sampler format
-    * through the layout (which carries any vendor ten-bit packing, see
-    * fdl_yuv10_mode), not the format description.
-    */
-   if (ubwc_enabled && util_format_get_num_planes(args->format) == 2) {
-      if (layout->yuv10_mode == FDL_YUV10_TIGHT)
-         texture_format = FMT6_TP10;
-      else if (layout->yuv10_mode == FDL_YUV10_P010)
-         texture_format = FMT6_P010;
    }
 
    bool is_d24s8 = (args->format == PIPE_FORMAT_Z24_UNORM_S8_UINT ||
@@ -407,16 +395,6 @@ fdl6_view_init(struct fdl6_view *view, const struct fdl_layout **layouts,
 
          if (ubwc_enabled) {
             descriptor[4] |= A8XX_TEX_MEMOBJ_4_FLAG;
-            /* Multi-planar descriptors replace the single-plane flag-buffer
-             * address with per-plane combined metadata+data bases, but the
-             * UBWC metadata row pitch stays a required field for both
-             * planes (a8xx_descriptors.xml marks it DESC_MULTI_PLANE).
-             * NV12-family planes derive the second plane's metadata pitch
-             * from the first one, so the plane-0 pitch is sufficient.
-             * Leaving it zero makes UBWC decode of imported video planes
-             * read garbage metadata on A8XX.
-             */
-            descriptor[5] |= A8XX_TEX_MEMOBJ_5_FLAG_BUFFER_PITCH(ubwc_pitch);
          }
 
          descriptor[4] |= A8XX_TEX_MEMOBJ_4_BASE_U_LO(base_addr[1]);

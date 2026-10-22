@@ -63,6 +63,7 @@ panvk_per_arch(get_physical_device_extensions)(
       .KHR_driver_properties = true,
       .KHR_dynamic_rendering = true,
       .KHR_dynamic_rendering_local_read = true,
+      .KHR_extended_flags = true,
       .KHR_external_fence = true,
       .KHR_external_fence_fd = true,
       .KHR_external_memory = true,
@@ -228,6 +229,7 @@ panvk_per_arch(get_physical_device_extensions)(
       .EXT_texture_compression_astc_hdr = true,
       .EXT_tooling_info = true,
       .EXT_vertex_attribute_divisor = true,
+      .EXT_vertex_attribute_robustness = true,
       .EXT_vertex_input_dynamic_state = true,
       .EXT_ycbcr_2plane_444_formats = PAN_ARCH >= 10,
       .EXT_ycbcr_image_arrays = PAN_ARCH >= 10,
@@ -497,6 +499,9 @@ panvk_per_arch(get_physical_device_features)(
 
       /* VK_KHR_maintenance9 */
       .maintenance9 = true,
+
+      /* VK_EXT_vertex_attribute_robustness */
+      .vertexAttributeRobustness = true,
 
       /* VK_KHR_maintenance10 */
       .maintenance10 = true,
@@ -793,6 +798,9 @@ panvk_per_arch(get_physical_device_features)(
 
       /* VK_ANDROID_external_format_resolve */
       .externalFormatResolve = has_gralloc && PAN_ARCH >= 10,
+
+      /* VK_KHR_extended_flags */
+      .extendedFlags = true,
    };
 }
 

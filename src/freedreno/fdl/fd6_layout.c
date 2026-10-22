@@ -34,18 +34,6 @@ fdl6_get_ubwc_blockwidth(const struct fdl_layout *layout,
       {  0, 0 }, /* cpp = 128 */
    };
 
-   /* QTI ten-bit packing uses wider UBWC blocks: 48x4/24x4 for tightly
-    * packed TP10, 32x4/16x4 for P010 (kernel UAPI mmm_color_fmt.h).
-    */
-   if (layout->yuv10_mode != FDL_YUV10_NONE) {
-      if (layout->plane == 0)
-         *blockwidth = layout->yuv10_mode == FDL_YUV10_TIGHT ? 48 : 32;
-      else
-         *blockwidth = layout->yuv10_mode == FDL_YUV10_TIGHT ? 24 : 16;
-      *blockheight = 4;
-      return;
-   }
-
    unsigned num_planes = util_format_get_num_planes(layout->format);
 
    /* special case for r8g8 and UV plane (plane 1) of 2-plane YUV formats */
@@ -90,13 +78,6 @@ fdl6_get_ubwc_blockwidth(const struct fdl_layout *layout,
 static void
 fdl6_tile_alignment(struct fdl_layout *layout, uint32_t *heightalign)
 {
-   if (layout->yuv10_mode != FDL_YUV10_NONE) {
-      layout->pitchalign = 0;
-      *heightalign = 16;
-      layout->base_align = 4096;
-      return;
-   }
-
    layout->pitchalign = fdl_cpp_shift(layout);
    *heightalign = 16;
 
@@ -143,7 +124,6 @@ fdl6_layout_image(struct fdl_layout *layout, const struct fd_dev_info *info,
    layout->ubwc = params->ubwc;
    layout->tile_mode = params->tile_mode;
    layout->plane = params->plane;
-   layout->yuv10_mode = params->yuv10_mode;
    uint32_t sparse_blocksize = 65536;
 
    if (!util_is_power_of_two_or_zero(layout->cpp)) {
@@ -172,13 +152,8 @@ fdl6_layout_image(struct fdl_layout *layout, const struct fd_dev_info *info,
    layout->linear_fallback_threshold_texels =
       fdl_linear_fallback_threshold_texels(layout, info);
 
-   if (params->force_ubwc) {
-      /* An explicit compressed modifier describes UBWC storage for every
-       * level.  Falling back to a linear level would describe a different
-       * memory layout than the producer allocated.
-       */
-      layout->tile_all = true;
-   } else if (layout->width0 < layout->linear_fallback_threshold_texels) {
+   if (!params->force_ubwc &&
+       layout->width0 < layout->linear_fallback_threshold_texels) {
       layout->ubwc = false;
       /* Linear D/S is not supported by HW. */
       if (!util_format_is_depth_or_stencil(params->format))
@@ -240,44 +215,10 @@ fdl6_layout_image(struct fdl_layout *layout, const struct fd_dev_info *info,
 
    fdl_set_pitchalign(layout, layout->pitchalign + 6);
 
-   /* TP10 is 4/3 tightly packed, P010 stores 16-bit samples; both strides
-    * follow the vendor layout formulas (kernel UAPI mmm_color_fmt.h, VIDC
-    * msm_media_info.h).  MSM_MEDIA_ALIGN aligns to non-power-of-two values
-    * (192 for TP10), so the inner alignment must use the npot form: the
-    * plain align() mask is only defined for power-of-two alignments and
-    * diverges from the vendor stride for e.g. 1920-wide buffers.
-    */
-   if (layout->yuv10_mode != FDL_YUV10_NONE) {
-      uint32_t luma_width = layout->width0 * (layout->plane ? 2 : 1);
-
-      if (layout->yuv10_mode == FDL_YUV10_TIGHT)
-         layout->pitch0 = align(util_align_npot(luma_width, 192) * 4 / 3, 256);
-      else
-         layout->pitch0 = align(luma_width * 2, 256);
-   }
-
    if (explicit_layout) {
       offset = explicit_layout->offset;
       layout->pitch0 = explicit_layout->pitch;
-      layout->has_explicit_pitch = true;
-
-      if (explicit_layout->skip_last_level_padding &&
-          (layout->tile_mode != TILE6_LINEAR || layout->ubwc ||
-           params->mip_levels != 1 || params->array_size != 1 ||
-           params->depth0 != 1 || params->is_3d))
-         return false;
-
-      uint32_t pitch_alignment = 1u << layout->pitchalign;
-      if (explicit_layout->pitch_alignment) {
-         if (layout->tile_mode != TILE6_LINEAR || params->mip_levels != 1 ||
-             !util_is_power_of_two_nonzero(explicit_layout->pitch_alignment) ||
-             explicit_layout->pitch_alignment < layout->cpp)
-            return false;
-
-         pitch_alignment = explicit_layout->pitch_alignment;
-      }
-
-      if (align(layout->pitch0, pitch_alignment) != layout->pitch0)
+      if (align(layout->pitch0, 1 << layout->pitchalign) != layout->pitch0)
          return false;
    }
 
@@ -343,8 +284,7 @@ fdl6_layout_image(struct fdl_layout *layout, const struct fd_dev_info *info,
        * The pitch is already sufficiently aligned, but height
        * may not be. note this only matters if last level is linear
        */
-      if (level == params->mip_levels - 1 &&
-          !(explicit_layout && explicit_layout->skip_last_level_padding))
+      if (level == params->mip_levels - 1)
          nblocksy = align(nblocksy, 4);
 
       slice->offset = offset + layout->size;

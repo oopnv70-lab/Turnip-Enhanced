@@ -72,7 +72,7 @@ static void si_emit_string_marker(struct pipe_context *ctx, const char *string, 
 
    dd_parse_apitrace_marker(string, len, &sctx->apitrace_call_number);
 
-   if (sctx->sqtt.enabled)
+   if (si_is_sqtt_active(sctx))
       si_write_user_event(sctx, &sctx->gfx_cs, UserEventTrigger, string, len);
 
    if (sctx->log)
@@ -377,7 +377,7 @@ void si_fini_gfx_context(struct si_context *sctx) {
    if (sctx->sqtt.data) {
       struct si_screen *sscreen = sctx->screen;
 
-      si_handle_sqtt(sctx, &sctx->gfx_cs, 0);
+      si_sqtt_finish_capture(sctx);
 
       if (sscreen->b.num_contexts == 1 && !(sctx->context_flags & SI_CONTEXT_FLAG_AUX))
           sscreen->ws->cs_set_pstate(&sctx->gfx_cs, RADEON_CTX_PSTATE_NONE);

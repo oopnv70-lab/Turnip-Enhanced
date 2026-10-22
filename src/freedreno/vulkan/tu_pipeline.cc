@@ -1207,12 +1207,12 @@ tu6_patch_control_points_size(struct tu_device *dev,
    if (dev->physical_device->info->props.load_shader_consts_via_preamble) {
 #define EMIT_CONST_DWORDS(const_dwords) (6 + const_dwords + 4)
       return EMIT_CONST_DWORDS(4) +
-         EMIT_CONST_DWORDS(HS_PARAMS_SIZE) + 2 + 2;
+         EMIT_CONST_DWORDS(HS_PARAMS_SIZE) + 2 + 2 + 2;
 #undef EMIT_CONST_DWORDS
    } else {
 #define EMIT_CONST_DWORDS(const_dwords) (4 + const_dwords)
       return EMIT_CONST_DWORDS(4) +
-         EMIT_CONST_DWORDS(HS_PARAMS_SIZE) + 2 + 2;
+         EMIT_CONST_DWORDS(HS_PARAMS_SIZE) + 2 + 2 + 2;
 #undef EMIT_CONST_DWORDS
    }
 }
@@ -1266,6 +1266,8 @@ tu6_emit_patch_control_points(struct tu_cs *cs,
 
    const uint32_t wavesize = 64;
    const uint32_t vs_hs_local_mem_size = 16384;
+
+   tu_cs_emit_regs(cs, PC_HS_PARAM_0(CHIP, MAX2(tcs->variant->tess.tcs_vertices_out, patch_control_points)));
 
    uint32_t max_patches_per_wave;
    if (dev->physical_device->info->props.tess_use_shared) {
@@ -1354,12 +1356,20 @@ tu6_emit_program_config(struct tu_cs *cs,
 
    bool shared_consts_enable =
       prog->shared_consts.type == IR3_PUSH_CONSTS_SHARED;
-   tu6_emit_shared_consts_enable<CHIP>(crb, shared_consts_enable);
 
+   /* A6XX: SP_UPDATE_CNTL::GFX_SHARED_CONST only has an effect while HLSQ_SHARED_CONSTS is enabled.
+    * If SP_UPDATE_CNTL is emitted after shared consts are disabled, it _presumably_ doesn't clear
+    * the pending shared consts load of a previous pipeline. If there is an event between the draws,
+    * the second draw executes in the same context as the previous one (an event also flips the
+    * context), and the pending load writes the old shared consts into its const space. So
+    * SP_UPDATE_CNTL must happen before HLSQ_SHARED_CONSTS.
+    */
    crb.add(SP_UPDATE_CNTL(CHIP, .vs_state = true, .hs_state = true,
                           .ds_state = true, .gs_state = true,
                           .fs_state = true, .gfx_uav = true,
-                          .gfx_shared_const = shared_consts_enable));
+                          .gfx_shared_const = CHIP == A6XX));
+
+   tu6_emit_shared_consts_enable<CHIP>(crb, shared_consts_enable);
 
    const struct ir3_shader_variant *vs = variants[MESA_SHADER_VERTEX];
    const struct ir3_shader_variant *hs = variants[MESA_SHADER_TESS_CTRL];

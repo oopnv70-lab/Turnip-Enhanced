@@ -253,6 +253,12 @@ source_mods_can_reassociate(const brw_reg &reg, const brw_inst *inst,
    *abs_count = 0;
    *negate_count = 0;
 
+   /* Modifiers on a saturated result cannot be moved to the producer's
+    * sources, where they would apply before saturation.
+    */
+   if (inst->saturate && (reg.abs || reg.negate))
+      return false;
+
    if (reg.negate) {
       switch (inst->opcode) {
       case BRW_OPCODE_MOV:
@@ -414,6 +420,11 @@ preprocess_block(brw_shader &s, const brw_def_analysis &defs, bblock_t *b,
             continue;
 
          if (inst->exec_size != src_inst->exec_size)
+            continue;
+
+         /* Accumulator accesses cannot preserve arbitrary source regions. */
+         if (!inst->src[i].is_contiguous() ||
+             inst->src[i].offset != src_inst->dst.offset)
             continue;
 
          /* If the instruction can be modified, its result type either already

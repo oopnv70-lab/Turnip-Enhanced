@@ -39,55 +39,9 @@ struct u_gralloc;
 struct vk_device;
 struct vk_image;
 
-/*
- * Result of the standard gralloc metadata query used to recover the DRM
- * format/modifier of an ANB/AHB import when the metadata transport does not
- * provide authoritative plane geometry (planes_unverified).  Consumers may
- * recompute plane layouts from (drm_fourcc, modifier, dimensions) with
- * their own layout library.
- */
-/* Ten-bit YUV packing of an imported buffer, classified from the vendor
- * metadata (see u_gralloc_qti_semantics.h); drives the sampler format.
- */
-enum vk_android_yuv10_mode {
-   VK_ANDROID_YUV10_NONE = 0,
-   VK_ANDROID_YUV10_TIGHT,
-   VK_ANDROID_YUV10_P010,
-};
-
-struct vk_android_drm_format_info {
-   uint32_t drm_fourcc;
-   uint64_t modifier;
-   uint32_t plane_count;
-   bool planes_unverified;
-   /* The vendor geometry contradicts its own modifier claim (e.g.
-    * "linear" with a non-zero first-plane offset).  Consumers with
-    * authoritative layout knowledge may reinterpret the modifier.
-    */
-   bool planes_contradictory;
-   /* The standard FOURCC key was absent or DRM_FORMAT_INVALID.  The
-    * consumer must resolve the format from the platform buffer format
-    * (format equivalence) and only accept shapes whose plane layout is
-    * unambiguous without a fourcc.
-    */
-   bool fourcc_unverified;
-   enum vk_android_yuv10_mode yuv10_mode;
-};
-
 #ifdef VK_USE_PLATFORM_ANDROID_KHR
 
 struct u_gralloc *vk_android_get_ugralloc(void);
-
-bool vk_android_gralloc_supports_explicit_yuv_layout(void);
-
-VkResult
-vk_android_get_anb_drm_format(const VkImageCreateInfo *pCreateInfo,
-                              struct vk_android_drm_format_info *out);
-
-VkResult
-vk_android_get_ahb_drm_format(struct AHardwareBuffer *buffer,
-                              VkFormat vk_format,
-                              struct vk_android_drm_format_info *out);
 
 VkResult vk_android_import_anb(struct vk_device *device,
                                const VkImageCreateInfo *pCreateInfo,
@@ -103,18 +57,6 @@ VkResult vk_android_get_anb_layout(
    const VkImageCreateInfo *pCreateInfo,
    VkImageDrmFormatModifierExplicitCreateInfoEXT *out,
    VkSubresourceLayout *out_layouts, int max_planes);
-
-/* Same layout query, additionally producing the recovery consumer's DRM
- * format description from the same metadata pass when the metadata
- * backend allows it (out_drm_from_layout set to true on success); callers
- * fall back to vk_android_get_anb_drm_format() when it is false.
- */
-VkResult vk_android_get_anb_layout_with_format(
-   const VkImageCreateInfo *pCreateInfo,
-   VkImageDrmFormatModifierExplicitCreateInfoEXT *out,
-   VkSubresourceLayout *out_layouts, int max_planes,
-   struct vk_android_drm_format_info *out_drm,
-   bool *out_drm_from_layout);
 
 VkResult vk_android_init_deferred_image(struct vk_device *device,
                                         struct vk_image *image,
@@ -148,17 +90,6 @@ vk_android_get_anb_layout(
 }
 
 static inline VkResult
-vk_android_get_anb_layout_with_format(
-   const VkImageCreateInfo *pCreateInfo,
-   VkImageDrmFormatModifierExplicitCreateInfoEXT *out,
-   VkSubresourceLayout *out_layouts, int max_planes,
-   struct vk_android_drm_format_info *out_drm,
-   bool *out_drm_from_layout)
-{
-   return VK_ERROR_FEATURE_NOT_PRESENT;
-}
-
-static inline VkResult
 vk_android_init_deferred_image(struct vk_device *device,
                                struct vk_image *image,
                                const VkImageCreateInfo *pCreateInfo,
@@ -178,8 +109,6 @@ uint64_t vk_android_get_front_buffer_usage(void);
 VkFormat vk_ahb_format_to_image_format(uint32_t ahb_format);
 
 uint32_t vk_image_format_to_ahb_format(VkFormat vk_format);
-
-uint32_t vk_android_vk_format_to_ahb_format(VkFormat vk_format);
 
 VkFormat vk_external_format_to_efr_format(VkFormat external_format);
 
@@ -254,27 +183,6 @@ vk_android_get_front_buffer_usage(void)
    return 0;
 }
 
-static inline bool
-vk_android_gralloc_supports_explicit_yuv_layout(void)
-{
-   return false;
-}
-
-static inline VkResult
-vk_android_get_anb_drm_format(const VkImageCreateInfo *pCreateInfo,
-                              struct vk_android_drm_format_info *out)
-{
-   return VK_ERROR_FEATURE_NOT_PRESENT;
-}
-
-static inline VkResult
-vk_android_get_ahb_drm_format(struct AHardwareBuffer *buffer,
-                              VkFormat vk_format,
-                              struct vk_android_drm_format_info *out)
-{
-   return VK_ERROR_FEATURE_NOT_PRESENT;
-}
-
 static inline VkFormat
 vk_ahb_format_to_image_format(uint32_t ahb_format)
 {
@@ -283,12 +191,6 @@ vk_ahb_format_to_image_format(uint32_t ahb_format)
 
 static inline uint32_t
 vk_image_format_to_ahb_format(VkFormat vk_format)
-{
-   return 0;
-}
-
-static inline uint32_t
-vk_android_vk_format_to_ahb_format(VkFormat vk_format)
 {
    return 0;
 }

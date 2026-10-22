@@ -994,7 +994,7 @@ Anvil(ANV) driver environment variables
 
    Specifies the size of the printf buffer.
 
-.. envvar:: ANV_QUEUE_OVERRIDE
+.. envvar:: anv_queue_override
 
    Override exposed queue families & counts. The variable is a comma
    separated list of queue overrides. To override the number queues:
@@ -1005,15 +1005,15 @@ Anvil(ANV) driver environment variables
    - ``v`` is for video queues with no graphics support
    - ``b`` is for copy (blitter) queues with no graphics support
 
-   For example, ``ANV_QUEUE_OVERRIDE=gc=2,c=1`` would override the number
+   For example, ``anv_queue_override=gc=2,c=1`` would override the number
    of advertised queues to be 2 queues with graphics+compute support,
    and 1 queue with compute-only support.
 
-   ``ANV_QUEUE_OVERRIDE=c=1`` would override the number of advertised
+   ``anv_queue_override=c=1`` would override the number of advertised
    queues to include 1 queue with compute-only support, but it will
    not change the number of graphics+compute queues.
 
-   ``ANV_QUEUE_OVERRIDE=gc=0,c=1`` would override the number of
+   ``anv_queue_override=gc=0,c=1`` would override the number of
    advertised queues to include 1 queue with compute-only support, and
    it would override the number of graphics+compute queues to be 0.
 
@@ -1651,7 +1651,7 @@ RADV driver environment variables
       forces ray-tracing to be emulated in software on GFX10_3+ and enables
       rt extensions with older hardware.
    ``hic``
-      enable experimental implementation of VK_EXT_host_image_copy on GFX10
+      enable experimental implementation of VK_EXT_host_image_copy on GFX9
    ``msrtss``
       enable experimental implementation of
       VK_EXT_multisampled_render_to_single_sampled
@@ -2403,10 +2403,10 @@ Turnip driver environment variables
       Force GMEM loads via 3D engine.
    ``fdm``
       Force enable fragment density map for all renderpasses.
-   ``concurrentresolves``
-      Enable hardware concurrent resolves (disabled by default).
-   ``concurrentunresolves``
-      Enable hardware concurrent unresolves (disabled by default).
+   ``noconcurrentresolves``
+      Disable concurrent resolves.
+   ``noconcurrentunresolves``
+      Disable concurrent unresolves.
    ``nobinmerging``
       Disable bin merging (used for FDM).
    ``perfcraw``
@@ -2421,8 +2421,6 @@ Turnip driver environment variables
       Disable concurrent binning.
    ``forcecb``
       Force enable concurrent binning.
-   ``image_trace``
-      Log image creation and buffer/image (including host-image-copy) upload layout details.
 
 Freedreno driver environment variables
 --------------------------------------

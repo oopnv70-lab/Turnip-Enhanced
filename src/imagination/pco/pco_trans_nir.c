@@ -236,7 +236,8 @@ static enum pco_mcu_cache_mode_st get_st_cache_mode(nir_intrinsic_instr *intr,
 static pco_instr *
 trans_load_input_vs(trans_ctx *tctx, nir_intrinsic_instr *intr, pco_ref dest)
 {
-   UNUSED unsigned base = nir_intrinsic_base(intr);
+   ASSERTED unsigned base = nir_intrinsic_base(intr);
+   assert(!base);
 
    /* TODO: f16 support. */
 
@@ -247,6 +248,7 @@ trans_load_input_vs(trans_ctx *tctx, nir_intrinsic_instr *intr, pco_ref dest)
    unsigned component = nir_intrinsic_component(intr);
    unsigned chans = pco_ref_get_chans(dest);
 
+   assert(location < ARRAY_SIZE(tctx->shader->data.vs.attribs));
    const pco_range *range = &tctx->shader->data.vs.attribs[location];
    assert(component + chans <= range->count);
 
@@ -283,6 +285,7 @@ trans_store_output_vs(trans_ctx *tctx, nir_intrinsic_instr *intr, pco_ref src)
    ASSERTED unsigned write_mask = nir_intrinsic_write_mask(intr);
    assert(write_mask == BITFIELD_MASK(chans));
 
+   assert(location < ARRAY_SIZE(tctx->shader->data.vs.varyings));
    const pco_range *range = &tctx->shader->data.vs.varyings[location];
    assert(component + chans <= range->count);
 
@@ -327,6 +330,7 @@ static pco_instr *trans_load_tiled_offset(trans_ctx *tctx,
                                           pco_ref dest)
 {
    unsigned component = nir_intrinsic_component(intr);
+   assert(component < 8);
    bool store = !!nir_intrinsic_flags(intr);
 
    unsigned base0 = store ? PCO_SR_TILED_ST_COMP0 : PCO_SR_TILED_LD_COMP0;
@@ -558,15 +562,17 @@ static pco_instr *trans_load_input_fs(trans_ctx *tctx,
       }
    }
 
+   assert(location < ARRAY_SIZE(fs_data->varyings));
    const pco_range *range = &fs_data->varyings[location];
-   assert(component + (ROGUE_USC_COEFFICIENT_SET_SIZE * chans) <= range->count);
 
-   unsigned coeffs_index =
-      range->start + (ROGUE_USC_COEFFICIENT_SET_SIZE * component);
+   unsigned component_size = ROGUE_USC_COEFFICIENT_SET_SIZE * component;
+   unsigned chans_size = ROGUE_USC_COEFFICIENT_SET_SIZE * chans;
+   assert(component_size + chans_size <= range->count);
 
-   pco_ref coeffs = pco_ref_hwreg_vec(coeffs_index,
-                                      PCO_REG_CLASS_COEFF,
-                                      ROGUE_USC_COEFFICIENT_SET_SIZE * chans);
+   unsigned coeffs_index = range->start + component_size;
+
+   pco_ref coeffs =
+      pco_ref_hwreg_vec(coeffs_index, PCO_REG_CLASS_COEFF, chans_size);
 
    bool usc_itrsmp_enhanced =
       PVR_HAS_FEATURE(tctx->pco_ctx->dev_info, usc_itrsmp_enhanced);
@@ -651,11 +657,13 @@ trans_load_fs_coeffs(trans_ctx *tctx, nir_intrinsic_instr *intr, pco_ref dest)
       UNREACHABLE("");
    }
 
+   assert(location < ARRAY_SIZE(fs_data->varyings));
    const pco_range *range = &fs_data->varyings[location];
-   assert(component + chans <= range->count);
 
-   unsigned coeffs_index =
-      range->start + (ROGUE_USC_COEFFICIENT_SET_SIZE * component);
+   unsigned component_size = ROGUE_USC_COEFFICIENT_SET_SIZE * component;
+   assert(component_size + chans <= range->count);
+
+   unsigned coeffs_index = range->start + component_size;
 
    pco_ref coeffs = pco_ref_hwreg_vec(coeffs_index, PCO_REG_CLASS_COEFF, chans);
 
@@ -685,6 +693,7 @@ trans_store_output_fs(trans_ctx *tctx, nir_intrinsic_instr *intr, pco_ref src)
 
    gl_frag_result location = nir_intrinsic_io_semantics(intr).location;
 
+   assert(location < ARRAY_SIZE(fs_data->outputs));
    const pco_range *range = &fs_data->outputs[location];
    assert(component < range->count);
 
@@ -918,6 +927,7 @@ trans_load_output_fs(trans_ctx *tctx, nir_intrinsic_instr *intr, pco_ref dest)
    bool tile_buffer;
    if (location >= FRAG_RESULT_DATA0) {
       assert(!base);
+      assert(location < ARRAY_SIZE(tctx->shader->data.fs.outputs));
       range = &tctx->shader->data.fs.outputs[location];
       unsigned idx = location - FRAG_RESULT_DATA0;
       tile_buffer = fs_data->output_tile_buffers & BITFIELD_BIT(idx);
@@ -2510,6 +2520,28 @@ static pco_instr *trans_is_null_desc(trans_ctx *tctx,
    return pco_mov(&tctx->b, dest, all_dwords_zero);
 }
 
+static pco_instr *
+trans_blend_load(trans_ctx *tctx, nir_intrinsic_instr *intr, pco_ref dest)
+{
+   pco_range range = tctx->shader->data.fs.blend_consts;
+
+   if (intr->intrinsic != nir_intrinsic_load_blend_const_color_rgba) {
+      unsigned offset =
+         util_bitcount((pco_nir_blend_load_to_mask(intr->intrinsic) - 1) &
+                       tctx->shader->data.fs.blend_consts_needed);
+      range.start += offset;
+      range.count -= offset;
+   }
+
+   return trans_load_common_store(tctx,
+                                  intr,
+                                  dest,
+                                  pco_ref_null(),
+                                  0u,
+                                  false,
+                                  &range);
+}
+
 /**
  * \brief Translates a NIR intrinsic instruction into PCO.
  *
@@ -2649,14 +2681,12 @@ static pco_instr *trans_intr(trans_ctx *tctx, nir_intrinsic_instr *intr)
       break;
 
    case nir_intrinsic_load_blend_const_color_rgba:
+   case nir_intrinsic_load_blend_const_color_r_float:
+   case nir_intrinsic_load_blend_const_color_g_float:
+   case nir_intrinsic_load_blend_const_color_b_float:
+   case nir_intrinsic_load_blend_const_color_a_float:
       assert(tctx->stage == MESA_SHADER_FRAGMENT);
-      instr = trans_load_common_store(tctx,
-                                      intr,
-                                      dest,
-                                      pco_ref_null(),
-                                      0u,
-                                      false,
-                                      &tctx->shader->data.fs.blend_consts);
+      instr = trans_blend_load(tctx, intr, dest);
       break;
 
    case nir_intrinsic_load_packed_sample_location_pco:

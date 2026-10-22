@@ -15,6 +15,8 @@
 #include "fdl/freedreno_lrz_layout.h"
 #include "tu_knl.h"
 
+#define TU_MAX_PLANE_COUNT 3
+
 struct tu_image
 {
    struct vk_image vk;
@@ -22,10 +24,6 @@ struct tu_image
    struct fdl_layout layout[3];
    uint64_t subsampled_metadata_offset;
    uint64_t total_size;
-
-   bool android_external_no_gmem_padding;
-
-   enum fdl_yuv10_mode yuv10_mode;
 
    /* Set when bound */
    uint64_t iova;
@@ -86,8 +84,7 @@ struct tu_image_view
    struct tu_image *image; /**< VkImageViewCreateInfo::image */
 
    struct fdl6_view view;
-   struct fdl6_view view_ds_other_aspect;
-   bool has_software_ycbcr;
+   struct fdl6_view view_ds_other_aspect; /* for d32s8 separate depth/stencil */
 
    struct fdl6_view *view_depth;
    struct fdl6_view *view_stencil;
@@ -162,20 +159,6 @@ struct tu_frag_area {
    float width;
    float height;
 };
-
-bool
-tu_drm_fourcc_matches_format(VkFormat vk_format, uint32_t drm_fourcc);
-
-struct vk_android_drm_format_info;
-
-/* Whether a recovery may derive a layout from the reported metadata: a
- * verified fourcc keeps the pre-existing acceptance; a zero fourcc must be
- * accompanied by the standard-metadata "unverified" signal and a modifier
- * the driver's layout library defines authoritatively (linear or Adreno
- * UBWC), because anything else cannot be proven and must fail closed.
- */
-bool
-tu_recovered_layout_is_provable(const struct vk_android_drm_format_info *drm);
 
 void
 tu_fragment_density_map_sample(const struct tu_image_view *fdm,

@@ -132,6 +132,13 @@ enum radv_cmd_dirty_bits {
    RADV_CMD_DIRTY_SHADER_QUERY = RADV_CMD_DIRTY_NGG_STATE | RADV_CMD_DIRTY_TASK_STATE,
 };
 
+enum radv_linear_suballocator {
+   RADV_SUBALLOCATOR_VRAM,
+   RADV_SUBALLOCATOR_CPU_UPLOAD,
+
+   RADV_NUM_LINEAR_SUBALLOCATORS,
+};
+
 struct radv_streamout_binding {
    uint64_t va;
    VkDeviceSize size;
@@ -377,7 +384,9 @@ struct radv_cmd_state {
 
    VkLineRasterizationModeEXT line_rast_mode;
    unsigned vgt_outprim_type;
-   unsigned guardband_raster_prim;
+
+   float guardband_clip_discard_distance_watermark;
+   float guardband_clip_discard_distance;
 
    uint32_t vtx_base_sgpr;
    uint8_t vtx_emit_num;
@@ -435,11 +444,11 @@ struct radv_enc_state {
    uint32_t coded_height;
 };
 
-struct radv_cmd_buffer_upload {
-   uint8_t *map;
+struct radv_linear_suballoc_buffer {
+   uint8_t *cpu_map;
    unsigned offset;
    uint64_t size;
-   struct radeon_winsys_bo *upload_bo;
+   struct radeon_winsys_bo *bo;
    struct list_head list;
 };
 
@@ -494,12 +503,10 @@ struct radv_cmd_buffer {
    uint64_t descriptor_buffers[MAX_SETS];
    uint64_t descriptor_heaps[RADV_MAX_HEAPS];
 
-   struct radv_cmd_buffer_upload upload;
+   struct radv_linear_suballoc_buffer linear_suballocators[RADV_NUM_LINEAR_SUBALLOCATORS];
 
    struct radv_cmd_buffer_queue_state queue_state;
 
-   struct radeon_winsys_bo *eop_fence_bo_tmz;
-   struct radeon_winsys_bo *eop_bug_bo_tmz;
    uint64_t eop_fence_va;
    uint32_t eop_fence_idx;
    uint64_t eop_bug_va;
@@ -631,13 +638,14 @@ radv_get_num_pipeline_stat_queries(struct radv_cmd_buffer *cmd_buffer)
           cmd_buffer->state.active_prims_xfb_queries;
 }
 
-bool radv_cmd_buffer_upload_alloc_aligned(struct radv_cmd_buffer *cmd_buffer, unsigned size, unsigned alignment,
-                                          unsigned *out_offset, void **ptr);
+bool radv_cmd_buffer_vram_suballoc(struct radv_cmd_buffer *cmd_buffer, unsigned size, unsigned alignment,
+                                   uint64_t *out_va);
 
-bool radv_cmd_buffer_upload_alloc(struct radv_cmd_buffer *cmd_buffer, unsigned size, unsigned *out_offset, void **ptr);
+bool radv_cmd_buffer_upload_alloc(struct radv_cmd_buffer *cmd_buffer, unsigned size, unsigned alignment,
+                                  uint64_t *out_va, void **ptr);
 
-bool radv_cmd_buffer_upload_data(struct radv_cmd_buffer *cmd_buffer, unsigned size, const void *data,
-                                 unsigned *out_offset);
+bool radv_cmd_buffer_upload_data(struct radv_cmd_buffer *cmd_buffer, unsigned size, unsigned alignment,
+                                 const void *data, uint64_t *out_va);
 
 void radv_cmd_buffer_trace_emit(struct radv_cmd_buffer *cmd_buffer);
 

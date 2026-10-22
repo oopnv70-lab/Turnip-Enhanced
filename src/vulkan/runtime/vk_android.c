@@ -38,12 +38,10 @@
 
 #include "c11/threads.h"
 #include "drm-uapi/drm_fourcc.h"
-#include "util/os_misc.h"
 #include "util/libsync.h"
 #include "util/log.h"
 #include "util/os_file.h"
 #include "util/u_gralloc/u_gralloc.h"
-#include "util/u_gralloc/u_gralloc_qti_semantics.h"
 
 #include <hardware/gralloc.h>
 #include <hardware/hardware.h>
@@ -56,14 +54,7 @@
 
 #include <unistd.h>
 
-static_assert((int)U_GRALLOC_QTI_YUV10_NONE == (int)VK_ANDROID_YUV10_NONE, "");
-static_assert((int)U_GRALLOC_QTI_YUV10_TIGHT == (int)VK_ANDROID_YUV10_TIGHT, "");
-static_assert((int)U_GRALLOC_QTI_YUV10_P010 == (int)VK_ANDROID_YUV10_P010, "");
-
 static struct u_gralloc *_gralloc;
-
-static uint32_t
-vk_android_ahb_platform_fourcc(uint32_t ahb_format, uint64_t ahb_usage);
 
 static void
 vk_android_init_ugralloc_once(void)
@@ -78,159 +69,6 @@ vk_android_get_ugralloc(void)
    call_once(&once, vk_android_init_ugralloc_once);
    return _gralloc;
 }
-bool
-vk_android_gralloc_supports_explicit_yuv_layout(void)
-{
-   switch (u_gralloc_get_type(vk_android_get_ugralloc())) {
-   case U_GRALLOC_TYPE_STABLEC:
-   /* The passthrough backend serves authoritative plane geometry from the
-    * standard PLANE_LAYOUTS key and resolves vendor formats through the
-    * same standard metadata queries; removing it from this gate makes
-    * the driver report unsupported for every vendor (UBWC) AHB format
-    * and crashes Skia's GaneshBackendTexture (FATAL).  It must stay in.
-    */
-   case U_GRALLOC_TYPE_IMAPPER4_PT:
-   case U_GRALLOC_TYPE_GRALLOC4:
-   case U_GRALLOC_TYPE_CROS:
-      return true;
-   default:
-      return false;
-   }
-}
-
-/* Diagnostics, off unless MESA_VK_ANDROID_DEBUG is set (sysprop
- * debug.mesa.vk.android.debug / vendor.mesa.vk.android.debug).
- */
-static bool
-vk_android_debug_enabled(void)
-{
-   static int enabled = -1;
-   if (enabled < 0)
-      enabled = os_get_option("MESA_VK_ANDROID_DEBUG") != NULL;
-   return enabled;
-}
-
-/* Fill the caller's DRM format description from one basic-info answer.
- * The handle is read for diagnostics and for the QTI 10-bit
- * classification only; every other output is a function of the queried
- * buffer alone.
- */
-static void
-vk_android_drm_format_info_fill(struct u_gralloc_buffer_handle *hnd,
-                                const struct u_gralloc_buffer_basic_info *info,
-                                struct vk_android_drm_format_info *out)
-{
-   if (vk_android_debug_enabled())
-      mesa_logi("vk_android: metadata ok hal_format=0x%x pixel_stride=%d "
-                "fourcc=0x%x modifier=0x%llx planes=%u unverified=%d "
-                "contradictory=%d fourcc_unverified=%d",
-                hnd->hal_format, hnd->pixel_stride, info->drm_fourcc,
-                (unsigned long long)info->modifier, info->num_planes,
-                !!(info->flags & U_GRALLOC_BUFFER_INFO_PLANES_UNVERIFIED),
-                !!(info->flags & U_GRALLOC_BUFFER_INFO_PLANES_CONTRADICTORY),
-                !!(info->flags & U_GRALLOC_BUFFER_INFO_FOURCC_UNVERIFIED));
-
-   *out = (struct vk_android_drm_format_info){
-      .drm_fourcc = info->drm_fourcc,
-      .modifier = info->modifier,
-      .plane_count = (uint32_t)info->num_planes,
-      .planes_unverified =
-         !!(info->flags & U_GRALLOC_BUFFER_INFO_PLANES_UNVERIFIED),
-      .planes_contradictory =
-         !!(info->flags & U_GRALLOC_BUFFER_INFO_PLANES_CONTRADICTORY),
-      .fourcc_unverified =
-         !!(info->flags & U_GRALLOC_BUFFER_INFO_FOURCC_UNVERIFIED),
-   };
-
-   out->yuv10_mode = (enum vk_android_yuv10_mode)
-      u_gralloc_qti_get_yuv10_mode(hnd->hal_format, info->drm_fourcc,
-                                   info->modifier);
-   if (out->yuv10_mode != VK_ANDROID_YUV10_NONE)
-      mesa_logi_once("vk_android: QTI 10-bit buffer sampled as %s "
-                     "(hal_format=0x%x modifier=0x%llx)",
-                     out->yuv10_mode == VK_ANDROID_YUV10_TIGHT ? "TP10"
-                                                               : "P010",
-                     hnd->hal_format, (unsigned long long)info->modifier);
-}
-
-static VkResult
-vk_android_drm_format_of(struct u_gralloc_buffer_handle *hnd,
-                         struct vk_android_drm_format_info *out)
-{
-   struct u_gralloc_buffer_basic_info info;
-   if (u_gralloc_get_buffer_basic_info(vk_android_get_ugralloc(), hnd,
-                                        &info) != 0) {
-      mesa_loge("vk_android: gralloc metadata query failed for handle "
-                "(hal_format=0x%x pixel_stride=%d numFds=%d numInts=%d) - "
-                "refusing import; set debug.mesa.u.gralloc.debug=1 and "
-                "debug.mesa.vk.android.debug=1 for per-key detail",
-                hnd->hal_format, hnd->pixel_stride,
-                hnd->handle ? hnd->handle->numFds : -1,
-                hnd->handle ? hnd->handle->numInts : -1);
-      return VK_ERROR_INVALID_EXTERNAL_HANDLE;
-   }
-
-   vk_android_drm_format_info_fill(hnd, &info, out);
-   return VK_SUCCESS;
-}
-
-VkResult
-vk_android_get_anb_drm_format(const struct VkImageCreateInfo *pCreateInfo,
-                              struct vk_android_drm_format_info *out)
-{
-   const VkNativeBufferANDROID *anb = vk_find_struct_const(
-      pCreateInfo->pNext, NATIVE_BUFFER_ANDROID);
-   if (!anb)
-      return VK_ERROR_INVALID_EXTERNAL_HANDLE;
-
-   struct u_gralloc_buffer_handle hnd = {
-      .handle = anb->handle,
-      .hal_format = (int) pCreateInfo->format,
-      .pixel_stride = 0,
-   };
-   return vk_android_drm_format_of(&hnd, out);
-}
-
-VkResult
-vk_android_get_ahb_drm_format(struct AHardwareBuffer *buffer,
-                              VkFormat vk_format,
-                              struct vk_android_drm_format_info *out)
-{
-   AHardwareBuffer_Desc desc;
-   AHardwareBuffer_describe(buffer, &desc);
-
-   if (vk_android_debug_enabled())
-      mesa_logi("vk_android: AHB describe format=0x%x width=%u height=%u "
-                "layers=%u stride=%u usage=0x%llx vk_format=%d",
-                desc.format, desc.width, desc.height, desc.layers,
-                desc.stride, (unsigned long long)desc.usage, (int)vk_format);
-
-   struct u_gralloc_buffer_handle hnd = {
-      .handle = AHardwareBuffer_getNativeHandle(buffer),
-      .hal_format = (int) desc.format,
-      .pixel_stride = (int) desc.stride,
-   };
-   (void) vk_format;
-   VkResult result = vk_android_drm_format_of(&hnd, out);
-   if (result != VK_SUCCESS)
-      return result;
-
-   /* The vendor left the DRM fourcc unsupported or invalid, but the platform
-    * format and usage may still pin the YUV identity completely (the same
-    * mapping the format properties path applies).  Supply the fourcc the
-    * layout recovery needs; the modifier gate in the consumer still applies,
-    * so a compressed or unknown tiling is not silently accepted.
-    */
-   if (out->fourcc_unverified && out->drm_fourcc == 0) {
-      uint32_t platform_fourcc =
-         vk_android_ahb_platform_fourcc(desc.format, desc.usage);
-      if (platform_fourcc != 0)
-         out->drm_fourcc = platform_fourcc;
-   }
-
-   return VK_SUCCESS;
-}
-
 
 static int vk_android_hal_open(const struct hw_module_t *mod, const char *id,
                                struct hw_device_t **dev);
@@ -302,10 +140,8 @@ vk_android_hal_open(const struct hw_module_t *mod, const char *id,
 static VkResult
 vk_gralloc_to_drm_explicit_layout(
    struct u_gralloc_buffer_handle *in_hnd,
-   uint32_t platform_fourcc,
    VkImageDrmFormatModifierExplicitCreateInfoEXT *out,
-   VkSubresourceLayout *out_layouts, int max_planes,
-   struct u_gralloc_buffer_basic_info *out_info)
+   VkSubresourceLayout *out_layouts, int max_planes)
 {
    struct u_gralloc_buffer_basic_info info;
    struct u_gralloc *u_gralloc = vk_android_get_ugralloc();
@@ -314,47 +150,6 @@ vk_gralloc_to_drm_explicit_layout(
    if (u_gralloc_get_buffer_basic_info(u_gralloc, in_hnd, &info) != 0) {
       mesa_loge("u_gralloc_get_buffer_basic_info failed");
       return VK_ERROR_INVALID_EXTERNAL_HANDLE;
-   }
-
-   /* Hand the single consumed answer back to callers that would
-    * otherwise repeat this exact query for the same handle.
-    */
-   if (out_info)
-      *out_info = info;
-
-   if (info.flags & U_GRALLOC_BUFFER_INFO_PLANES_UNVERIFIED) {
-      /* The metadata transport could not supply authoritative plane
-       * geometry.  Drivers that can recompute the layout from
-       * (fourcc, modifier, dimensions) may recover via
-       * vk_android_get_anb_drm_format(); generic consumers must not use
-       * the zero-filled layouts.
-       */
-      return VK_ERROR_FEATURE_NOT_PRESENT;
-   }
-
-   if (info.flags & U_GRALLOC_BUFFER_INFO_FOURCC_UNVERIFIED) {
-      if (info.num_planes > 1) {
-         /* Multi-plane layouts cannot be mapped onto a Vulkan multi-planar
-          * format without knowing the DRM plane order.  When the platform
-          * format and usage determine it completely (the caller passes that
-          * fourcc), the plane order is known and the buffer is accepted;
-          * otherwise the vendor layouts would be misinterpreted, so refuse.
-          */
-         if (platform_fourcc == 0) {
-            mesa_loge("gralloc metadata has no DRM fourcc for a %d-plane "
-                      "buffer", info.num_planes);
-            return VK_ERROR_INVALID_EXTERNAL_HANDLE;
-         }
-         info.drm_fourcc = platform_fourcc;
-      } else if (info.modifier == (uint64_t)DRM_FORMAT_MOD_INVALID) {
-         /* DRM_FORMAT_MOD_INVALID means the tiling is unknown and the
-          * format identity could not be cross-checked through the fourcc:
-          * nothing is left to prove the layout with.
-          */
-         mesa_loge("gralloc metadata has no DRM fourcc and an unknown "
-                   "modifier");
-         return VK_ERROR_INVALID_EXTERNAL_HANDLE;
-      }
    }
 
    if (info.num_planes > max_planes) {
@@ -513,36 +308,6 @@ vk_android_get_anb_layout(
    VkImageDrmFormatModifierExplicitCreateInfoEXT *out,
    VkSubresourceLayout *out_layouts, int max_planes)
 {
-   return vk_android_get_anb_layout_with_format(pCreateInfo, out, out_layouts,
-                                                max_planes, NULL, NULL);
-}
-
-/* Layout query variant that also serves the recovery consumer's DRM
- * format description from the same single metadata pass, so a compressed
- * (UBWC) import does not repeat identical vendor queries.
- *
- * Only a backend whose basic-info answer is a pure function of the
- * buffer handle qualifies: the gralloc-4 passthrough backend keys every
- * queried metadata item by the handle alone, and the input-only
- * hal_format/pixel_stride fields feed diagnostics and an unverified-
- * geometry fallback that this consumer never reads.  For any other
- * backend *out_drm_from_layout stays false and the caller keeps using
- * its dedicated query, leaving that backend's behavior unchanged.
- *
- * When filled, the structure is identical to what
- * vk_android_get_anb_drm_format(pCreateInfo, out) returns: the handle
- * used for the QTI 10-bit classification is the same
- * {(int) pCreateInfo->format, stride 0} pair, and the basic-info content
- * derives from the same buffer handle.
- */
-VkResult
-vk_android_get_anb_layout_with_format(
-   const VkImageCreateInfo *pCreateInfo,
-   VkImageDrmFormatModifierExplicitCreateInfoEXT *out,
-   VkSubresourceLayout *out_layouts, int max_planes,
-   struct vk_android_drm_format_info *out_drm,
-   bool *out_drm_from_layout)
-{
    const VkNativeBufferANDROID *native_buffer =
       vk_find_struct_const(pCreateInfo->pNext, NATIVE_BUFFER_ANDROID);
 
@@ -552,28 +317,8 @@ vk_android_get_anb_layout_with_format(
       .pixel_stride = native_buffer->stride,
    };
 
-   if (out_drm_from_layout)
-      *out_drm_from_layout = false;
-
-   struct u_gralloc_buffer_basic_info info = {0};
-   VkResult result = vk_gralloc_to_drm_explicit_layout(
-      &gr_handle, 0, out, out_layouts, max_planes, &info);
-
-   if (out_drm != NULL && result == VK_ERROR_FEATURE_NOT_PRESENT &&
-       u_gralloc_get_type(vk_android_get_ugralloc()) ==
-          U_GRALLOC_TYPE_IMAPPER4_PT) {
-      struct u_gralloc_buffer_handle recovery_hnd = {
-         .handle = native_buffer->handle,
-         .hal_format = (int) pCreateInfo->format,
-         .pixel_stride = 0,
-      };
-
-      vk_android_drm_format_info_fill(&recovery_hnd, &info, out_drm);
-      if (out_drm_from_layout)
-         *out_drm_from_layout = true;
-   }
-
-   return result;
+   return vk_gralloc_to_drm_explicit_layout(&gr_handle, out,
+                                            out_layouts, max_planes);
 }
 
 VkResult
@@ -939,10 +684,8 @@ vk_android_get_ahb_layout(
       .hal_format = description.format,
    };
 
-   return vk_gralloc_to_drm_explicit_layout(
-      &gr_handle,
-      vk_android_ahb_platform_fourcc(description.format, description.usage),
-      out, out_layouts, max_planes, NULL);
+   return vk_gralloc_to_drm_explicit_layout(&gr_handle, out,
+                                            out_layouts, max_planes);
 }
 
 /* From the Android hardware_buffer.h header:
@@ -1014,39 +757,6 @@ vk_ahb_format_to_image_format(uint32_t ahb_format)
    }
 }
 
-/* Resolve a platform YUV buffer whose identity is fully determined by the
- * AHB format and usage to the DRM fourcc that describes its plane layout.
- *
- * The YUV formats the camera and video pipelines hand to the GPU are not in
- * the Vulkan "AHardwareBuffer Format Equivalence" table; they are normally
- * described by the DRM fourcc that gralloc reports alongside the platform
- * format.  Some grallocs do not map those formats at all, leaving the
- * platform format as the only identity.  It is still a complete description:
- * the generic 4:2:0 camera buffer and an IMPLEMENTATION_DEFINED buffer with
- * camera usage are the two-plane semi-planar layout DRM calls NV12.  This
- * mirrors the mapping the platform and the other Vulkan drivers use, and is
- * keyed only on the platform format and usage, never on the SoC or the
- * gralloc generation.
- *
- * Returns 0 when the platform format does not pin the layout, leaving
- * resolution to the vendor metadata as before.
- */
-static uint32_t
-vk_android_ahb_platform_fourcc(uint32_t ahb_format, uint64_t ahb_usage)
-{
-   switch (ahb_format) {
-   case AHARDWAREBUFFER_FORMAT_Y8Cb8Cr8_420:
-      return DRM_FORMAT_NV12;
-   case AHARDWAREBUFFER_FORMAT_IMPLEMENTATION_DEFINED:
-      if (ahb_usage & AHARDWAREBUFFER_USAGE_CAMERA_MASK)
-         return DRM_FORMAT_NV12;
-      break;
-   default:
-      break;
-   }
-   return 0;
-}
-
 /* Convert a VkFormat to an AHB format, based on the "AHardwareBuffer Format
  * Equivalence" table in Vulkan spec.
  *
@@ -1093,23 +803,6 @@ vk_image_format_to_ahb_format(VkFormat vk_format)
       return AHARDWAREBUFFER_FORMAT_B8G8R8A8_UNORM;
    default:
       return 0;
-   }
-}
-
-/* Inverse of the platform-format resolution for the YUV formats that are
- * absent from the Vulkan "AHardwareBuffer Format Equivalence" table.  The
- * generic two-plane 4:2:0 camera format is the one the platform defines for
- * NV12; there is no single platform format for IMPLEMENTATION_DEFINED, which
- * the caller chooses according to the intended usage.
- */
-uint32_t
-vk_android_vk_format_to_ahb_format(VkFormat vk_format)
-{
-   switch (vk_format) {
-   case VK_FORMAT_G8_B8R8_2PLANE_420_UNORM:
-      return AHARDWAREBUFFER_FORMAT_Y8Cb8Cr8_420;
-   default:
-      return vk_image_format_to_ahb_format(vk_format);
    }
 }
 
@@ -1416,25 +1109,6 @@ get_ahb_buffer_format_properties2(
       return VK_ERROR_INVALID_EXTERNAL_HANDLE;
    }
 
-   if (info.flags & U_GRALLOC_BUFFER_INFO_FOURCC_UNVERIFIED) {
-      /* This path only resolves AHB formats absent from the Vulkan format
-       * equivalence table, which requires the DRM fourcc.  The standard
-       * metadata did not provide one.  The platform format and usage may
-       * still identify the buffer completely (e.g. the generic 4:2:0 camera
-       * layout); when they do, resolve it here.  Otherwise the format cannot
-       * be resolved.
-       */
-      uint32_t platform_fourcc =
-         vk_android_ahb_platform_fourcc(desc.format, desc.usage);
-      if (platform_fourcc != 0) {
-         info.drm_fourcc = platform_fourcc;
-      } else {
-         mesa_loge("AHB format 0x%x has no DRM fourcc in the standard metadata",
-                   desc.format);
-         return VK_ERROR_INVALID_EXTERNAL_HANDLE;
-      }
-   }
-
    switch (info.drm_fourcc) {
    case DRM_FORMAT_YVU420:
       /* Assuming that U and V planes are swapped earlier */
@@ -1442,14 +1116,6 @@ get_ahb_buffer_format_properties2(
       break;
    case DRM_FORMAT_NV12:
       external_format = VK_FORMAT_G8_B8R8_2PLANE_420_UNORM;
-      break;
-   case DRM_FORMAT_NV21:
-      /* Vulkan has no native VU two-plane format.  Reuse the NV12 plane
-       * representation and swap Cb/Cr through the conversion component map.
-       */
-      external_format = VK_FORMAT_G8_B8R8_2PLANE_420_UNORM;
-      p->samplerYcbcrConversionComponents.r = VK_COMPONENT_SWIZZLE_B;
-      p->samplerYcbcrConversionComponents.b = VK_COMPONENT_SWIZZLE_R;
       break;
    case DRM_FORMAT_P010:
       external_format = VK_FORMAT_G10X6_B10X6R10X6_2PLANE_420_UNORM_3PACK16;
@@ -1499,18 +1165,6 @@ get_ahb_buffer_format_properties2(
          ? VK_CHROMA_LOCATION_MIDPOINT
          : VK_CHROMA_LOCATION_COSITED_EVEN;
 
-   if (vk_android_debug_enabled())
-      mesa_logi("vk_android: AHB props hal_format=0x%x usage=0x%" PRIx64
-                " drm_fourcc=0x%x planes=%u flags=0x%x vkformat=0x%x"
-                " externalFormat=0x%llx components=(%u,%u,%u,%u)",
-                desc.format, desc.usage, info.drm_fourcc,
-                (unsigned)info.num_planes, info.flags, (unsigned)p->format,
-                (unsigned long long)external_format,
-                (unsigned)p->samplerYcbcrConversionComponents.r,
-                (unsigned)p->samplerYcbcrConversionComponents.g,
-                (unsigned)p->samplerYcbcrConversionComponents.b,
-                (unsigned)p->samplerYcbcrConversionComponents.a);
-
 finish:
 
    device->physical->dispatch_table.GetPhysicalDeviceFormatProperties2(
@@ -1526,50 +1180,6 @@ finish:
     *  VK_FORMAT_FEATURE_2_COSITED_CHROMA_SAMPLES_BIT"
     */
    p->formatFeatures |= VK_FORMAT_FEATURE_2_MIDPOINT_CHROMA_SAMPLES_BIT_KHR;
-
-   /* VK_ANDROID_external_format_resolve: an external format that has a
-    * resolve (color-attachment) format is renderable through the resolve
-    * path, which the driver advertises as
-    * VK_ANDROID_external_format_resolve.  Report COLOR_ATTACHMENT on the
-    * public vkGetAndroidHardwareBufferPropertiesANDROID path whenever the
-    * buffer itself declares AHARDWAREBUFFER_USAGE_GPU_FRAMEBUFFER, and not
-    * only when the caller chains the resolve properties (upstream Mesa does
-    * the latter since commit b64cd520f78 "vulkan/android: Set
-    * COLOR_ATTACHMENT_BIT for external format resolve").
-    *
-    * Compatibility for ANGLE's AHardwareBuffer import (GLES-over-Vulkan):
-    * HardwareBufferImageSiblingVkAndroid::CheckFormatSupport requires
-    * COLOR_ATTACHMENT in formatFeatures as soon as the AHB usage contains
-    * GPU_FRAMEBUFFER, but deployed builds do not chain the resolve
-    * properties during that validation.  Buffers such as WeChat's decoder
-    * output (usage GPU_SAMPLED_IMAGE|GPU_FRAMEBUFFER, QTI NV12/UBWC) were
-    * therefore rejected with EGL_BAD_PARAMETER, making eglCreateImageKHR
-    * fail for every frame (black video).  This is a pure Vulkan-side
-    * capability report; no private gralloc API is involved.  The resolve
-    * contract remains enforced at image creation (callers must chain the
-    * resolve properties and enable the extension feature), and a caller
-    * that does chain them still gets the same bit.  The external-format
-    * path only (format == VK_FORMAT_UNDEFINED): buffers whose format is in
-    * the format-equivalence table take their features straight from that
-    * format's own properties instead.  The resolve mapping is limited to
-    * the eight-bit recipe (R8G8B8A8 color attachment) that this tree
-    * verifies for its direct external-format path; ten-bit resolve stays
-    * governed by the chained path and its per-buffer fail-safe.  See
-    * plan.md R74/R75.
-    */
-   if (p->format == VK_FORMAT_UNDEFINED &&
-       (desc.usage & AHARDWAREBUFFER_USAGE_GPU_FRAMEBUFFER) != 0 &&
-       device->physical->supported_extensions.ANDROID_external_format_resolve &&
-       vk_external_format_to_efr_format(external_format) ==
-          VK_FORMAT_R8G8B8A8_UNORM)
-      p->formatFeatures |= VK_FORMAT_FEATURE_2_COLOR_ATTACHMENT_BIT;
-
-   if (vk_android_debug_enabled())
-      mesa_logi("vk_android: [ahb] final features=0x%x cb=%d externalFormat=0x%llx"
-                " usage=0x%" PRIx64,
-                (unsigned)p->formatFeatures,
-                !!(p->formatFeatures & VK_FORMAT_FEATURE_2_COLOR_ATTACHMENT_BIT),
-                (unsigned long long)p->externalFormat, desc.usage);
 
    return VK_SUCCESS;
 }
@@ -1700,7 +1310,7 @@ vk_android_get_ahb_image_properties(
                        "type (%u) unsupported for AHB", info->type);
    }
 
-   const uint32_t ahb_format = vk_android_vk_format_to_ahb_format(info->format);
+   const uint32_t ahb_format = vk_image_format_to_ahb_format(info->format);
    if (!ahb_format) {
       return vk_errorf(pdevice, VK_ERROR_FORMAT_NOT_SUPPORTED,
                        "format (%u) unsupported for AHB", info->format);

@@ -1427,6 +1427,34 @@ DEFINE_ALIAS_FUNCTION(deepcopy_VkPhysicalDeviceSparseImageFormatInfo2,
                       deepcopy_VkPhysicalDeviceSparseImageFormatInfo2KHR)
 
 #endif
+#ifdef VK_KHR_device_group
+DEFINE_ALIAS_FUNCTION(deepcopy_VkMemoryAllocateFlagsInfo, deepcopy_VkMemoryAllocateFlagsInfoKHR)
+
+DEFINE_ALIAS_FUNCTION(deepcopy_VkDeviceGroupRenderPassBeginInfo,
+                      deepcopy_VkDeviceGroupRenderPassBeginInfoKHR)
+
+DEFINE_ALIAS_FUNCTION(deepcopy_VkDeviceGroupCommandBufferBeginInfo,
+                      deepcopy_VkDeviceGroupCommandBufferBeginInfoKHR)
+
+DEFINE_ALIAS_FUNCTION(deepcopy_VkDeviceGroupSubmitInfo, deepcopy_VkDeviceGroupSubmitInfoKHR)
+
+DEFINE_ALIAS_FUNCTION(deepcopy_VkDeviceGroupBindSparseInfo, deepcopy_VkDeviceGroupBindSparseInfoKHR)
+
+DEFINE_ALIAS_FUNCTION(deepcopy_VkBindBufferMemoryDeviceGroupInfo,
+                      deepcopy_VkBindBufferMemoryDeviceGroupInfoKHR)
+
+DEFINE_ALIAS_FUNCTION(deepcopy_VkBindImageMemoryDeviceGroupInfo,
+                      deepcopy_VkBindImageMemoryDeviceGroupInfoKHR)
+
+#endif
+#ifdef VK_KHR_device_group_creation
+DEFINE_ALIAS_FUNCTION(deepcopy_VkPhysicalDeviceGroupProperties,
+                      deepcopy_VkPhysicalDeviceGroupPropertiesKHR)
+
+DEFINE_ALIAS_FUNCTION(deepcopy_VkDeviceGroupDeviceCreateInfo,
+                      deepcopy_VkDeviceGroupDeviceCreateInfoKHR)
+
+#endif
 #ifdef VK_KHR_external_memory_capabilities
 DEFINE_ALIAS_FUNCTION(deepcopy_VkExternalMemoryProperties, deepcopy_VkExternalMemoryPropertiesKHR)
 
@@ -1475,6 +1503,11 @@ void deepcopy_VkImportSemaphoreFdInfoKHR(Allocator* alloc, VkStructureType rootT
 void deepcopy_VkSemaphoreGetFdInfoKHR(Allocator* alloc, VkStructureType rootType,
                                       const VkSemaphoreGetFdInfoKHR* from,
                                       VkSemaphoreGetFdInfoKHR* to);
+
+#endif
+#ifdef VK_KHR_push_descriptor
+DEFINE_ALIAS_FUNCTION(deepcopy_VkPhysicalDevicePushDescriptorProperties,
+                      deepcopy_VkPhysicalDevicePushDescriptorPropertiesKHR)
 
 #endif
 #ifdef VK_KHR_shader_float16_int8
@@ -1647,6 +1680,31 @@ DEFINE_ALIAS_FUNCTION(deepcopy_VkQueueFamilyGlobalPriorityProperties,
                       deepcopy_VkQueueFamilyGlobalPriorityPropertiesKHR)
 
 #endif
+#ifdef VK_KHR_depth_stencil_resolve
+DEFINE_ALIAS_FUNCTION(deepcopy_VkSubpassDescriptionDepthStencilResolve,
+                      deepcopy_VkSubpassDescriptionDepthStencilResolveKHR)
+
+DEFINE_ALIAS_FUNCTION(deepcopy_VkPhysicalDeviceDepthStencilResolveProperties,
+                      deepcopy_VkPhysicalDeviceDepthStencilResolvePropertiesKHR)
+
+#endif
+#ifdef VK_KHR_timeline_semaphore
+DEFINE_ALIAS_FUNCTION(deepcopy_VkPhysicalDeviceTimelineSemaphoreFeatures,
+                      deepcopy_VkPhysicalDeviceTimelineSemaphoreFeaturesKHR)
+
+DEFINE_ALIAS_FUNCTION(deepcopy_VkPhysicalDeviceTimelineSemaphoreProperties,
+                      deepcopy_VkPhysicalDeviceTimelineSemaphorePropertiesKHR)
+
+DEFINE_ALIAS_FUNCTION(deepcopy_VkSemaphoreTypeCreateInfo, deepcopy_VkSemaphoreTypeCreateInfoKHR)
+
+DEFINE_ALIAS_FUNCTION(deepcopy_VkTimelineSemaphoreSubmitInfo,
+                      deepcopy_VkTimelineSemaphoreSubmitInfoKHR)
+
+DEFINE_ALIAS_FUNCTION(deepcopy_VkSemaphoreWaitInfo, deepcopy_VkSemaphoreWaitInfoKHR)
+
+DEFINE_ALIAS_FUNCTION(deepcopy_VkSemaphoreSignalInfo, deepcopy_VkSemaphoreSignalInfoKHR)
+
+#endif
 #ifdef VK_KHR_vulkan_memory_model
 DEFINE_ALIAS_FUNCTION(deepcopy_VkPhysicalDeviceVulkanMemoryModelFeatures,
                       deepcopy_VkPhysicalDeviceVulkanMemoryModelFeaturesKHR)
@@ -1655,6 +1713,17 @@ DEFINE_ALIAS_FUNCTION(deepcopy_VkPhysicalDeviceVulkanMemoryModelFeatures,
 #ifdef VK_KHR_shader_terminate_invocation
 DEFINE_ALIAS_FUNCTION(deepcopy_VkPhysicalDeviceShaderTerminateInvocationFeatures,
                       deepcopy_VkPhysicalDeviceShaderTerminateInvocationFeaturesKHR)
+
+#endif
+#ifdef VK_KHR_dynamic_rendering_local_read
+DEFINE_ALIAS_FUNCTION(deepcopy_VkPhysicalDeviceDynamicRenderingLocalReadFeatures,
+                      deepcopy_VkPhysicalDeviceDynamicRenderingLocalReadFeaturesKHR)
+
+DEFINE_ALIAS_FUNCTION(deepcopy_VkRenderingAttachmentLocationInfo,
+                      deepcopy_VkRenderingAttachmentLocationInfoKHR)
+
+DEFINE_ALIAS_FUNCTION(deepcopy_VkRenderingInputAttachmentIndexInfo,
+                      deepcopy_VkRenderingInputAttachmentIndexInfoKHR)
 
 #endif
 #ifdef VK_KHR_buffer_device_address

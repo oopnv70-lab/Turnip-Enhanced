@@ -426,7 +426,16 @@ static bool si_update_shaders_shared_by_vertex_and_mesh_pipe(struct si_context *
       assert(pipeline);
 
       si_sqtt_describe_pipeline_bind(sctx, pipeline_code_hash, 0);
+
       si_pm4_bind_state(sctx, sqtt_pipeline, pipeline);
+
+      /* shader states overwrite the pipeline's code addresses when they are emitted, and
+       * shaders with the same code share an already emitted pipeline, which the bind
+       * doesn't mark dirty
+       */
+      if (sctx->dirty_atoms & (SI_STATE_BIT(ls) | SI_STATE_BIT(hs) | SI_STATE_BIT(es) |
+                               SI_STATE_BIT(gs) | SI_STATE_BIT(vs) | SI_STATE_BIT(ps)))
+         sctx->dirty_atoms |= SI_STATE_BIT(sqtt_pipeline);
    }
 
    return true;
@@ -1443,7 +1452,7 @@ static void si_emit_draw_packets(struct si_context *sctx, const struct pipe_draw
 {
    struct radeon_cmdbuf *cs = &sctx->gfx_cs;
 
-   if (unlikely(sctx->sqtt.enabled)) {
+   if (unlikely(si_is_sqtt_active(sctx))) {
       si_sqtt_write_event_marker(sctx, &sctx->gfx_cs, sctx->sqtt.next_event,
                                  UINT_MAX, UINT_MAX, UINT_MAX);
    }
@@ -1890,7 +1899,7 @@ static void si_emit_draw_packets(struct si_context *sctx, const struct pipe_draw
       }
    }
 
-   if (GFX_VERSION >= GFX9 && unlikely(sctx->sqtt.enabled))
+   if (GFX_VERSION >= GFX9 && unlikely(si_is_sqtt_active(sctx)))
      radeon_event_write(V_028A90_THREAD_TRACE_MARKER);
    radeon_end();
 }

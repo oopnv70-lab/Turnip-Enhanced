@@ -764,7 +764,13 @@ impl DisplayOp for OpCmp {
             self.cmp_op,
             self.fmt_src(&self.srcs[0]),
             self.fmt_src(&self.srcs[1]),
-        )
+        )?;
+
+        if self.accum_op != CmpAccumOp::None {
+            write!(f, " {}", self.fmt_src(&self.accum))?;
+        }
+
+        Ok(())
     }
 }
 
@@ -1396,12 +1402,25 @@ impl CmpResultType {
         match (self, dst_bits) {
             (CmpResultType::I1, _) => 1,
             (CmpResultType::F1, 32) => (1.0_f32).to_bits(),
-            (CmpResultType::F1, 16) => {
-                F16::from_f32_rtne(1.0_f32).to_bits() as u32
-            }
+            (CmpResultType::F1, 16) => F16::ONE.to_bits() as u32,
             (CmpResultType::F1, _) => panic!("Invalid float length"),
             (CmpResultType::M1, _) => 0xFFFF_FFFF,
             (CmpResultType::C, _) => panic!("Not a boolean result type"),
+        }
+    }
+
+    pub fn from_true_bits(data: u32, bits: u8) -> Option<Self> {
+        const F16: u32 = F16::ONE.to_bits() as u32;
+        const F32: u32 = (1.0_f32).to_bits();
+
+        match (data, bits) {
+            (1, _) => Some(CmpResultType::I1),
+            (0xFF, 8) => Some(CmpResultType::M1),
+            (0xFFFF, 16) => Some(CmpResultType::M1),
+            (0xFFFFFFFF, 32) => Some(CmpResultType::M1),
+            (F16, 16) => Some(CmpResultType::F1),
+            (F32, 32) => Some(CmpResultType::F1),
+            _ => None,
         }
     }
 }
