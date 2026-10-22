@@ -4,7 +4,6 @@
  */
 
 #include "tu_util.h"
-
 #include <errno.h>
 #include <stdarg.h>
 
@@ -13,10 +12,24 @@
 #include "util/timespec.h"
 #include "util/u_math.h"
 #include "vk_enum_to_str.h"
-
 #include "common/freedreno_rd_output.h"
 #include "tu_device.h"
 #include "tu_pass.h"
+
+/*
+ * Android 14+ Bionic (ARM64) rejects Vulkan HAL modules whose PT_TLS
+ * p_align is below 64 bytes.  lld derives PT_TLS p_align from the maximum
+ * addralign of the TLS output sections, and turnip's regular thread-locals
+ * only require 8-byte alignment, which makes the loader fail with:
+ *
+ *   "executable's TLS segment is underaligned: alignment is 8 (skew 0),
+ *    needs to be at least 64 for ARM64 Bionic"
+ *
+ * Force a 64-byte aligned thread-local so the linker emits a .tbss section
+ * with addralign >= 64 and PT_TLS p_align ends up at least 64.
+ */
+static thread_local struct alignas(64) tu_tls_align_fix { uint8_t _[64]; }
+tu_tls_align_fix;
 
 static const struct debug_control tu_debug_options[] = {
    { "startup", TU_DEBUG_STARTUP },
