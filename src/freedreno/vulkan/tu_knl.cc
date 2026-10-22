@@ -87,6 +87,24 @@ tu_bo_init_new_explicit_iova(struct tu_device *dev,
 }
 
 VkResult
+tu_bo_init_userptr(struct tu_device *dev,
+                   struct vk_object_base *base,
+                   struct tu_bo **bo,
+                   uint64_t size,
+                   uint64_t align,
+                   VkMemoryPropertyFlags mem_property,
+                   enum tu_bo_alloc_flags flags,
+                   void *host_ptr,
+                   const char *name)
+{
+   MESA_TRACE_FUNC();
+   size = align64(size, os_page_size);
+   return dev->instance->knl->bo_init_userptr(dev, base, bo, size, align,
+                                              mem_property, flags, host_ptr,
+                                              name);
+}
+
+VkResult
 tu_bo_init_dmabuf(struct tu_device *dev,
                   struct tu_bo **bo,
                   uint64_t size,

@@ -283,6 +283,53 @@ kgsl_align_flag(uint64_t align)
 }
 
 static VkResult
+kgsl_bo_init_userptr(struct tu_device *dev,
+                     struct vk_object_base *base,
+                     struct tu_bo **out_bo,
+                     uint64_t size,
+                     uint64_t align,
+                     VkMemoryPropertyFlags mem_property,
+                     enum tu_bo_alloc_flags flags,
+                     void *host_ptr,
+                     const char *name)
+{
+   struct kgsl_map_user_mem req = {
+      .fd = -1,
+      .len = size,
+      .offset = 0,
+      .hostptr = reinterpret_cast<unsigned long>(host_ptr),
+      .memtype = KGSL_USER_MEM_TYPE_ADDR,
+      .flags = KGSL_MEMFLAGS_USERMEM_ADDR,
+   };
+   int ret = safe_ioctl(dev->physical_device->local_fd,
+                        IOCTL_KGSL_MAP_USER_MEM, &req);
+   if (ret)
+      return vk_errorf(dev, VK_ERROR_INVALID_EXTERNAL_HANDLE,
+                       "MAP_USER_MEM failed for host pointer (%s)",
+                       strerror(errno));
+
+   struct tu_bo *bo = static_cast<struct tu_bo *>(
+      calloc(1, sizeof(struct tu_bo)));
+   if (!bo)
+      return vk_error(dev, VK_ERROR_OUT_OF_HOST_MEMORY);
+
+   *bo = (struct tu_bo) {
+      .gem_handle = 0,
+      .size = size,
+      .iova = req.gpuaddr,
+      .map = host_ptr,
+      .name = name,
+      .refcnt = 1,
+      .shared_fd = -1,
+      .never_unmap = true,
+      .base = base,
+   };
+   TU_RMV(bo_allocate, dev, bo);
+   *out_bo = bo;
+   return VK_SUCCESS;
+}
+
+static VkResult
 kgsl_bo_init(struct tu_device *dev,
              struct vk_object_base *base,
              struct tu_bo **out_bo,
@@ -498,11 +545,21 @@ kgsl_bo_allow_dump(struct tu_device *dev, struct tu_bo *bo)
 static void
 kgsl_bo_finish(struct tu_device *dev, struct tu_bo *bo)
 {
-   assert(bo->gem_handle);
-
    if (!p_atomic_dec_zero(&bo->refcnt))
       return;
-
+   if (bo->gem_handle == 0) {
+      /* Host-pointer import via MAP_USER_MEM: no gem handle, no debug
+       * accounting entry, and the mapping is owned by the application.
+       */
+      TU_RMV(bo_destroy, dev, bo);
+      struct kgsl_sharedmem_free req = {
+         .gpuaddr = bo->iova,
+      };
+      memset(bo, 0, sizeof(*bo));
+      safe_ioctl(dev->physical_device->local_fd, IOCTL_KGSL_SHAREDMEM_FREE,
+                 &req);
+      return;
+   }
    tu_debug_bos_del(dev, bo);
    tu_dump_bo_del(dev, bo);
 
@@ -510,22 +567,17 @@ kgsl_bo_finish(struct tu_device *dev, struct tu_bo *bo)
       TU_RMV(bo_unmap, dev, bo);
       munmap(bo->map, bo->size);
    }
-
    if (bo->shared_fd != -1)
       close(bo->shared_fd);
 
    TU_RMV(bo_destroy, dev, bo);
-
    struct kgsl_gpumem_free_id req = {
       .id = bo->gem_handle
    };
-
    /* Tell sparse array that entry is free */
    memset(bo, 0, sizeof(*bo));
-
    safe_ioctl(dev->physical_device->local_fd, IOCTL_KGSL_GPUMEM_FREE_ID, &req);
 }
-
 static VkResult
 kgsl_sparse_vma_init(struct tu_device *dev,
                      struct vk_object_base *base,
@@ -1881,6 +1933,7 @@ static const struct tu_knl kgsl_knl_funcs = {
       .submitqueue_close = kgsl_submitqueue_close,
       .bo_init = kgsl_bo_init,
       .bo_init_dmabuf = kgsl_bo_init_dmabuf,
+      .bo_init_userptr = kgsl_bo_init_userptr,
       .bo_export_dmabuf = kgsl_bo_export_dmabuf,
       .bo_map = kgsl_bo_map,
       .bo_allow_dump = kgsl_bo_allow_dump,

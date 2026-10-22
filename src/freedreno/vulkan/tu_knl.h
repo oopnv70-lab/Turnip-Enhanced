@@ -143,6 +143,11 @@ struct tu_knl {
    VkResult (*bo_init_dmabuf)(struct tu_device *dev, struct tu_bo **out_bo,
                               uint64_t size, uint64_t align,
                               enum tu_bo_alloc_flags flags, int prime_fd);
+   VkResult (*bo_init_userptr)(struct tu_device *dev, struct vk_object_base *base,
+                               struct tu_bo **out_bo, uint64_t size, uint64_t align,
+                               VkMemoryPropertyFlags mem_property,
+                               enum tu_bo_alloc_flags flags, void *host_ptr,
+                               const char *name);
    int (*bo_export_dmabuf)(struct tu_device *dev, struct tu_bo *bo);
    VkResult (*bo_alloc_lazy)(struct tu_device *dev, struct tu_bo *bo);
    VkResult (*bo_map)(struct tu_device *dev, struct tu_bo *bo, void *placed_addr);
@@ -215,6 +220,17 @@ tu_bo_init_new(struct tu_device *dev, struct vk_object_base *base,
          VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
       flags, NULL, name);
 }
+
+VkResult
+tu_bo_init_userptr(struct tu_device *dev,
+                   struct vk_object_base *base,
+                   struct tu_bo **bo,
+                   uint64_t size,
+                   uint64_t align,
+                   VkMemoryPropertyFlags mem_property,
+                   enum tu_bo_alloc_flags flags,
+                   void *host_ptr,
+                   const char *name);
 
 VkResult
 tu_bo_init_dmabuf(struct tu_device *dev,

@@ -342,6 +342,7 @@ get_device_extensions(const struct tu_physical_device *device,
       .EXT_extended_dynamic_state2 = true,
       .EXT_extended_dynamic_state3 = true,
       .EXT_external_memory_dma_buf = true,
+      .EXT_external_memory_host = is_kgsl(device->instance),
       .EXT_filter_cubic = device->info->props.has_tex_filter_cubic,
       .EXT_fragment_density_map = true,
       .EXT_fragment_density_map_offset = true,
@@ -1447,7 +1448,8 @@ tu_get_properties(struct tu_physical_device *pdevice,
    /* VK_EXT_map_memory_placed */
    os_get_page_size(&os_page_size);
    props->minPlacedMemoryMapAlignment = os_page_size;
-
+   /* VK_EXT_external_memory_host */
+   props->minImportedHostPointerAlignment = os_page_size;
    /* VK_EXT_multi_draw */
    props->maxMultiDrawCount = 2048;
 
@@ -3749,8 +3751,18 @@ tu_AllocateMemory(VkDevice _device,
       vk_find_struct_const(pAllocateInfo->pNext,
                            BUFFER_DEVICE_ADDRESS_ALIGNMENT_ALLOCATE_INFO_VALVE);
    uint64_t alignment = align_info ? align_info->alignment : 0;
-
-   if (fd_info && fd_info->handleType) {
+   char name[64] = "vkAlloc()";
+   if (device->bo_sizes)
+      snprintf(name, ARRAY_SIZE(name), "vkAlloc(%ldkb)",
+               static_cast<long>(DIV_ROUND_UP(pAllocateInfo->allocationSize, 1024)));
+   VkMemoryPropertyFlags mem_property =
+      device->physical_device->memory.types[pAllocateInfo->memoryTypeIndex];
+   if (mem->vk.host_ptr) {
+      result = tu_bo_init_userptr(device, &mem->vk.base, &mem->bo,
+                                  pAllocateInfo->allocationSize, alignment,
+                                  mem_property, alloc_flags,
+                                  mem->vk.host_ptr, name);
+   } else if (fd_info && fd_info->handleType) {
       assert(fd_info->handleType ==
                 VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT ||
              fd_info->handleType ==
@@ -3800,14 +3812,6 @@ tu_AllocateMemory(VkDevice _device,
          vk_find_struct_const(pAllocateInfo->pNext, WSI_MEMORY_ALLOCATE_INFO_MESA);
       if (wsi_info && wsi_info->implicit_sync)
          alloc_flags |= TU_BO_ALLOC_IMPLICIT_SYNC;
-
-      char name[64] = "vkAlloc()";
-      if (device->bo_sizes)
-         snprintf(name, ARRAY_SIZE(name), "vkAlloc(%ldkb)",
-                  static_cast<long>(DIV_ROUND_UP(pAllocateInfo->allocationSize, 1024)));
-      VkMemoryPropertyFlags mem_property =
-         device->physical_device->memory.types[pAllocateInfo->memoryTypeIndex];
-
       result = _tu_init_memory(device, mem, mem_property, alloc_flags,
                                pAllocateInfo->allocationSize, alignment,
                                client_address,
@@ -4497,6 +4501,24 @@ tu_GetMemoryFdPropertiesKHR(VkDevice _device,
    pMemoryFdProperties->memoryTypeBits =
       (1 << device->physical_device->memory.non_lazy_type_count) - 1;
    return VK_SUCCESS;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL
+tu_GetMemoryHostPointerPropertiesEXT(
+   VkDevice _device,
+   VkExternalMemoryHandleTypeFlagBits handleType,
+   const void *pHostPointer,
+   VkMemoryHostPointerPropertiesEXT *pMemoryHostPointerProperties)
+{
+   VK_FROM_HANDLE(tu_device, device, _device);
+   switch (handleType) {
+   case VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT:
+      pMemoryHostPointerProperties->memoryTypeBits =
+         (1 << device->physical_device->memory.non_lazy_type_count) - 1;
+      return VK_SUCCESS;
+   default:
+      return vk_error(device, VK_ERROR_INVALID_EXTERNAL_HANDLE);
+   }
 }
 
 VKAPI_ATTR void VKAPI_CALL
