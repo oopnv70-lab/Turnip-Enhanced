@@ -186,6 +186,16 @@ jobs:
           ninja -C build-android-aarch64
           ls -lh build-android-aarch64/src/freedreno/vulkan/libvulkan_freedreno.so
 
+      - name: 校验模块脚本语法
+        run: |
+          set -e
+          for f in module/customize.sh module/post-fs-data.sh \
+                   module/uninstall.sh module/action.sh; do
+            echo "=== $f ==="
+            sh -n "$f"
+          done
+          echo "全部脚本语法 OK"
+
       - name: 打包 KSU / Magisk 模块
         run: |
           set -e
@@ -196,6 +206,10 @@ jobs:
 
           cp -r module $OUT/pkg
           mkdir -p $OUT/pkg/system/vendor/lib64/hw
+
+          # 脚本必须可执行，否则 KSU/Magisk 无法调用
+          chmod 755 $OUT/pkg/*.sh
+          ls -l $OUT/pkg/*.sh
 
           # soname 必须与文件名一致，否则 loader dlopen 后内部重定位会失败
           patchelf --set-soname vulkan.turnip.so $SO

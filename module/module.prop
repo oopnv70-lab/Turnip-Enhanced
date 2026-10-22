@@ -3,4 +3,4 @@ name=Turnip Enhanced
 version=placeholder
 versionCode=0
 author=Rannki
-description=Mesa freedreno Vulkan driver for Adreno, built with android-strict=false to unlock 21 hidden extensions. Vulkan 1.4. Restore path: /sdcard/turnip_baseline/restore.sh
+description=Mesa freedreno Vulkan for Adreno (a6xx/a7xx/a8xx, KGSL). Vulkan 1.4, android-strict=false. Original driver preserved at /vendor/lib64/hw/vulkan.adreno.so. Uninstall restores ro.hardware.vulkan automatically.

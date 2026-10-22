@@ -1,32 +1,29 @@
 # ─────────────────────────────────────────────────────────────
 # Turnip Enhanced / system.prop
 #
-# 只有两行真正必要，其余都是照抄上游 turnip 模块的既有做法。
-# ─────────────────────────────────────────────────────────────
-
 # 【必要】把 Vulkan loader 指向 turnip。
-# AOSP 只认这一个属性（frameworks/native/vulkan/libvulkan/driver.cpp:145）：
+# AOSP 只认这一个属性（frameworks/native/vulkan/libvulkan/driver.cpp）：
 #   lib_name = "vulkan." + getprop(ro.hardware.vulkan) + ".so"
-# 从 /vendor/lib64/hw/ 加载。原厂值是 adreno，我们不改原厂文件，
-# 而是新增 vulkan.turnip.so，靠这里切换。
+# 从 /vendor/lib64/hw/ 加载。我们不覆盖原厂 vulkan.adreno.so，
+# 而是新增 vulkan.turnip.so，靠属性切换。
+#
+# 注意：这里写 turnip 是「默认值」。post-fs-data.sh 会在开机早期
+# 按 /data/adb/turnip_enhanced/mode 覆盖（用户通过 action.sh 切回
+# 原厂时）。两处配合，保证默认行为总是可用。
+# ─────────────────────────────────────────────────────────────
 ro.hardware.vulkan=turnip
 
 # 【安全网】强制 UI（HWUI）走 GLES 而非 Vulkan。
-# 本机 /vendor/build.prop:51 有 ro.hwui.use_vulkan=true，即 SystemUI 用 Vulkan。
-# 万一 turnip 加载失败，没这行会直接黑屏（loader 回退到 vulkan.sun.so，
-# 而本机 ro.board.platform=sun 对应的 vulkan.sun.so 根本不存在）。
+# 部分机型 /vendor/build.prop 有 ro.hwui.use_vulkan=true。
+# 如果 turnip 加载失败而 UI 又走 Vulkan，loader 找不到可用驱动
+# 会导致黑屏（回退的 vulkan.<ro.board.platform>.so 通常不存在）。
 #
-# 这行只影响 UI 渲染，不影响游戏：游戏的 VkSurface 是应用自己直接
-# dlopen loader 拿到的，与 HWUI 无关，性能不受影响。
-# 如果实测稳定，可以删掉这行换回 UI 走 Vulkan。
+# 这行只影响 UI 渲染，不影响游戏：游戏的 VkSurface 由应用自己
+# 通过 loader 获取，与 HWUI 无关。
 debug.hwui.renderer=skiagl
 
-# 【照抄·选装】下面三行取自参考模块 adreno_gpu_driver V842.21-[full] 的
-# system.prop，不是上游 turnip 模块自带的。作用分别是：
-#   - 关掉 zygote 预加载 GL（少一份 GL 上下文，省内存）
-#   - 关掉 skia 追踪/atrace（调试用，关掉省一点开销）
-# 这三行与驱动本身无关，删掉不影响 turnip 工作。保守起见先留着，
-# 若出现「应用启动变慢」可先注释掉第一行再试。
+# 【选装】以下三行与驱动本身无关，取自常见 Adreno 驱动模块。
+# 若出现「应用启动变慢」，可先注释掉 ro.zygote.disable_gl_preload。
 ro.zygote.disable_gl_preload=true
 debug.hwui.skia_tracing_enabled=false
 debug.hwui.skia_atrace_enabled=false
