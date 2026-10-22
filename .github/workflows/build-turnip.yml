@@ -238,15 +238,21 @@ jobs:
 
           # soname 必须与文件名一致，否则 loader dlopen 后内部重定位会失败
           patchelf --set-soname vulkan.turnip.so $SO
+          # 关键：不能以 libc++_shared.so 原名随包。sphal namespace 搜索顺序是
+          # /odm/${LIB} 优先于 /vendor/${LIB}，而 /odm/lib64/libc++_shared.so
+          # 是旧版，没有 __libcpp_verbose_abort 符号。把 ICD 的依赖名改成
+          # libc++_turnip.so，linker 才会命中我们随包提供的这份新库。
+          patchelf --replace-needed libc++_shared.so libc++_turnip.so $SO
           cp $SO $OUT/pkg/system/vendor/lib64/hw/vulkan.turnip.so
           ls -lh $OUT/pkg/system/vendor/lib64/hw/vulkan.turnip.so
           # NDK 的 libc++_shared.so 提供 __libcpp_verbose_abort 等新符号，
-          # 系统 /system/lib64 没有该库，必须随模块一起提供
+          # 随包改名 libc++_turnip.so 并同步改 SONAME。
           TC="$NDK/toolchains/llvm/prebuilt/linux-x86_64"
           CXXSHARED="$TC/sysroot/usr/lib/aarch64-linux-android/libc++_shared.so"
-          cp "$CXXSHARED" $OUT/pkg/system/lib64/libc++_shared.so
-          cp "$CXXSHARED" $OUT/pkg/system/vendor/lib64/libc++_shared.so
-          ls -lh $OUT/pkg/system/lib64/libc++_shared.so $OUT/pkg/system/vendor/lib64/libc++_shared.so
+          cp "$CXXSHARED" $OUT/pkg/system/vendor/lib64/libc++_turnip.so
+          patchelf --set-soname libc++_turnip.so $OUT/pkg/system/vendor/lib64/libc++_turnip.so
+          cp $OUT/pkg/system/vendor/lib64/libc++_turnip.so $OUT/pkg/system/lib64/libc++_turnip.so
+          ls -lh $OUT/pkg/system/vendor/lib64/libc++_turnip.so $OUT/pkg/system/lib64/libc++_turnip.so
 
           sed -i "s/^version=.*/version=${MESA_VER}-enhanced/" $OUT/pkg/module.prop
           sed -i "s/^versionCode=.*/versionCode=$(echo $MESA_VER | tr -cd '0-9')/" $OUT/pkg/module.prop
