@@ -245,7 +245,8 @@ jobs:
           TC="$NDK/toolchains/llvm/prebuilt/linux-x86_64"
           CXXSHARED="$TC/sysroot/usr/lib/aarch64-linux-android/libc++_shared.so"
           cp "$CXXSHARED" $OUT/pkg/system/lib64/libc++_shared.so
-          ls -lh $OUT/pkg/system/lib64/libc++_shared.so
+          cp "$CXXSHARED" $OUT/pkg/system/vendor/lib64/libc++_shared.so
+          ls -lh $OUT/pkg/system/lib64/libc++_shared.so $OUT/pkg/system/vendor/lib64/libc++_shared.so
 
           sed -i "s/^version=.*/version=${MESA_VER}-enhanced/" $OUT/pkg/module.prop
           sed -i "s/^versionCode=.*/versionCode=$(echo $MESA_VER | tr -cd '0-9')/" $OUT/pkg/module.prop
