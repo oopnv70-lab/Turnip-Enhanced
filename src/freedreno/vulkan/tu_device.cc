@@ -328,6 +328,7 @@ get_device_extensions(const struct tu_physical_device *device,
       .EXT_depth_clamp_control = true,
       .EXT_depth_clamp_zero_one = true,
       .EXT_depth_clip_control = true,
+      .EXT_depth_bias_control = true,
       .EXT_depth_clip_enable = true,
       .EXT_descriptor_buffer = true,
       .EXT_descriptor_indexing = true,
@@ -715,6 +716,8 @@ tu_get_features(struct tu_physical_device *pdevice,
    /* VK_EXT_depth_clip_control */
    features->depthClipControl = true;
 
+   /* VK_EXT_depth_bias_control */
+   features->depthBiasControl = true;
    /* VK_EXT_depth_clip_enable */
    features->depthClipEnable = true;
 
