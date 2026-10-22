@@ -28,10 +28,6 @@
  * Force a 64-byte aligned thread-local so the linker emits a .tbss section
  * with addralign >= 64 and PT_TLS p_align ends up at least 64.
  */
-__attribute__((used)) thread_local struct alignas(64) tu_tls_align_fix {
-   uint8_t _[64];
-} tu_tls_align_fix;
-
 static const struct debug_control tu_debug_options[] = {
    { "startup", TU_DEBUG_STARTUP },
    { "nir", TU_DEBUG_NIR },
@@ -201,7 +197,7 @@ tu_env_init(void)
 const char *
 tu_env_debug_as_string(void)
 {
-   static thread_local char debug_string[96];
+   static thread_local alignas(64) char debug_string[96];
    dump_debug_control_string(debug_string, sizeof(debug_string),
                              tu_debug_options,
                              tu_env.debug.load(std::memory_order_acquire));
