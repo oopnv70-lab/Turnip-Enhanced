@@ -263,6 +263,7 @@ get_device_extensions(const struct tu_physical_device *device,
       .KHR_maintenance7 = true,
       .KHR_maintenance8 = true,
       .KHR_maintenance9 = true,
+      .KHR_maintenance10 = true,
       .KHR_map_memory2 = true,
       .KHR_multiview = true,
       .KHR_performance_query = (TU_DEBUG(PERFC) || TU_DEBUG(PERFCRAW)) && device->is_perf_cntr_selectable,
@@ -289,6 +290,7 @@ get_device_extensions(const struct tu_physical_device *device,
       .KHR_shader_float16_int8 = true,
       .KHR_shader_float_controls = true,
       .KHR_shader_float_controls2 = true,
+      .KHR_shader_fma = true,
       .KHR_shader_integer_dot_product = true,
       .KHR_shader_non_semantic_info = true,
       .KHR_shader_quad_control = device->info->props.has_getfiberid,
@@ -641,7 +643,8 @@ tu_get_features(struct tu_physical_device *pdevice,
 
    /* VK_KHR_maintenance9 */
    features->maintenance9 = true;
-
+   /* VK_KHR_maintenance10 */
+   features->maintenance10 = true;
    /* VK_KHR_performance_query */
    features->performanceCounterQueryPools = true;
    features->performanceCounterMultipleQueryPools = false;
@@ -666,6 +669,10 @@ tu_get_features(struct tu_physical_device *pdevice,
 
    /* VK_KHR_shader_float_controls2 */
    features->shaderFloatControls2 = true;
+   /* VK_KHR_shader_fma */
+   features->shaderFmaFloat32 = true;
+   features->shaderFmaFloat16 = true;
+   features->shaderFmaFloat64 = false;
 
    /* VK_KHR_shader_quad_control */
    features->shaderQuadControl = pdevice->info->props.has_getfiberid;
@@ -1552,7 +1559,10 @@ tu_get_properties(struct tu_physical_device *pdevice,
    props->image2DViewOf3DSparse = false;
    props->defaultVertexAttributeValue =
       VK_DEFAULT_VERTEX_ATTRIBUTE_VALUE_ZERO_ZERO_ZERO_ZERO_KHR;
-
+   /* VK_KHR_maintenance10 */
+   props->rgba4OpaqueBlackSwizzled = true;
+   props->resolveSrgbFormatAppliesTransferFunction = true;
+   props->resolveSrgbFormatSupportsTransferFunctionControl = true;
    /* VK_EXT_host_image_copy */
 
    /* We don't use the layouts ATM so just report all layouts from
