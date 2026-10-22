@@ -28,6 +28,8 @@ on:
       - '.github/workflows/build-turnip.yml'
       - 'module/**'
       - 'extras/**'
+      - 'meson.build'
+      - 'src/**'
 
 env:
   ANDROID_STRICT: ${{ github.event.inputs.android_strict || 'false' }}
