@@ -197,7 +197,7 @@ tu_env_init(void)
 const char *
 tu_env_debug_as_string(void)
 {
-   static thread_local alignas(64) char debug_string[96];
+   static thread_local char debug_string[96] __attribute__((aligned(64)));
    dump_debug_control_string(debug_string, sizeof(debug_string),
                              tu_debug_options,
                              tu_env.debug.load(std::memory_order_acquire));
