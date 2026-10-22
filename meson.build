@@ -629,6 +629,18 @@ if with_platform_android and get_option('platform-sdk-version') >= 29
   # ELF TLS instead.
   c_cpp_args += '-fno-emulated-tls'
   add_project_link_arguments('-Wl,-plugin-opt=-emulated-tls=0', language: ['c', 'cpp'])
+  # Android 14+ Bionic (ARM64) requires the TLS segment alignment to be at
+  # least 64 bytes.  lld derives PT_TLS p_align from the maximum addralign of
+  # the TLS output sections, which is only 8 for turnip's thread-locals,
+  # causing the loader to reject the ICD with:
+  #   "executable's TLS segment is underaligned: alignment is 8 ... needs to be
+  #    at least 64 for ARM64 Bionic"
+  # Force the .tdata/.tbss output sections to 64-byte alignment via a linker
+  # script so PT_TLS p_align ends up >= 64.
+  add_project_link_arguments(
+    '-Wl,-T,' + join_paths(meson.current_source_dir(), 'src/vulkan/tls-align.ld'),
+    language: ['c', 'cpp'],
+  )
 endif
 
 # -mtls-dialect=gnu2 speeds up non-initial-exec TLS significantly but requires
