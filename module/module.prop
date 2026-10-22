@@ -2,5 +2,5 @@ id=turnip_enhanced
 name=Turnip Enhanced
 version=placeholder
 versionCode=0
-author=Rannki
+author=Operit (oopnv70-lab) — 二改自 ilhan-athn7/freedreno_turnip-CI
 description=Mesa freedreno Vulkan for Adreno (a6xx/a7xx/a8xx, KGSL). Vulkan 1.4, android-strict=false. Original driver preserved at /vendor/lib64/hw/vulkan.adreno.so. Uninstall restores ro.hardware.vulkan automatically.

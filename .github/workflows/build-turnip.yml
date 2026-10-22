@@ -1,6 +1,9 @@
 name: build-turnip
 
 # Turnip-Enhanced: Mesa freedreno Vulkan -> KernelSU / Magisk module
+# 二改：Operit (oopnv70-lab)，基于 ilhan-athn7/freedreno_turnip-CI 的 turnip_builder.sh
+# 目标：在 stock Mesa main 上关闭 Android CTS 扩展白名单、补 Vulkan 1.4 feature xml，
+#       并开启驱动已实现但默认关闭的新扩展（maintenance10 / shader_fma 等）。
 #
 # 构建方式：就地构建。本仓库自身就是一份 Mesa 树（版本见根目录 VERSION），
 # workflow 拿 actions/checkout 检出的源码直接 meson setup，

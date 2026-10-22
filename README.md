@@ -1,8 +1,23 @@
 # Turnip Enhanced
 
-Mesa freedreno Vulkan 驱动 → KernelSU / Magisk 模块。
+> 仓库：`oopnv70-lab/Turnip-Enhanced`　|　作者：**Operit**（oopnv70-lab，二改）
+> 基于：[Mesa](https://gitlab.freedesktop.org/mesa/mesa) 的 freedreno / Turnip Vulkan 驱动，构建流程源自 [ilhan-athn7/freedreno_turnip-CI](https://github.com/ilhan-athn7/freedreno_turnip-CI)。
 
-面向 **Adreno 8xx（本机 Adreno830v2 / a750 / pineapple）**，在 stock Mesa main 基础上关掉 Android CTS 扩展白名单，把驱动已经实现、但被 Android 白名单隐藏的扩展放出来。
+Mesa freedreno Vulkan 驱动 → KernelSU / Magisk 模块。
+面向 **Adreno 8xx（本机 Adreno830v2 / a750 / pineapple）**，在 stock Mesa main 基础上做三件事：
+
+1. **关掉 Android CTS 扩展白名单**（`-Dandroid-strict=false`），把驱动已经实现、但被 Android 白名单隐藏的扩展放出来；
+2. **补齐 Vulkan 1.4 feature xml**，让 PackageManager 认到 Vulkan 1.4；
+3. **开启驱动已具备后端支持、但默认关闭的新扩展**（如 `VK_KHR_maintenance10`、`VK_KHR_shader_fma`）。
+
+## 二改目标（本项目相对上游的变更）
+- 在 `ilhan-athn7/freedreno_turnip-CI` 的构建脚本基础上改为**就地构建本仓库自带 Mesa 树**，不再外网下载 stock mesa；
+- 关闭 `android-strict` 放出 21 个被白名单隐藏的 KHR 扩展；
+- 模块内补 `android.hardware.vulkan.version-1_4.xml`；
+- 在 `src/freedreno/vulkan/tu_device.cc` 中开启：
+  - `VK_KHR_maintenance10`（含 `rgba4OpaqueBlackSwizzled`、`resolveSrgbFormatAppliesTransferFunction` 等 properties）
+  - `VK_KHR_shader_fma`（`shaderFmaFloat32/Float16 = true`，`Float64 = false`）
+- 注：`VK_KHR_shader_bfloat16` 经调研**未开启**——ir3 后端不支持 `bf2f/f2bf/bfmul/bffma` 等 bfloat16 NIR opcode，强开会错误或崩溃。
 
 ---
 
@@ -246,8 +261,8 @@ GitHub Actions，手动触发（`workflow_dispatch`），参数：
 ---
 
 ## 九、致谢
-
 - [Mesa](https://gitlab.freedesktop.org/mesa/mesa) — freedreno / Turnip
 - [ilhan-athn7/freedreno_turnip-CI](https://github.com/ilhan-athn7/freedreno_turnip-CI) — 构建脚本原型
 - [LFRon/freedreno_turnip-stable](https://github.com/LFRon/freedreno_turnip-stable) — 稳定分支构建
 - [Tools-cx-app/meta-magic_mount-rs](https://github.com/Tools-cx-app/meta-magic_mount-rs) — 元模块
+- 二改作者：**Operit**（`oopnv70-lab/Turnip-Enhanced`）
