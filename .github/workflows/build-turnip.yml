@@ -263,40 +263,10 @@ jobs:
           ls -lh $OUT/turnip-enhanced.zip
           unzip -l $OUT/turnip-enhanced.zip
 
-      - name: adb 安装用的临时模块（adrenotools，可选）
-        run: |
-          set -e
-          # 注意：下面会 cd 进 extras/out，SO 必须用绝对路径，否则相对路径失效
-          SO="$GITHUB_WORKSPACE/build-android-aarch64/src/freedreno/vulkan/libvulkan_freedreno.so"
-          MESA_VER=$(cat VERSION)
-          ls -lh "$SO"
-          rm -rf extras/out && mkdir -p extras/out
-          cd extras/out
-          patchelf --set-soname vulkan.freedreno.so "$SO"
-          cp "$SO" vulkan.freedreno.so
-          cat > meta.json <<XEOF
-          {
-            "schemaVersion": 1,
-            "name": "Turnip-Enhanced",
-            "description": "$(date -u +%Y-%m-%dT%H:%M:%SZ)",
-            "author": "Turnip-Enhanced",
-            "packageVersion": "1",
-            "vendor": "Mesa",
-            "driverVersion": "${MESA_VER}",
-            "minApi": ${SDKVER},
-            "libraryName": "vulkan.freedreno.so"
-          }
-          XEOF
-          zip -9 turnip-adrenotools.zip vulkan.freedreno.so meta.json > /dev/null
-          cd ../..
-          cp extras/out/turnip-adrenotools.zip out/
-          ls -lh out/turnip-adrenotools.zip
-
       - uses: actions/upload-artifact@v4
         if: always()
         with:
           name: turnip-enhanced-${{ github.sha }}-sdk${{ env.SDKVER }}-strict${{ env.ANDROID_STRICT }}
           path: |
             out/turnip-enhanced.zip
-            out/turnip-adrenotools.zip
           if-no-files-found: warn
