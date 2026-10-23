@@ -290,14 +290,17 @@ jobs:
           fi
           git tag "$TAG"
           git push origin "$TAG"
+          cat > /tmp/release-notes.md <<NOTES
+          预发布版（RC），由 workflow_dispatch 自动构建。
+
+          提交：${{ github.sha }}
+          android-strict：${{ env.ANDROID_STRICT }}
+          platform-sdk-version：${{ env.SDKVER }}
+
+          仅供测试，请勿用于生产环境。
+          NOTES
           gh release create "$TAG" \
             out/turnip-enhanced.zip \
             --title "Turnip Enhanced ${MESA_VER} RC" \
-            --notes "预发布版（RC），由 workflow_dispatch 自动构建。
-
-- 提交：${{ github.sha }}
-- android-strict：${{ env.ANDROID_STRICT }}
-- platform-sdk-version：${{ env.SDKVER }}
-
-仅供测试，请勿用于生产环境。" \
+            --notes-file /tmp/release-notes.md \
             --prerelease
