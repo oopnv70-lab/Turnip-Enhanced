@@ -111,6 +111,11 @@ GitHub Actions，手动触发（`workflow_dispatch`）。
 产物：`turnip-enhanced.zip`（KSU/Magisk 模块）。首次构建约 40–60 分钟。
 
 ---
+## 安装前置要求
+- 需要设备已获取 **Root 权限**；
+- 需要安装 **KernelSU / Magisk** 或其他同类模块管理器；
+- 安装与挂载须满足原模块 [ilhan-athn7/freedreno_turnip-CI](https://github.com/ilhan-athn7/freedreno_turnip-CI) 的前置要求，并按相同方式挂载。
+
 ## 设备兼容性声明
 本仓库始于 **骁龙 8 至尊版（Adreno 830）**，但**不保证该平台所有设备均可使用**。
 
