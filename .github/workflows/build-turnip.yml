@@ -43,11 +43,13 @@ env:
   #            meta/platforms.json 上限是 35，写 36 会找不到编译器。
   SDKVER: ${{ github.event.inputs.platform_sdk || '35' }}
   NDK_API: '35'
-
 jobs:
   build:
     runs-on: ubuntu-24.04
     timeout-minutes: 180
+    permissions:
+      contents: write
+
 
     steps:
       - name: 检出源码（本仓库即 Mesa 树）
@@ -257,7 +259,7 @@ jobs:
           cp $OUT/pkg/system/vendor/lib64/libc++_turnip.so $OUT/pkg/system/lib64/libc++_turnip.so
           ls -lh $OUT/pkg/system/vendor/lib64/libc++_turnip.so $OUT/pkg/system/lib64/libc++_turnip.so
 
-          sed -i "s/^version=.*/version=${MESA_VER}-enhanced-pre/" $OUT/pkg/module.prop
+          sed -i "s/^version=.*/version=${MESA_VER}-enhanced-rc/" $OUT/pkg/module.prop
           sed -i "s/^versionCode=.*/versionCode=$(echo $MESA_VER | tr -cd '0-9')/" $OUT/pkg/module.prop
 
           cd $OUT/pkg
@@ -269,7 +271,33 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: turnip-enhanced-${{ github.sha }}-pre-sdk${{ env.SDKVER }}-strict${{ env.ANDROID_STRICT }}
+          name: turnip-enhanced-${{ github.sha }}-rc-sdk${{ env.SDKVER }}-strict${{ env.ANDROID_STRICT }}
           path: |
             out/turnip-enhanced.zip
           if-no-files-found: warn
+
+      - name: 发布预发布版（pre-release）
+        if: success()
+        env:
+          GH_TOKEN: ${{ github.token }}
+        run: |
+          set -e
+          MESA_VER=$(cat VERSION)
+          TAG="v${MESA_VER}-rc"
+          # 同一 tag 已存在时删除，保证每次构建都能更新 pre-release 资产
+          if git rev-parse "$TAG" >/dev/null 2>&1; then
+            git push origin --delete "$TAG" || true
+          fi
+          git tag "$TAG"
+          git push origin "$TAG"
+          gh release create "$TAG" \
+            out/turnip-enhanced.zip \
+            --title "Turnip Enhanced ${MESA_VER} RC" \
+            --notes "预发布版（RC），由 workflow_dispatch 自动构建。
+
+- 提交：${{ github.sha }}
+- android-strict：${{ env.ANDROID_STRICT }}
+- platform-sdk-version：${{ env.SDKVER }}
+
+仅供测试，请勿用于生产环境。" \
+            --prerelease
