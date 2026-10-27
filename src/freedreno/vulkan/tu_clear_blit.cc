@@ -997,7 +997,7 @@ build_blit_fs_shader(bool zscale, bool swap_coords)
  * variant for them.
  */
 static nir_shader *
-build_ms_copy_fs_shader(void)
+build_ms_copy_fs_shader(bool half_float)
 {
    nir_builder _b =
       nir_builder_init_simple_shader(MESA_SHADER_FRAGMENT, NULL,
@@ -1006,7 +1006,8 @@ build_ms_copy_fs_shader(void)
 
    nir_variable *out_color =
       nir_create_variable_with_location(b->shader, nir_var_shader_out,
-                                        FRAG_RESULT_DATA0, glsl_vec4_type());
+                                        FRAG_RESULT_DATA0,
+                                        half_float ? glsl_f16vec_type(4) : glsl_vec4_type());
    nir_variable *in_coords =
       nir_create_variable_with_location(b->shader, nir_var_shader_in,
                                         VARYING_SLOT_VAR0, glsl_vec_type(2));
@@ -1024,7 +1025,7 @@ build_ms_copy_fs_shader(void)
                              /* Note: since we're just copying data, we rely on
                               * the HW ignoring the dest_type.
                                */
-                             .dest_type = nir_type_int32);
+                             .dest_type = half_float ? nir_type_float16 : nir_type_int32);
 
    nir_store_var(b, out_color, tex, 0xf);
    return b->shader;
@@ -1139,7 +1140,8 @@ tu_init_clear_blit_shaders(struct tu_device *dev)
    compile_shader(dev, build_blit_fs_shader(true, false), 0, &offset, GLOBAL_SH_FS_BLIT_ZSCALE);
    compile_shader(dev, build_blit_fs_shader(false, true), 0, &offset, GLOBAL_SH_FS_BLIT_SWAP_COORDS);
    compile_shader(dev, build_blit_fs_shader(true, true), 0, &offset, GLOBAL_SH_FS_BLIT_ZSCALE_SWAP_COORDS);
-   compile_shader(dev, build_ms_copy_fs_shader(), 0, &offset, GLOBAL_SH_FS_COPY_MS);
+   compile_shader(dev, build_ms_copy_fs_shader(false), 0, &offset, GLOBAL_SH_FS_COPY_MS);
+   compile_shader(dev, build_ms_copy_fs_shader(true), 0, &offset, GLOBAL_SH_FS_COPY_MS_HALF);
    for (unsigned i = 0; i < 3; i++) {
       compile_shader(dev, build_ms_resolve_fs_shader(2 << i), 0, &offset,
                      static_cast<enum global_shader>(GLOBAL_SH_FS_RESOLVE_MS2 + i));
@@ -1164,6 +1166,7 @@ enum r3d_type {
    R3D_CLEAR,
    R3D_BLIT,
    R3D_MULTI_BLIT,
+   R3D_COPY_HALF,
 };
 
 template <chip CHIP>
@@ -1183,6 +1186,9 @@ r3d_common(struct tu_cmd_buffer *cmd, struct tu_cs *cs, enum r3d_type type,
 
    if (z_scale) {
       fs_id = swap_coords ? GLOBAL_SH_FS_BLIT_ZSCALE_SWAP_COORDS : GLOBAL_SH_FS_BLIT_ZSCALE;
+   } else if (type == R3D_COPY_HALF) {
+      /* Avoid canonicalizing NaNs due to implicit conversions in the shader. */
+      fs_id = GLOBAL_SH_FS_COPY_MS_HALF;
    } else if (swap_coords) {
       fs_id = GLOBAL_SH_FS_BLIT_SWAP_COORDS;
    } else if (src_samples != VK_SAMPLE_COUNT_1_BIT) {
@@ -1302,7 +1308,8 @@ r3d_common(struct tu_cmd_buffer *cmd, struct tu_cs *cs, enum r3d_type type,
          unsigned regid = 0;
          if (rts_mask & (1u << i))
             regid = ir3_find_output_regid(fs, FRAG_RESULT_DATA0 + rt++);
-         tu_cs_emit(cs, A6XX_SP_PS_OUTPUT_REG_REGID(regid));
+         tu_cs_emit(cs, A6XX_SP_PS_OUTPUT_REG_REGID(regid) |
+                        COND(regid & HALF_REG_ID, A6XX_SP_PS_OUTPUT_REG_HALF_PRECISION));
       }
    }
 
@@ -1872,6 +1879,34 @@ enum r3d_blit_param {
    R3D_SWAP_COORDS = 1 << 6,
 };
 
+/*
+ * We need to suspend the primitive generated counters so that operations which are internally implemented using the
+ * 3D path (like some clears) don't count towards the query.
+ *
+ * Vulkan is lenient, however for GL on top of Vulkan, it's much easier for us to have the behavior GL expects.
+ * See: https://gitlab.freedesktop.org/mesa/mesa/-/work_items/16654
+ */
+template <chip CHIP>
+static void
+r3d_emit_prim_counter_event(struct tu_cmd_buffer *cmd, struct tu_cs *cs, enum fd_gpu_event event)
+{
+   assert(event == FD_STOP_PRIMITIVE_CTRS || event == FD_START_PRIMITIVE_CTRS);
+
+   if (cs == &cmd->draw_cs) {
+      if (!cmd->state.prim_counters_running)
+         return;
+
+      tu_cond_exec_start(cs,
+                         CP_COND_REG_EXEC_0_MODE(RENDER_MODE) | CP_COND_REG_EXEC_0_SYSMEM | CP_COND_REG_EXEC_0_BINNING);
+      tu_emit_event_write<CHIP>(cmd, cs, event);
+      tu_cond_exec_end(cs);
+      return;
+   }
+
+   if (cmd->state.prim_generated_query_running_before_rp)
+      tu_emit_event_write<CHIP>(cmd, cs, event);
+}
+
 template <chip CHIP>
 static void
 r3d_setup(struct tu_cmd_buffer *cmd,
@@ -1927,8 +1962,18 @@ r3d_setup(struct tu_cmd_buffer *cmd,
       }
    }
 
-   const enum r3d_type type = (clear) ? R3D_CLEAR :
-      ((blit_param & R3D_USE_MULTI_BLIT) ? R3D_MULTI_BLIT : R3D_BLIT);
+   enum r3d_type type;
+   if (clear) {
+      type = R3D_CLEAR;
+   } else if ((blit_param & R3D_COPY) && util_format_is_float16(src_format) &&
+              dst_samples != VK_SAMPLE_COUNT_1_BIT) {
+      /* Avoid canonicalizing NaNs in copies by using the special half-float
+       * path that uses half regs.
+       */
+      type = R3D_COPY_HALF;
+   } else {
+      type = (blit_param & R3D_USE_MULTI_BLIT) ? R3D_MULTI_BLIT : R3D_BLIT;
+   }
    r3d_common<CHIP>(cmd, cs, type, 1, blit_param & R3D_Z_SCALE, src_samples,
                     dst_samples, blit_param & R3D_SWAP_COORDS);
 
@@ -1993,9 +2038,7 @@ r3d_setup(struct tu_cmd_buffer *cmd,
       tu_cs_emit_regs(cs, SP_DITHER_CNTL(CHIP));
    }
 
-   if (cmd->state.prim_generated_query_running_before_rp) {
-      tu_emit_event_write<CHIP>(cmd, cs, FD_STOP_PRIMITIVE_CTRS);
-   }
+   r3d_emit_prim_counter_event<CHIP>(cmd, cs, FD_STOP_PRIMITIVE_CTRS);
 
    if (cmd->state.predication_active) {
       tu_cs_emit_pkt7(cs, CP_DRAW_PRED_ENABLE_LOCAL, 1);
@@ -2048,9 +2091,7 @@ r3d_teardown(struct tu_cmd_buffer *cmd, struct tu_cs *cs)
    /* Re-enable sample counting. */
    tu_cs_emit_regs(cs, A6XX_RB_SAMPLE_COUNTER_CNTL(.disable = false));
 
-   if (cmd->state.prim_generated_query_running_before_rp) {
-      tu_emit_event_write<CHIP>(cmd, cs, FD_START_PRIMITIVE_CTRS);
-   }
+   r3d_emit_prim_counter_event<CHIP>(cmd, cs, FD_START_PRIMITIVE_CTRS);
 }
 
 /* blit ops - common interface for 2d/shader paths */
@@ -3388,8 +3429,9 @@ tu_copy_image_to_image(struct tu_cmd_buffer *cmd,
 {
    const struct blit_ops *ops = &r2d_ops<CHIP>;
    struct tu_cs *cs = &cmd->cs;
+   const bool is_msaa = dst_image->layout[0].nr_samples > 1;
 
-   if (dst_image->layout[0].nr_samples > 1)
+   if (is_msaa)
       ops = &r3d_ops<CHIP>;
 
    VkOffset3D src_offset = info->srcOffset;
@@ -3424,7 +3466,9 @@ tu_copy_image_to_image(struct tu_cmd_buffer *cmd,
    /* note: could use "R8_UNORM" when no UBWC */
    unsigned blit_param = 0;
    if (dst_format == PIPE_FORMAT_Y8_UNORM ||
-       src_format == PIPE_FORMAT_Y8_UNORM) {
+       src_format == PIPE_FORMAT_Y8_UNORM ||
+       (is_msaa && (util_format_is_float16(src_format) ||
+                    util_format_is_float16(dst_format)))) {
       ops = &r3d_ops<CHIP>;
       blit_param = R3D_COPY;
    }
@@ -4709,9 +4753,7 @@ tu_clear_sysmem_attachments(struct tu_cmd_buffer *cmd,
    /* Disable sample counting in order to not affect occlusion query. */
    tu_cs_emit_regs(cs, A6XX_RB_SAMPLE_COUNTER_CNTL(.disable = true));
 
-   if (cmd->state.prim_generated_query_running_before_rp) {
-      tu_emit_event_write<CHIP>(cmd, cs, FD_STOP_PRIMITIVE_CTRS);
-   }
+   r3d_emit_prim_counter_event<CHIP>(cmd, cs, FD_STOP_PRIMITIVE_CTRS);
 
    tu_cs_emit_regs(cs,
                    A6XX_SP_PS_OUTPUT_MASK(.dword = clear_components));
@@ -4834,9 +4876,7 @@ tu_clear_sysmem_attachments(struct tu_cmd_buffer *cmd,
    /* Re-enable sample counting. */
    tu_cs_emit_regs(cs, A6XX_RB_SAMPLE_COUNTER_CNTL(.disable = false));
 
-   if (cmd->state.prim_generated_query_running_before_rp) {
-      tu_emit_event_write<CHIP>(cmd, cs, FD_START_PRIMITIVE_CTRS);
-   }
+   r3d_emit_prim_counter_event<CHIP>(cmd, cs, FD_START_PRIMITIVE_CTRS);
 
    if (cmd->state.fdm_enabled)
       tu_cs_set_writeable(cs, false);
