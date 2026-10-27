@@ -284,12 +284,11 @@ jobs:
           set -e
           MESA_VER=$(cat VERSION)
           TAG="v${MESA_VER}-rc"
-          # 同一 tag 已存在时删除，保证每次构建都能更新 pre-release 资产
-          if git rev-parse "$TAG" >/dev/null 2>&1; then
-            git push origin --delete "$TAG" || true
-          fi
-          git tag "$TAG"
-          git push origin "$TAG"
+          # 同一 tag 的旧 release/tag 先删掉，保证每次构建都能重建 pre-release
+          gh release delete "$TAG" --yes --cleanup-tag 2>/dev/null || true
+          git push origin --delete "$TAG" 2>/dev/null || true
+          git tag -f "$TAG"
+          git push origin "$TAG" --force
           cat > /tmp/release-notes.md <<NOTES
           预发布版（RC），由 workflow_dispatch 自动构建。
 
