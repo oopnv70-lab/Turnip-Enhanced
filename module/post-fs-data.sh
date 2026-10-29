@@ -25,3 +25,25 @@ else
   # 默认：turnip
   $RP ro.hardware.vulkan turnip 2>/dev/null
 fi
+
+# ─────────────────────────────────────────────────────────────
+# 开机自愈：修正 overlay 目录的 SELinux 类型
+#
+# 背景：旧版 customize.sh 把目录也打成了 same_process_hal_file，
+# 导致非 root 应用无法 search 目录，dlopen 拿 EACCES，Vulkan
+# loader 判定 ICD 不存在。已在 customize.sh 修掉，但已安装的
+# 用户不会重装，所以这里每次开机补一次。
+#
+# 只改目录类型，不碰文件（文件本来就该是 same_process_hal_file）。
+# 全部静默失败，绝不影响开机。
+# ─────────────────────────────────────────────────────────────
+MP=/data/adb/modules/turnip_enhanced/system/vendor
+if [ -d "$MP" ]; then
+  chcon u:object_r:vendor_file:s0         "$MP"                  2>/dev/null
+  [ -d "$MP/lib64" ]           && chcon u:object_r:vendor_file:s0      "$MP/lib64"          2>/dev/null
+  [ -d "$MP/lib64/hw" ]        && chcon u:object_r:vendor_hal_file:s0  "$MP/lib64/hw"       2>/dev/null
+  [ -d "$MP/lib" ]             && chcon u:object_r:vendor_file:s0      "$MP/lib"            2>/dev/null
+  [ -d "$MP/lib/hw" ]          && chcon u:object_r:vendor_hal_file:s0  "$MP/lib/hw"         2>/dev/null
+  [ -d "$MP/etc" ]             && chcon u:object_r:vendor_configs_file:s0 "$MP/etc"            2>/dev/null
+  [ -d "$MP/etc/permissions" ] && chcon u:object_r:vendor_configs_file:s0 "$MP/etc/permissions" 2>/dev/null
+fi
