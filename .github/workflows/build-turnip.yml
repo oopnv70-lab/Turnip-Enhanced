@@ -35,10 +35,18 @@ on:
       - 'src/**'
 
 env:
-  ANDROID_STRICT: ${{ github.event.inputs.android_strict || 'false' }}
+  # 关键：必须保持 android-strict=true（Mesa 默认值）。
+  # 历史教训：曾设为 false 试图「放开扩展白名单」，结果游戏 com.tencent.tmgp.dfm
+  # 启动即 SIGSEGV（pc=0，libvulkan.so GetPhysicalDeviceSurfaceFormatsKHR+3500）。
+  # 原因：ANDROID_STRICT 关闭后，VK_ANDROID_native_buffer /
+  # VK_ANDROID_external_memory_android_hardware_buffer 等 AHardwareBuffer 相关
+  # 扩展会被驱动声明为 supported，UE4 于是走 AHardwareBuffer 格式协商路径，
+  # 进而调用 GetPhysicalDeviceSurfaceFormatsKHR —— 而 Android 平台下
+  # tu_wsi.cc 不参与编译（TU_USE_WSI_PLATFORM 未定义），该函数槽位为 NULL，
+  # 间接调用直接跳到地址 0。上游 ilhan-athn7 的产物不传此参数（默认 true），
+  # 因此正常。不要再改这个值。
+  ANDROID_STRICT: 'true'
   # SDKVER  -> -Dplatform-sdk-version，只写进 config.h 的 ANDROID_API_LEVEL 宏。
-  #            android-strict=false 时白名单整段被 #ifdef 掉，此值不影响扩展
-  #            可见性，保持 Mesa 默认 35。
   # NDK_API -> NDK clang 前缀 aarch64-linux-androidNN-clang。官方 NDK 的
   #            meta/platforms.json 上限是 35，写 36 会找不到编译器。
   SDKVER: ${{ github.event.inputs.platform_sdk || '35' }}
@@ -179,6 +187,7 @@ jobs:
             -Dplatform-sdk-version="${SDKVER}" \
             -Dandroid-stub=true \
             -Dandroid-strict="${ANDROID_STRICT}" \
+            -Dvulkan-beta=true \
             -Dgallium-drivers= \
             -Dvulkan-drivers=freedreno \
             -Dfreedreno-kmds=kgsl \
@@ -204,11 +213,18 @@ jobs:
             exit $RC
           fi
 
-          echo "=== 检查 ANDROID_STRICT 是否进入 config.h ==="
+          echo "=== 校验：ANDROID_STRICT 必须已生效 ==="
           if grep -q 'ANDROID_STRICT' build-android-aarch64/config.h 2>/dev/null; then
-            echo "警告：config.h 里含 ANDROID_STRICT，白名单仍生效"
+            echo "OK：config.h 含 ANDROID_STRICT，CTS 白名单生效"
           else
-            echo "OK：ANDROID_STRICT 未进入 config.h"
+            echo "::error::config.h 缺少 ANDROID_STRICT！android-strict 未生效，产物会导致 dfm 崩溃，终止构建"
+            exit 1
+          fi
+          echo "=== 校验：VK_ENABLE_BETA_EXTENSIONS 必须已生效 ==="
+          if grep -q 'VK_ENABLE_BETA_EXTENSIONS' build-android-aarch64/config.h 2>/dev/null; then
+            echo "OK：config.h 含 VK_ENABLE_BETA_EXTENSIONS"
+          else
+            echo "::warning::config.h 缺少 VK_ENABLE_BETA_EXTENSIONS（vulkan-beta=true 未生效）"
           fi
 
       - name: 编译

@@ -30,9 +30,9 @@ if [ "$ARCH" != "arm64" ]; then
 fi
 
 ui_print "- 系统 API=$API"
-# android-strict=false 编译，ANDROID_STRICT 宏未定义，
-# vk_physical_device.c 的扩展白名单过滤整段不编译，
-# 所以系统 API 高低不影响扩展可见性。此处只作记录。
+# 构建时 android-strict=true（Mesa 默认），CTS 扩展白名单生效。
+# 注意：绝不要改成 false —— 关闭后 AHardwareBuffer 相关扩展会被声明为
+# supported，UE4 游戏（dfm）会因此走到空的 WSI 函数槽位而 pc=0 崩溃。
 if [ -n "$API" ] && [ "$API" -lt 34 ]; then
   ui_print "! API 偏低，loader/HWUI 行为可能与预期不同"
 fi
@@ -110,14 +110,10 @@ for d in "$MODPATH/system/vendor/lib64" "$MODPATH/system/vendor/lib64/hw"; do
   find "$d" -type d -exec chcon u:object_r:same_process_hal_file:s0 {} \; 2>/dev/null
 done
 
-# /vendor/etc/permissions/*.xml 必须是 vendor_configs_file
-for base in "$MODPATH/system/vendor/etc/permissions" "$MODPATH/vendor/etc/permissions"; do
-  [ -d "$base" ] || continue
-  set_perm_recursive "$base" 0 0 0755 0644 \
-    u:object_r:vendor_configs_file:s0
-  find "$base" -type f -name '*.xml' \
-    -exec chcon u:object_r:vendor_configs_file:s0 {} \; 2>/dev/null
-done
+# 注意：本模块不再自带 /vendor/etc/permissions/*.xml。
+# 曾加过 android.hardware.vulkan.version-1_4.xml（4210688），让 PM 报
+# 设备支持 Vulkan 1.4，结果 UE4 游戏按 1.4 初始化并走到空的
+# GetPhysicalDeviceSurfaceFormatsKHR 槽位，pc=0 崩溃。已移除。
 
 # ── 6. 记录原厂属性值（关键）─────────────────────────────────
 # 不再写死 adreno：不同机型原厂值可能是 adreno / adreno_v2 / 其它。
