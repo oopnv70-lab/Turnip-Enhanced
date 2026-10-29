@@ -89,21 +89,6 @@ if [ ! -f "$MODPATH/system/vendor/lib64/hw/vulkan.turnip.so" ]; then
 fi
 
 # ── 5. 权限与 SELinux 上下文 ─────────────────────────────────
-# 关键：目录和文件的 SELinux 类型必须分开设，不能一律 same_process_hal_file。
-#
-# 历史 bug：旧版把目录也打成 same_process_hal_file，导致非 root 应用
-# 无法 search 目录 → dlopen("/vendor/lib64/hw/vulkan.turnip.so") 返回
-# EACCES → Vulkan loader 认为 ICD 不存在 → 大部分应用判定「设备没有
-# Vulkan」。root/shell 域对这些类型有 search 权限，所以只有普通应用
-# 受影响，用 root 跑 vulkaninfo 一切正常，极具迷惑性。
-#
-# 正确基准（照抄本机原厂 /vendor 的标签）：
-#   /vendor                     vendor_file
-#   /vendor/lib64               vendor_file
-#   /vendor/lib64/hw            vendor_hal_file
-#   /vendor/etc                 vendor_configs_file
-#   /vendor/etc/permissions     vendor_configs_file
-#   *.so 文件                    same_process_hal_file
 set_perm_recursive "$MODPATH/system" 0 0 0755 0644
 
 for base in "$MODPATH/system/vendor" "$MODPATH/vendor"; do
@@ -112,61 +97,26 @@ for base in "$MODPATH/system/vendor" "$MODPATH/vendor"; do
   set_perm_recursive "$base" 0 0 0755 0644
 done
 
-# ── 5a. 目录标签（按原厂基准逐级设置）────────────────────────
-for root in "$MODPATH/system/vendor" "$MODPATH/vendor"; do
-  [ -d "$root" ] || continue
-  chcon u:object_r:vendor_file:s0         "$root"          2>/dev/null
-  [ -d "$root/lib64" ]      && chcon u:object_r:vendor_file:s0      "$root/lib64"     2>/dev/null
-  [ -d "$root/lib64/hw" ]   && chcon u:object_r:vendor_hal_file:s0  "$root/lib64/hw"  2>/dev/null
-  [ -d "$root/lib" ]        && chcon u:object_r:vendor_file:s0      "$root/lib"       2>/dev/null
-  [ -d "$root/lib/hw" ]     && chcon u:object_r:vendor_hal_file:s0  "$root/lib/hw"    2>/dev/null
-  [ -d "$root/etc" ]        && chcon u:object_r:vendor_configs_file:s0 "$root/etc"      2>/dev/null
-  [ -d "$root/etc/permissions" ] && chcon u:object_r:vendor_configs_file:s0 "$root/etc/permissions" 2>/dev/null
-done
-
-# ── 5b. 文件标签（.so 必须是 same_process_hal_file）──────────
-# .so 文件本身用 same_process_hal_file，否则 vendor 库在 system 进程里
+# .so 必须是 same_process_hal_file，否则 vendor 库在 system 进程里
 # 被 SELinux 拒 execute，dlopen 直接失败（avc denied execute）。
-# 注意：这里只对「文件」设，不对目录设。
-for root in "$MODPATH/system/vendor" "$MODPATH/vendor"; do
-  [ -d "$root" ] || continue
-  for d in "$root/lib64" "$root/lib64/hw" "$root/lib" "$root/lib/hw"; do
-    [ -d "$d" ] || continue
-    find "$d" -type f -exec chcon u:object_r:same_process_hal_file:s0 {} \; 2>/dev/null
-  done
-done
-
-# 显式兜住两个主 .so（find 万一因路径异常漏掉时保险）
-for so in "$MODPATH/system/vendor/lib64/hw/vulkan.turnip.so" \
-          "$MODPATH/system/vendor/lib64/libc++_turnip.so"; do
+for so in "$MODPATH/system/vendor/lib64/hw/vulkan.turnip.so"; do
   [ -f "$so" ] || continue
   set_perm "$so" 0 0 0644
   chcon u:object_r:same_process_hal_file:s0 "$so" 2>/dev/null
 done
+for d in "$MODPATH/system/vendor/lib64" "$MODPATH/system/vendor/lib64/hw"; do
+  [ -d "$d" ] || continue
+  find "$d" -type f -exec chcon u:object_r:same_process_hal_file:s0 {} \; 2>/dev/null
+  find "$d" -type d -exec chcon u:object_r:same_process_hal_file:s0 {} \; 2>/dev/null
+done
 
-# ── 5c. /vendor/etc/permissions/*.xml 必须是 vendor_configs_file ──
+# /vendor/etc/permissions/*.xml 必须是 vendor_configs_file
 for base in "$MODPATH/system/vendor/etc/permissions" "$MODPATH/vendor/etc/permissions"; do
   [ -d "$base" ] || continue
   set_perm_recursive "$base" 0 0 0755 0644 \
     u:object_r:vendor_configs_file:s0
   find "$base" -type f -name '*.xml' \
     -exec chcon u:object_r:vendor_configs_file:s0 {} \; 2>/dev/null
-done
-
-# ── 5d. 安装期自检：标签是否与原厂基准一致 ───────────────────
-ui_print "- SELinux 标签自检："
-for p in "$MODPATH/system/vendor:vendor_file" \
-         "$MODPATH/system/vendor/lib64:vendor_file" \
-         "$MODPATH/system/vendor/lib64/hw:vendor_hal_file" \
-         "$MODPATH/system/vendor/etc/permissions:vendor_configs_file"; do
-  path="${p%%:*}"; want="${p##*:}"
-  [ -e "$path" ] || continue
-  got=$(ls -dZ "$path" 2>/dev/null | awk '{print $1}' | sed 's/.*:\([a-z_]*\):s0/\1/')
-  if [ "$got" = "$want" ]; then
-    ui_print "    OK   ${path#$MODPATH/} = $got"
-  else
-    ui_print "    WARN ${path#$MODPATH/} = $got (期望 $want)"
-  fi
 done
 
 # ── 6. 记录原厂属性值（关键）─────────────────────────────────
