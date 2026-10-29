@@ -1,0 +1,42 @@
+# ─────────────────────────────────────────────────────────────
+# sepolicy.rule —— 非 root 应用加载 vulkan.turnip.so 的兜底授权
+#
+# 【为什么需要这个文件】
+#
+# 真机实测确认（Android 16 / ColorOS）：
+#   1. /vendor/etc/selinux/vendor_file_contexts 只给
+#        vulkan.adreno.so / vulkan.lahaina.so / vulkan.mali.so.tango
+#      显式打了 same_process_hal_file，没有 vulkan.turnip.so。
+#   2. 于是 vulkan.turnip.so 落到 plat_file_contexts 的兜底规则：
+#        /(vendor|system/vendor)(/.*)?   ->  vendor_file
+#   3. plat_sepolicy.cil 里：
+#        (allow domain vendor_file (dir (getattr search)))      ← 目录能进
+#        (allow appdomain same_process_hal_file (file (...)))   ← 只有这个
+#      grep -c 'allow appdomain vendor_file' = 0                ← 文件打不开
+#   4. 结果：普通应用 dlopen("/vendor/lib64/hw/vulkan.turnip.so")
+#      在 open() 就被 EACCES 拦死，Vulkan loader 判定 ICD 不存在。
+#      root/su 域有 vendor_file 权限，所以 root 跑 vulkaninfo 正常
+#      —— 这就是这个 bug 长期被隐藏的原因。
+#
+# 【两条防线】
+#
+#   防线 1（首选，符合原厂基准）：customize.sh / post-fs-data.sh 把
+#   .so 的标签改成 same_process_hal_file。appdomain 对该类型有
+#   (file (read getattr map execute open))，直接够用。
+#
+#   防线 2（本文件）：万一 overlay/ext4 复制过程丢了 xattr，标签又
+#   退回 vendor_file，这条 allow 仍然让普通应用能读能 map。
+#   两条独立生效，不互相依赖。
+#
+# 【合法性】
+#   ksud sepolicy check 验证通过（无 neverallow 冲突）：
+#     neverallow domain vendor_file_type (file (write create setattr
+#       relabelfrom append unlink link rename))
+#   —— 只禁写，不禁读/执行/map。这里只给只读权限。
+# ─────────────────────────────────────────────────────────────
+
+# 普通应用（appdomain 覆盖 untrusted_app / priv_app / 各类 sandboxed 进程）
+allow appdomain vendor_file file { read open getattr map execute }
+
+# 保险：某些 ROM 把 /vendor/lib64 本身也标成 vendor_hal_file
+allow appdomain vendor_hal_file file { read open getattr map execute }
