@@ -1560,6 +1560,8 @@ add_gpus([
 
 add_gpus([
         GPUId(chip_id=0xffff44050A31, name="Adreno (TM) 840"),
+        GPUId(chip_id=0x44050A31, name="Adreno (TM) 840"), # KGSL
+        GPUId(chip_id=0xffff44050AFF, name="Adreno (TM) 840"), # KGSL, wildcard patch/fuse
     ], A6xxGPUInfo(
         CHIP.A8XX,
         [a7xx_base, a7xx_gen3, a8xx_base, a8xx_gen2,
@@ -1580,6 +1582,8 @@ add_gpus([
 # 2 slice configuration of a840
 add_gpus([
         GPUId(chip_id=0xffff44050A21, name="Adreno (TM) 840"),
+        GPUId(chip_id=0x44050A21, name="Adreno (TM) 840"), # KGSL
+        GPUId(chip_id=0xffff44050AFF, name="Adreno (TM) 840"), # KGSL, wildcard patch/fuse
     ], A6xxGPUInfo(
         CHIP.A8XX,
         [a7xx_base, a7xx_gen3, a8xx_base, a8xx_gen2,
