@@ -63,14 +63,16 @@ curl -sL -X POST \
   -H "Authorization: Bearer $TOKEN" \
   -H "X-GitHub-Api-Version: 2022-11-28" \
   https://api.github.com/repos/oopnv70-lab/Turnip-Enhanced/actions/workflows/build-turnip.yml/dispatches \
-  -d '{"ref":"main","inputs":{"android_strict":"false","platform_sdk":"35"}}' \
+  -d '{"ref":"main","inputs":{"platform_sdk":"35"}}' \
   -w '\nHTTP_STATUS:%{http_code}\n'
 ```
 
 - 返回 `HTTP_STATUS:204` 即触发成功。
 - 查状态：`GET .../actions/runs?per_page=3`
 - 查产物：`GET .../actions/runs/<run_id>/artifacts`
-- 构建默认参数：`android-strict=false`、`platform-sdk=35`；产物是 KSU/Magisk 模块 zip。
+- 构建默认参数：`android-strict` **固定 true**（写死在 workflow `env`，非 workflow_dispatch 输入）、`platform-sdk=35`；产物是 KSU/Magisk 模块 zip。
+  - 严禁改回 `false`：会导致 `com.tencent.tmgp.dfm` 启动 2–4 秒 SIGSEGV（pc=0，`GetPhysicalDeviceSurfaceFormatsKHR+3500`）。
+  - 校验点在 `meson configure` 的选项值与 `build.ninja` 的 `-DANDROID_STRICT`；**不要查 `config.h`**（这两个宏来自 `pre_args`，不进 config.h）。
 - 构建成功后 workflow 会自动创建 **pre-release**：tag `v<MESA_VER>-rc`，标题 `Turnip Enhanced <MESA_VER> RC`，资产 `turnip-enhanced.zip`。
 
 ### 四、发布与版本语义

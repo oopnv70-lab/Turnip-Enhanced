@@ -10,17 +10,12 @@ name: build-turnip
 # 不再从 gitlab.freedesktop.org 下载 stock mesa。
 #
 # 相对上游 ilhan-athn7/freedreno_turnip-CI 的改动：
-#   1. -Dandroid-strict=false  关闭 Android CTS 扩展白名单
-#   2. 模块内补 version-1_4.xml，让 PackageManager 认到 Vulkan 1.4
-#   3. 源码来自本仓库，不下载外网 archive
+#   1. android-strict 固定为 true（= Mesa 默认值，与上游一致），不得改动
+#   2. 源码来自本仓库，不下载外网 archive
 
 on:
   workflow_dispatch:
     inputs:
-      android_strict:
-        description: 'android-strict (false = 放开扩展白名单, true = CTS 严格)'
-        required: false
-        default: 'false'
       platform_sdk:
         description: 'platform-sdk-version（仅 Mesa 侧宏，默认 35）'
         required: false
@@ -213,18 +208,33 @@ jobs:
             exit $RC
           fi
 
-          echo "=== 校验：ANDROID_STRICT 必须已生效 ==="
-          if grep -q 'ANDROID_STRICT' build-android-aarch64/config.h 2>/dev/null; then
-            echo "OK：config.h 含 ANDROID_STRICT，CTS 白名单生效"
-          else
-            echo "::error::config.h 缺少 ANDROID_STRICT！android-strict 未生效，产物会导致 dfm 崩溃，终止构建"
+          # 注意：ANDROID_STRICT / VK_ENABLE_BETA_EXTENSIONS 不是 config.h 宏。
+          # meson.build 里它们是 pre_args += '-DANDROID_STRICT' / '-DVK_ENABLE_BETA_EXTENSIONS'，
+          # 只会出现在编译命令行（build.ninja 的 c_args），永远不写进 config.h。
+          # 所以校验必须查 meson 选项值 + build.ninja 里的实际编译参数。
+          echo "=== 校验 1/2：meson 选项 android-strict 必须为 true ==="
+          # 从 meson 的 intro-buildoptions.json 精确取值（不要用 `meson configure | grep`：
+          # 该表列是「名称 类型 值」，且值为 false 时行内仍含 "[true, false]" 会误判）。
+          STRICT_OPT=$(python3 -c "import json;print(next((o['value'] for o in json.load(open('build-android-aarch64/meson-info/intro-buildoptions.json')) if o['name']=='android-strict'),''))")
+          echo "meson 选项 android-strict = ${STRICT_OPT:-<未找到>}"
+          if [ "$STRICT_OPT" != "True" ] && [ "$STRICT_OPT" != "true" ]; then
+            echo "::error::meson 选项 android-strict 不是 true！产物会导致 dfm 崩溃，终止构建"
             exit 1
           fi
-          echo "=== 校验：VK_ENABLE_BETA_EXTENSIONS 必须已生效 ==="
-          if grep -q 'VK_ENABLE_BETA_EXTENSIONS' build-android-aarch64/config.h 2>/dev/null; then
-            echo "OK：config.h 含 VK_ENABLE_BETA_EXTENSIONS"
+          echo "OK：android-strict=true"
+
+          echo "=== 校验 2/2：编译命令行必须带 -DANDROID_STRICT ==="
+          if grep -q -- '-DANDROID_STRICT' build-android-aarch64/build.ninja; then
+            echo "OK：build.ninja 含 -DANDROID_STRICT，CTS 白名单生效"
           else
-            echo "::warning::config.h 缺少 VK_ENABLE_BETA_EXTENSIONS（vulkan-beta=true 未生效）"
+            echo "::error::build.ninja 缺少 -DANDROID_STRICT！ANDROID_STRICT 未进编译参数，终止构建"
+            exit 1
+          fi
+          echo "=== 附注：vulkan-beta（仅影响 provisional 扩展，Turnip 未实现，属废开关）==="
+          if grep -q -- '-DVK_ENABLE_BETA_EXTENSIONS' build-android-aarch64/build.ninja; then
+            echo "INFO：build.ninja 含 -DVK_ENABLE_BETA_EXTENSIONS"
+          else
+            echo "INFO：build.ninja 无 -DVK_ENABLE_BETA_EXTENSIONS（无影响）"
           fi
 
       - name: 编译
