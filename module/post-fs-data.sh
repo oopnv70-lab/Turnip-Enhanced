@@ -104,11 +104,26 @@ done
 
 # 兜底：万一上面路径全没命中（未来 metamodule 改布局），
 # 直接在 /data/adb 下限定深度搜这两个文件，连同父目录一起修。
+# 注意两点：
+#   1. 只处理 vendor 树下的文件。system/lib64 那份 libc++_turnip.so
+#      属于 /system，原厂基准是 system_lib_file，不能按 vendor 打。
+#   2. 父目录要按目录名判断类型，不能一律 vendor_hal_file：
+#        .../hw  -> vendor_hal_file（原厂 /vendor/lib64/hw 就是这个）
+#        其它     -> vendor_file（原厂 /vendor、/vendor/lib64 都是这个）
+#      上一版一律打 vendor_hal_file，会把 /vendor/lib64 标错。
 for f in $(find /data/adb -maxdepth 8 \
              \( -name 'vulkan.turnip.so' -o -name 'libc++_turnip.so' \) \
              2>/dev/null); do
+  case "$f" in
+    */vendor/*) : ;;
+    *) continue ;;
+  esac
   chcon u:object_r:same_process_hal_file:s0 "$f" 2>/dev/null
-  chcon u:object_r:vendor_hal_file:s0 "$(dirname "$f")" 2>/dev/null
+  pd=$(dirname "$f")
+  case "$(basename "$pd")" in
+    hw) chcon u:object_r:vendor_hal_file:s0 "$pd" 2>/dev/null ;;
+    *)  chcon u:object_r:vendor_file:s0     "$pd" 2>/dev/null ;;
+  esac
 done
 
 # 最后尝试直接修合并视图（/vendor 只读时大概率失败，静默忽略）。
