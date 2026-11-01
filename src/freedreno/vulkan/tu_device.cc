@@ -356,7 +356,19 @@ get_device_extensions(const struct tu_physical_device *device,
       .EXT_extended_dynamic_state2 = true,
       .EXT_extended_dynamic_state3 = true,
       .EXT_external_memory_dma_buf = true,
-      .EXT_external_memory_host = is_kgsl(device->instance),
+      /* Keep VK_EXT_external_memory_host unadvertised on KGSL, matching the
+       * Mesa upstream default.  The userptr (IOCTL_KGSL_MAP_USER_MEM) import
+       * path added for this fork still has three defects that make it unsafe:
+       *   - the resulting bo is never inserted into the device bo sparse array,
+       *   - gem_handle stays 0 while kgsl maps still derive their offset as
+       *     gem_handle << 12 (other code treats 0 as a native BO),
+       *   - the host pointer is not validated to be page aligned while the
+       *     length is rounded up to a page.
+       * UE4 (com.tencent.mf.uam) does take that path and the GPU then reads
+       * past the end of the KGSL mapping (GPU PAGE FAULT in CCU, later a
+       * SIGSEGV in libUE4.so).  Re-enable only after the allocator is fixed.
+       */
+      .EXT_external_memory_host = false,
       .EXT_filter_cubic = device->info->props.has_tex_filter_cubic,
       .EXT_fragment_density_map = true,
       .EXT_fragment_density_map_offset = true,
