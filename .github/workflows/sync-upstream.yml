@@ -12,24 +12,26 @@ jobs:
           ref: main
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
-      - name: sync upstream tree exactly
+      - name: make mesa tree identical to upstream
         run: |
-          set -x
+          set -eu
           git config user.name Operit
           git config user.email operit@users.noreply.github.com
           git remote add upstream https://github.com/LFRon/Turnip-Enhanced.git
-          git fetch upstream main
-          echo UPSTREAM=$(git rev-parse upstream/main)
+          git fetch --no-tags upstream main
+          echo "UPSTREAM=$(git rev-parse upstream/main)"
           git read-tree -u --reset upstream/main
-          git checkout main -- .github/workflows/build-turnip.yml
-          git checkout main -- .github/workflows/sync-upstream.yml
+          git rm -r -f --ignore-unmatch .github/workflows
+          git checkout main -- .github/workflows
           git checkout main -- AGENTS.md
+          git checkout main -- .gitignore
           git checkout main -- README.md
           git checkout main -- CHANGELOG-UPSTREAM.md
           git checkout main -- module
           git checkout main -- extras
           git add -A
-          git status --short | head -60
-          git commit -m "sync: make Mesa tree identical to upstream LFRon/Turnip-Enhanced" || echo NOTHING_TO_COMMIT
-          git push origin main || echo PUSH_FAILED
-          echo SYNC_OK
+          echo "CHANGED_FILES=$(git diff --cached --name-only | wc -l)"
+          git diff --cached --stat | tail -3
+          git commit -m "sync: make Mesa tree identical to upstream LFRon/Turnip-Enhanced"
+          git push origin main
+          echo SYNC_PUSHED
