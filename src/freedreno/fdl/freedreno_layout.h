@@ -73,6 +73,18 @@ struct fdl_slice {
 struct fdl_explicit_layout {
    uint32_t offset;
    uint32_t pitch;
+
+   /* Override the row-pitch validation alignment for an imported,
+    * single-level linear image.  Zero keeps the normal hardware-layout
+    * requirement.  This does not change the descriptor's minimum mip pitch.
+    */
+   uint32_t pitch_alignment;
+
+   /* Imported sampled-only images do not need the four-row over-allocation
+    * used to make linear GMEM blits safe.  This is valid only for a
+    * single-level, single-layer, linear, non-UBWC image.
+    */
+   bool skip_last_level_padding;
 };
 
 /**
@@ -98,7 +110,7 @@ struct fdl_image_params {
    bool ubwc;
 
    /**
-    * Force UBWC, even when below the minimum width.
+    * Force UBWC at every level, disabling all linear fallback.
     */
    bool force_ubwc;
 
@@ -142,6 +154,7 @@ struct fdl_layout {
    bool layer_first : 1; /* see above description */
    bool tile_all : 1;
    bool is_mutable : 1;
+   bool has_explicit_pitch : 1;
 
    /* Note that for tiled textures, beyond a certain mipmap level (ie.
     * when width is less than block size) things switch to linear.  In
@@ -189,6 +202,13 @@ fdl_cpp_shift(const struct fdl_layout *layout)
 static inline uint32_t
 fdl_pitch(const struct fdl_layout *layout, unsigned level)
 {
+   /* Explicit layouts provide the authoritative level-0 row pitch.  Keep
+    * pitchalign for the descriptor's minimum derived-mip pitch instead of
+    * silently rounding the imported level-0 value up to that alignment.
+    */
+   if (level == 0 && layout->has_explicit_pitch)
+      return layout->pitch0;
+
    return align(u_minify(layout->pitch0, level), 1 << layout->pitchalign);
 }
 
@@ -345,6 +365,15 @@ void fdl6_get_ubwc_macrotile_size(const struct fdl_layout *layout,
                                   uint32_t *macrotile_width,
                                   uint32_t *macrotile_height);
 
+static inline bool
+fdl_format_is_r8g8(enum pipe_format format)
+{
+   const struct util_format_description *desc = util_format_description(format);
+
+   return desc->layout == UTIL_FORMAT_LAYOUT_PLAIN && desc->nr_channels == 2 &&
+          desc->channel[0].size == 8 && desc->channel[1].size == 8;
+}
+
 /* Single-sampled non-mutable R8G8 textures have a special UBWC block layout
  * that's different from the normal cpp=2 layout. Return true if this layout
  * is in use.
@@ -352,8 +381,7 @@ void fdl6_get_ubwc_macrotile_size(const struct fdl_layout *layout,
 static inline bool
 fdl6_is_r8g8_layout(const struct fdl_layout *layout)
 {
-   return layout->cpp == 2 &&
-          util_format_get_nr_components(layout->format) == 2 &&
+   return layout->cpp == 2 && fdl_format_is_r8g8(layout->format) &&
           !layout->is_mutable;
 }
 

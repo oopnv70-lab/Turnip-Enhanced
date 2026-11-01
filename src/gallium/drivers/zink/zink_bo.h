@@ -33,6 +33,11 @@
 #define VK_STAGING_RAM (VK_MEMORY_PROPERTY_HOST_COHERENT_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT)
 #define VK_LAZY_VRAM (VK_MEMORY_PROPERTY_LAZILY_ALLOCATED_BIT | VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT)
 
+static ALWAYS_INLINE bool
+zink_is_vis_vram_type(const struct zink_screen *screen, unsigned mem_type_idx)
+{
+   return (screen->info.mem_props.memoryTypes[mem_type_idx].propertyFlags & VK_VIS_VRAM) == VK_VIS_VRAM;
+}
 
 static ALWAYS_INLINE enum zink_alloc_flag
 zink_alloc_flags_from_heap(enum zink_heap heap)
@@ -110,6 +115,9 @@ zink_bo_init(struct zink_screen *screen);
 void
 zink_bo_deinit(struct zink_screen *screen);
 
+void
+zink_bo_release_unused(struct zink_screen *screen);
+
 struct pb_buffer_lean *
 zink_bo_create(struct zink_screen *screen, uint64_t size, unsigned alignment, enum zink_heap heap, enum zink_alloc_flag flags, unsigned mem_type_idx, const void *pNext,
                struct zink_clientptr_heap *clientptr_heap);
@@ -130,6 +138,19 @@ static ALWAYS_INLINE VkDeviceMemory
 zink_bo_get_mem(const struct zink_bo *bo)
 {
    return bo->mem ? bo->mem : bo->u.slab.real->mem;
+}
+
+/* slabs share memory, so binds must take the lock that mapping takes */
+static ALWAYS_INLINE void
+zink_bo_lock_mem(struct zink_bo *bo)
+{
+   simple_mtx_lock(bo->mem ? &bo->lock : &bo->u.slab.real->lock);
+}
+
+static ALWAYS_INLINE void
+zink_bo_unlock_mem(struct zink_bo *bo)
+{
+   simple_mtx_unlock(bo->mem ? &bo->lock : &bo->u.slab.real->lock);
 }
 
 static ALWAYS_INLINE VkDeviceSize

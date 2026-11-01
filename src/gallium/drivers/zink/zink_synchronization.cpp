@@ -150,10 +150,12 @@ zink_get_cmdbuf(struct zink_context *ctx, struct zink_resource *src, struct zink
    unordered_exec &= check_unordered_exec(ctx, src, false) &&
                      check_unordered_exec(ctx, dst, true);
 
+   /* only update state if usage hasn't yet been set to this cmdbuf to avoid desync */
    if (src)
-      src->obj->unordered_read = unordered_exec;
+      src->obj->unordered_read = unordered_exec && (!zink_resource_usage_matches(src, ctx->bs) || src->obj->unordered_read);
    if (dst)
-      dst->obj->unordered_write = unordered_exec;
+      dst->obj->unordered_write = unordered_exec && (!zink_resource_usage_matches(dst, ctx->bs) || dst->obj->unordered_write);
+
 
    if (!unordered_exec || ctx->unordered_blitting)
       zink_batch_no_rp(ctx);
@@ -432,6 +434,8 @@ template <barrier_type BARRIER_API, bool UNSYNCHRONIZED, bool GENERAL>
 void
 zink_resource_image_barrier(struct zink_context *ctx, struct zink_resource *res, VkImageLayout new_layout, VkAccessFlags flags, VkPipelineStageFlags pipeline)
 {
+   if (res->obj->dt)
+      zink_kopper_sync_idx(res);
    bool is_write = zink_resource_access_is_write(flags);
    if (is_write && zink_is_swapchain(res))
       zink_kopper_set_readback_needs_update(res);

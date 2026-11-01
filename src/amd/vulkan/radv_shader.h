@@ -203,18 +203,6 @@ struct radv_graphics_pipeline_key {
    struct radv_shader_stage_key stage_info[MESA_VULKAN_SHADER_STAGES];
 };
 
-struct radv_llvm_compiler_options {
-   const struct ac_compiler_info *compiler_info;
-   enum radeon_family family;
-   uint32_t address32_hi;
-   bool robust_buffer_access;
-   bool dump_shader;
-   bool dump_preoptir;
-   bool record_ir;
-   bool check_ir;
-   bool wgp_mode;
-};
-
 #define SET_SGPR_FIELD(field, value) (((unsigned)(value) & field##__MASK) << field##__SHIFT)
 
 #define TCS_OFFCHIP_LAYOUT_NUM_PATCHES__SHIFT           0
@@ -301,7 +289,7 @@ struct radv_shader_stage {
    const char *entrypoint;
    const VkSpecializationInfo *spec_info;
 
-   unsigned char shader_blake3[BLAKE3_KEY_LEN];
+   blake3_hash shader_blake3;
 
    nir_shader *nir;
    nir_shader *gs_copy_shader;
@@ -540,6 +528,15 @@ struct radv_shader_dma_submission {
    uint64_t seq;
 };
 
+struct radv_ps_epilog_format_info {
+   struct ac_spi_color_formats spi_color_formats;
+   uint8_t colormask;
+   bool ignores_signed_zero;
+   bool is_int8;
+   bool is_int10;
+   bool is_float32;
+};
+
 struct radv_compiler_info {
    /* Hardware info */
    const struct ac_compiler_info *ac;
@@ -661,6 +658,8 @@ struct radv_compiler_info {
    /* NIR/SPIR-V */
    struct spirv_capabilities spirv_caps;
    nir_shader_compiler_options nir_options[MESA_VULKAN_SHADER_STAGES];
+
+   struct radv_ps_epilog_format_info ps_epilog_formats[PIPE_FORMAT_COUNT];
 };
 struct radv_shader_stage;
 

@@ -2678,6 +2678,55 @@ ntq_emit_image_size(struct v3d_compile *c, nir_intrinsic_instr *instr)
         }
 }
 
+static uint32_t
+tlb_read_config(struct v3d_compile *c, unsigned location,
+                unsigned num_components)
+{
+        /* We need to emit our TLB reads after we have acquired the scoreboard
+         * lock, or the GPU will hang. Usually, we do our scoreboard locking on
+         * the last thread switch to improve parallelism, however, that is only
+         * guaranteed to happen before the tlb color writes.
+         *
+         * To fix that, we make sure we always emit a thread switch before the
+         * first tlb read. If that happens to be the last thread switch
+         * we emit, then everything is fine, but otherwise, if any code after
+         * this point needs to emit additional thread switches, then we will
+         * switch the strategy to locking the scoreboard on the first thread
+         * switch instead -- see vir_emit_thrsw().
+         */
+        if (!c->emitted_tlb_load) {
+                if (!c->last_thrsw_at_top_level)
+                        vir_emit_thrsw(c);
+
+                c->emitted_tlb_load = true;
+        }
+
+        uint32_t conf = 0xffffff00;
+        conf |= c->fs_key->msaa ? TLB_SAMPLE_MODE_PER_SAMPLE :
+                                  TLB_SAMPLE_MODE_PER_PIXEL;
+
+        if (location == FRAG_RESULT_DEPTH)
+                return conf | TLB_TYPE_DEPTH;
+
+        if (location == FRAG_RESULT_STENCIL)
+                return conf | TLB_TYPE_STENCIL_ALPHA;
+
+        unsigned rt = location - FRAG_RESULT_DATA0;
+        assert(rt < V3D_MAX_DRAW_BUFFERS);
+        conf |= (7 - rt) << TLB_RENDER_TARGET_SHIFT;
+
+        if (c->fs_key->f32_color_rb & (1 << rt)) {
+                conf |= TLB_TYPE_F32_COLOR;
+                conf |= (num_components - 1) << TLB_VEC_SIZE_MINUS_1_SHIFT;
+        } else {
+                conf |= TLB_TYPE_F16_COLOR | TLB_F16_SWAP_HI_LO;
+                conf |= num_components >= 3 ? TLB_VEC_SIZE_4_F16 :
+                                              TLB_VEC_SIZE_2_F16;
+        }
+
+        return conf;
+}
+
 static void
 vir_emit_tlb_color_read(struct v3d_compile *c, nir_intrinsic_instr *instr)
 {
@@ -2693,25 +2742,6 @@ vir_emit_tlb_color_read(struct v3d_compile *c, nir_intrinsic_instr *instr)
         int load_components = instr->def.num_components;
         assert(component + load_components <= 4);
 
-        /* We need to emit our TLB reads after we have acquired the scoreboard
-         * lock, or the GPU will hang. Usually, we do our scoreboard locking on
-         * the last thread switch to improve parallelism, however, that is only
-         * guaranteed to happen before the tlb color writes.
-         *
-         * To fix that, we make sure we always emit a thread switch before the
-         * first tlb color read. If that happens to be the last thread switch
-         * we emit, then everything is fine, but otherwise, if any code after
-         * this point needs to emit additional thread switches, then we will
-         * switch the strategy to locking the scoreboard on the first thread
-         * switch instead -- see vir_emit_thrsw().
-         */
-        if (!c->emitted_tlb_load) {
-                if (!c->last_thrsw_at_top_level)
-                        vir_emit_thrsw(c);
-
-                c->emitted_tlb_load = true;
-        }
-
         struct qreg *color_reads_for_sample =
                 &c->color_reads[(rt * V3D_MAX_SAMPLES + sample_index) * 4];
 
@@ -2726,42 +2756,25 @@ vir_emit_tlb_color_read(struct v3d_compile *c, nir_intrinsic_instr *instr)
 
                 int num_samples = c->fs_key->msaa ? V3D_MAX_SAMPLES : 1;
 
-                uint32_t conf = 0xffffff00;
-                conf |= c->fs_key->msaa ? TLB_SAMPLE_MODE_PER_SAMPLE :
-                                          TLB_SAMPLE_MODE_PER_PIXEL;
-                conf |= (7 - rt) << TLB_RENDER_TARGET_SHIFT;
-
-                if (c->fs_key->f32_color_rb & (1 << rt)) {
-                        conf |= TLB_TYPE_F32_COLOR;
-                        conf |= ((num_components - 1) <<
-                                 TLB_VEC_SIZE_MINUS_1_SHIFT);
-                } else {
-                        conf |= TLB_TYPE_F16_COLOR;
-                        conf |= TLB_F16_SWAP_HI_LO;
-
-                        if (num_components >= 3)
-                                conf |= TLB_VEC_SIZE_4_F16;
-                        else
-                                conf |= TLB_VEC_SIZE_2_F16;
-                }
-
+                uint32_t conf = tlb_read_config(c, FRAG_RESULT_DATA0 + rt,
+                                                num_components);
 
                 for (int i = 0; i < num_samples; i++) {
                         struct qreg r, g, b, a;
                         if (c->fs_key->f32_color_rb & (1 << rt)) {
                                 r = conf != 0xffffffff && i == 0?
-                                        vir_TLBU_COLOR_READ(c, conf) :
-                                        vir_TLB_COLOR_READ(c);
+                                        vir_TLBU_READ(c, conf) :
+                                        vir_TLB_READ(c);
                                 if (num_components >= 2)
-                                        g = vir_TLB_COLOR_READ(c);
+                                        g = vir_TLB_READ(c);
                                 if (num_components >= 3)
-                                        b = vir_TLB_COLOR_READ(c);
+                                        b = vir_TLB_READ(c);
                                 if (num_components >= 4)
-                                        a = vir_TLB_COLOR_READ(c);
+                                        a = vir_TLB_READ(c);
                         } else {
                                 struct qreg rg = conf != 0xffffffff && i == 0 ?
-                                        vir_TLBU_COLOR_READ(c, conf) :
-                                        vir_TLB_COLOR_READ(c);
+                                        vir_TLBU_READ(c, conf) :
+                                        vir_TLB_READ(c);
                                 r = vir_FMOV(c, rg);
                                 vir_set_unpack(c->defs[r.index], 0,
                                                V3D_QPU_UNPACK_L);
@@ -2770,7 +2783,7 @@ vir_emit_tlb_color_read(struct v3d_compile *c, nir_intrinsic_instr *instr)
                                                V3D_QPU_UNPACK_H);
 
                                 if (num_components > 2) {
-                                    struct qreg ba = vir_TLB_COLOR_READ(c);
+                                    struct qreg ba = vir_TLB_READ(c);
                                     b = vir_FMOV(c, ba);
                                     vir_set_unpack(c->defs[b.index], 0,
                                                    V3D_QPU_UNPACK_L);
@@ -2798,6 +2811,33 @@ vir_emit_tlb_color_read(struct v3d_compile *c, nir_intrinsic_instr *instr)
                 ntq_store_def(c, &instr->def, i,
                               vir_MOV(c, color_reads_for_sample[component + i]));
         }
+}
+
+static void
+vir_emit_tlb_ds_read(struct v3d_compile *c, nir_intrinsic_instr *instr)
+{
+        assert(c->s->info.stage == MESA_SHADER_FRAGMENT);
+
+        unsigned location = nir_intrinsic_io_semantics(instr).location;
+        assert(location == FRAG_RESULT_DEPTH || location == FRAG_RESULT_STENCIL);
+
+        unsigned sample_index = nir_intrinsic_base(instr);
+        assert(sample_index < V3D_MAX_SAMPLES);
+        assert(instr->def.num_components == 1);
+
+        unsigned index = location == FRAG_RESULT_DEPTH;
+        struct qreg *reads = &c->ds_reads[index * V3D_MAX_SAMPLES];
+        if (reads[sample_index].file == QFILE_NULL) {
+                unsigned samples = c->fs_key->msaa ? V3D_MAX_SAMPLES : 1;
+                uint32_t conf = tlb_read_config(c, location, 1);
+
+                for (unsigned i = 0; i < samples; i++) {
+                        reads[i] = i == 0 ? vir_TLBU_READ(c, conf) :
+                                            vir_TLB_READ(c);
+                }
+        }
+
+        ntq_store_def(c, &instr->def, 0, vir_MOV(c, reads[sample_index]));
 }
 
 static bool
@@ -3735,6 +3775,10 @@ ntq_emit_intrinsic(struct v3d_compile *c, nir_intrinsic_instr *instr)
 
         case nir_intrinsic_load_tlb_color_brcm:
                 vir_emit_tlb_color_read(c, instr);
+                break;
+
+        case nir_intrinsic_load_tlb_depth_stencil_brcm:
+                vir_emit_tlb_ds_read(c, instr);
                 break;
 
         case nir_intrinsic_load_fep_w_v3d:

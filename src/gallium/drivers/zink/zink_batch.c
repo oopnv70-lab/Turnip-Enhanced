@@ -143,7 +143,6 @@ reset_batch_state_internal(struct zink_screen *screen, struct zink_batch_state *
       util_dynarray_clear(&bs->fd_wait_semaphores);
       simple_mtx_unlock(&screen->semaphores_lock);
    }
-   bs->swapchain = NULL;
 
    util_dynarray_foreach(&bs->fences, struct zink_tc_fence*, mfence)
       zink_fence_reference(screen, mfence, NULL);
@@ -475,6 +474,14 @@ find_completed_batch_state(struct zink_context *ctx)
    return NULL;
 }
 
+/* recycle the completed states now, which is where deleted bindless ids come back */
+void
+zink_batch_reset_completed(struct zink_context *ctx)
+{
+   if (!(ctx->flags & ZINK_CONTEXT_COPY_ONLY))
+      find_completed_batch_state(ctx);
+}
+
 /* find a "free" batch state */
 static struct zink_batch_state *
 get_batch_state(struct zink_context *ctx)
@@ -638,7 +645,7 @@ post_submit(struct zink_batch_state *bs, struct zink_screen *screen)
    if (bs->is_device_lost) {
       if (bs->ctx->reset.reset)
          bs->ctx->reset.reset(bs->ctx->reset.data, PIPE_GUILTY_CONTEXT_RESET);
-      else if (screen->abort_on_hang && !screen->robust_ctx_count)
+      else if (screen->abort_on_hang && !p_atomic_read_relaxed(&screen->robust_ctx_count))
          /* if nothing can save us, abort */
          abort();
       screen->device_lost = true;
@@ -661,6 +668,8 @@ typedef enum {
 } zink_submit;
 
 #define ZINK_MAX_SIGNALS 3
+/* most waits or signals a flush can have and still be merged into one VkSubmitInfo */
+#define ZINK_MAX_MERGED_SEMAPHORES 16
 
 static void
 submit_queue(void *data, void *gdata, int thread_index)
@@ -852,6 +861,53 @@ submit_queue(void *data, void *gdata, int thread_index)
       sem_submit.pWaitSemaphoreValues = bs->wait_semaphore_values.data;
       si[ZINK_SUBMIT_CMDBUF].pNext = &sem_submit;
    }
+   /* merge after the cross-queue wait above so the merged submit includes it */
+   VkSubmitInfo merged_si = {0};
+   VkTimelineSemaphoreSubmitInfo merged_tsi = {0};
+   VkSemaphore merged_waits[ZINK_MAX_MERGED_SEMAPHORES];
+   VkPipelineStageFlags merged_stages[ZINK_MAX_MERGED_SEMAPHORES];
+   uint64_t merged_wait_values[ZINK_MAX_MERGED_SEMAPHORES];
+   VkSemaphore merged_signals[ZINK_MAX_MERGED_SEMAPHORES];
+   uint64_t merged_signal_values[ZINK_MAX_MERGED_SEMAPHORES];
+   if (num_si > 1) {
+      unsigned num_waits = 0, num_signals = 0;
+      for (unsigned i = 0; i < ARRAY_SIZE(si); i++) {
+         num_waits += si[i].waitSemaphoreCount;
+         num_signals += si[i].signalSemaphoreCount;
+      }
+      if (num_waits <= ZINK_MAX_MERGED_SEMAPHORES && num_signals <= ZINK_MAX_MERGED_SEMAPHORES) {
+         num_waits = 0;
+         num_signals = 0;
+         for (unsigned i = 0; i < ARRAY_SIZE(si); i++) {
+            const VkTimelineSemaphoreSubmitInfo *t = si[i].pNext;
+            for (unsigned j = 0; j < si[i].waitSemaphoreCount; j++) {
+               merged_waits[num_waits] = si[i].pWaitSemaphores[j];
+               merged_stages[num_waits] = si[i].pWaitDstStageMask[j];
+               merged_wait_values[num_waits++] = t && j < t->waitSemaphoreValueCount ? t->pWaitSemaphoreValues[j] : 0;
+            }
+            for (unsigned j = 0; j < si[i].signalSemaphoreCount; j++) {
+               merged_signals[num_signals] = si[i].pSignalSemaphores[j];
+               merged_signal_values[num_signals++] = t && j < t->signalSemaphoreValueCount ? t->pSignalSemaphoreValues[j] : 0;
+            }
+         }
+         merged_tsi.sType = VK_STRUCTURE_TYPE_TIMELINE_SEMAPHORE_SUBMIT_INFO;
+         merged_tsi.waitSemaphoreValueCount = num_waits;
+         merged_tsi.pWaitSemaphoreValues = merged_wait_values;
+         merged_tsi.signalSemaphoreValueCount = num_signals;
+         merged_tsi.pSignalSemaphoreValues = merged_signal_values;
+         merged_si.sType = VK_STRUCTURE_TYPE_SUBMIT_INFO;
+         merged_si.pNext = &merged_tsi;
+         merged_si.waitSemaphoreCount = num_waits;
+         merged_si.pWaitSemaphores = merged_waits;
+         merged_si.pWaitDstStageMask = merged_stages;
+         merged_si.commandBufferCount = si[ZINK_SUBMIT_CMDBUF].commandBufferCount;
+         merged_si.pCommandBuffers = si[ZINK_SUBMIT_CMDBUF].pCommandBuffers;
+         merged_si.signalSemaphoreCount = num_signals;
+         merged_si.pSignalSemaphores = merged_signals;
+         submit = &merged_si;
+         num_si = 1;
+      }
+   }
    screen->last_submit_id = batch_id;
    screen->last_submit_is_video = bs->is_video;
    VRAM_ALLOC_LOOP(result,
@@ -945,11 +1001,9 @@ zink_end_batch(struct zink_context *ctx)
 
    /* this is swapchain presentation semaphore handling */
    if (ctx->swapchain) {
-      if (zink_kopper_acquired(ctx->swapchain->obj->dt, ctx->swapchain->obj->dt_idx) && !ctx->swapchain->obj->present) {
+      if (zink_kopper_acquired(ctx->swapchain->obj->dt, zink_kopper_get_dt_idx(ctx->swapchain)) && !ctx->swapchain->obj->present)
          bs->present = zink_kopper_present(screen, ctx->swapchain);
-         bs->swapchain = ctx->swapchain;
-      }
-      ctx->swapchain = NULL;
+      zink_resource_reference(&ctx->swapchain, NULL);
    }
 
    if (screen->device_lost)
@@ -1040,6 +1094,7 @@ zink_end_batch(struct zink_context *ctx)
       (*mfence)->deferred_ctx = NULL;
 
    ctx->queued_batches++;
+   ctx->hud.frame_submits_current++;
    if (screen->threaded_submit) {
       util_queue_add_job(&screen->flush_queue, bs, &bs->flush_completed,
                          submit_queue, NULL, 0);

@@ -953,7 +953,7 @@ Anvil(ANV) driver environment variables
   ``experimental``
     Enable experimental features
   ``no-gpl``
-    Disables `VK_KHR_graphics_pipeline_library` support
+    Disables `VK_EXT_graphics_pipeline_library` support
   ``no-sparse``
     Disables sparse support
   ``sparse-trtt``
@@ -1439,6 +1439,15 @@ V3D/V3DV driver environment variables
    a comma-separated list of debug options. Use ``V3D_DEBUG=help`` to
    print a list of available options.
 
+.. envvar:: V3D_MAX_BO_CACHE_SIZE
+
+   if set, determines the maximum size (in Mb) of the cache with free BOs that
+   can be reused in v3d. Default value is 64Mb.
+
+.. envvar:: V3DV_MAX_BO_CACHE_SIZE
+
+   if set, determines the maximum size (in Mb) of the cache with free BOs that
+   can be reused in v3dv. Default value is 64Mb.
 
 .. _radv env-vars:
 
@@ -1542,8 +1551,6 @@ RADV driver environment variables
       display info at startup
    ``syncshaders``
       synchronize shaders after all draws/dispatches
-   ``zerovram``
-      initialize all memory allocated in VRAM as zero (deprecated)
    ``vs``
       Dump vertex shaders.
    ``tcs``
@@ -2403,10 +2410,10 @@ Turnip driver environment variables
       Force GMEM loads via 3D engine.
    ``fdm``
       Force enable fragment density map for all renderpasses.
-   ``noconcurrentresolves``
-      Disable concurrent resolves.
-   ``noconcurrentunresolves``
-      Disable concurrent unresolves.
+   ``concurrentresolves``
+      Enable hardware concurrent resolves (disabled by default).
+   ``concurrentunresolves``
+      Enable hardware concurrent unresolves (disabled by default).
    ``nobinmerging``
       Disable bin merging (used for FDM).
    ``perfcraw``
@@ -2421,6 +2428,8 @@ Turnip driver environment variables
       Disable concurrent binning.
    ``forcecb``
       Force enable concurrent binning.
+   ``image_trace``
+      Log image creation and buffer/image (including host-image-copy) upload layout details.
 
 Freedreno driver environment variables
 --------------------------------------

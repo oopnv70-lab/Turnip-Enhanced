@@ -2594,6 +2594,25 @@ build_txs_lod0_intel(nir_builder *b,
                                   nir_type_int32, false, true);
 }
 
+void
+brw_nir_select_divergence_options(const struct brw_compiler *compiler,
+                                  nir_shader *nir, bool use_jay)
+{
+   const struct nir_shader_compiler_options *options = nir->options;
+
+   if (use_jay && nir->info.stage == MESA_SHADER_FRAGMENT)
+      options = &compiler->nir_options_fs_single_prim;
+
+   if (options == nir->options)
+      return;
+
+   nir->options = options;
+
+   /* Invalidate existing divergence metadata. */
+   nir_foreach_function_impl(impl, nir)
+      nir_progress(true, impl, ~nir_metadata_divergence);
+}
+
 /* Does some simple lowering and runs the standard suite of optimizations
  *
  * This is intended to be called more-or-less directly after you get the

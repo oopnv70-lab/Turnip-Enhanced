@@ -44,7 +44,7 @@ typedef void *drmDevicePtr;
 #include "git_sha1.h"
 
 #if AMD_LLVM_AVAILABLE
-#include <llvm-c/TargetMachine.h>
+#include <llvm-c/Target.h>
 #endif
 
 #ifdef _WIN32
@@ -338,7 +338,7 @@ radv_device_get_cache_uuid(struct radv_physical_device *pdev, void *uuid)
       return -1;
 #endif
 
-#if AMD_LLVM_AVAILABLE
+#if RADV_LLVM_BACKEND
    if (pdev->use_llvm && !disk_cache_get_function_identifier(LLVMInitializeAMDGPUTargetInfo, &ctx))
       return -1;
 #endif
@@ -2680,7 +2680,8 @@ radv_physical_device_try_create(struct radv_instance *instance, drmDevicePtr drm
 
    struct radeon_winsys_info winsys_info;
 
-   result = radv_amdgpu_winsys_query_info(fd, instance->debug_flags, is_virtio, &winsys_info);
+   result =
+      radv_amdgpu_winsys_query_info(fd, is_virtio, !RADV_DEBUG(instance, NO_CACHE_COMPAT), &winsys_info);
    if (result != VK_SUCCESS) {
       result = vk_errorf(instance, result, "failed to query GPU info");
       goto fail;
@@ -2762,7 +2763,7 @@ radv_physical_device_try_create(struct radv_instance *instance, drmDevicePtr drm
                       "enabled at build time.\n");
       abort();
    }
-#elif NDEBUG
+#elif !RADV_LLVM_BACKEND
    if (pdev->use_llvm) {
       fprintf(stderr, "ERROR: The LLVM compiler backend is only for debugging and not supported "
                       "in release builds of RADV!\n");

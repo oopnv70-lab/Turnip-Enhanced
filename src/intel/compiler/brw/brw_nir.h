@@ -157,6 +157,9 @@ brw_nir_intrinsic_data_element_size(nir_intrinsic_instr *intrin)
            nir_get_io_data_src(intrin)->ssa->bit_size) / 8;
 }
 
+void brw_nir_select_divergence_options(const struct brw_compiler *compiler,
+                                      nir_shader *nir, bool use_jay);
+
 void brw_preprocess_nir(const struct brw_compiler *compiler,
                         nir_shader *nir,
                         const struct brw_nir_compiler_opts *opts);

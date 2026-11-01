@@ -1425,6 +1425,15 @@ use_sysmem_rendering(struct tu_cmd_buffer *cmd,
       return true;
    }
 
+   /* The first external-format resolve implementation writes each YCbCr
+    * plane with R3D after sysmem rendering.  GMEM needs a separate per-tile
+    * path so it cannot be selected yet, even via TU_DEBUG(GMEM).
+    */
+   if (cmd->state.pass->has_external_format_resolve) {
+      cmd->state.rp.force_render_mode_reason = "Uses external-format resolve";
+      return true;
+   }
+
    /* can't fit attachments into gmem */
    if (!cmd->state.tiling->possible) {
       cmd->state.rp.force_render_mode_reason = "Can't fit attachments into gmem";
@@ -1907,9 +1916,24 @@ tu6_emit_sysmem_resolve(struct tu_cmd_buffer *cmd,
    const struct tu_image_view *dst = cmd->state.attachments[a];
    const struct tu_image_view *src = cmd->state.attachments[gmem_a];
 
-   tu_resolve_sysmem<CHIP>(cmd, cs, src, dst, layer_mask, fb->layers,
-                           cmd->state.per_layer_render_area,
-                           cmd->state.render_areas);
+   if (cmd->state.pass->attachments[a].external_format_resolve) {
+      const enum tu_external_format_resolve_source resolve_source =
+         cmd->state.pass->has_direct_external_format_resolve ?
+         TU_EXTERNAL_FORMAT_RESOLVE_SOURCE_QTI_LEGACY :
+         TU_EXTERNAL_FORMAT_RESOLVE_SOURCE_STANDARD;
+
+      if (cmd->state.pass->has_direct_external_format_resolve) {
+         mesa_logi_once("Executing lowered direct external-format resolve "
+                        "with QTI component order R=Y, G=Cb, B=Cr");
+      }
+      tu_resolve_external_format_sysmem<CHIP>(
+         cmd, cs, src, dst, resolve_source, layer_mask, fb->layers,
+         cmd->state.per_layer_render_area, cmd->state.render_areas);
+   } else {
+      tu_resolve_sysmem<CHIP>(cmd, cs, src, dst, layer_mask, fb->layers,
+                              cmd->state.per_layer_render_area,
+                              cmd->state.render_areas);
+   }
 }
 
 template <chip CHIP>
@@ -1935,10 +1959,8 @@ tu6_emit_sysmem_resolves(struct tu_cmd_buffer *cmd,
        *    attachment is also used in a different subpass, an explicit
        *    dependency is needed.
        *
-       * We use the CP_BLIT path for sysmem resolves, which is really a
-       * transfer command, so we have to manually flush similar to the gmem
-       * resolve case. However, a flush afterwards isn't needed because of the
-       * last sentence and the fact that we're in sysmem mode.
+       * Normal resolves use CP_BLIT while external-format resolves use R3D,
+       * so both need the source color writes made visible before resolving.
        */
       tu_emit_event_write<CHIP>(cmd, cs, FD_CCU_CLEAN_COLOR);
       if (subpass->resolve_depth_stencil)
@@ -1946,9 +1968,10 @@ tu6_emit_sysmem_resolves(struct tu_cmd_buffer *cmd,
 
       tu_emit_event_write<CHIP>(cmd, cs, FD_CACHE_INVALIDATE);
 
-      /* Wait for the flushes to land before using the 2D engine */
+      /* Wait for the flushes to land before starting the resolve operation. */
       tu_cs_emit_wfi(cs);
 
+      bool has_external_format_resolve = false;
       for (unsigned i = 0; i < subpass->resolve_count; i++) {
          uint32_t a = subpass->resolve_attachments[i].attachment;
          if (a == VK_ATTACHMENT_UNUSED)
@@ -1957,6 +1980,17 @@ tu6_emit_sysmem_resolves(struct tu_cmd_buffer *cmd,
          uint32_t gmem_a = tu_subpass_get_attachment_to_resolve(subpass, i);
 
          tu6_emit_sysmem_resolve<CHIP>(cmd, cs, subpass->multiview_mask, a, gmem_a);
+         has_external_format_resolve |=
+            cmd->state.pass->attachments[a].external_format_resolve;
+      }
+
+      /* R3D writes through the color CCU.  Unlike CP_BLIT, those writes must
+       * be cleaned explicitly before a later subpass or an external consumer
+       * can access the resolved AHB.
+       */
+      if (has_external_format_resolve) {
+         tu_emit_event_write<CHIP>(cmd, cs, FD_CCU_CLEAN_COLOR);
+         tu_cs_emit_wfi(cs);
       }
    }
 }
@@ -2167,13 +2201,59 @@ tu_disable_draw_states(struct tu_cmd_buffer *cmd, struct tu_cs *cs)
    cmd->state.dirty |= TU_CMD_DIRTY_DRAW_STATE;
 }
 
+/* A7xx static state is emitted at command-buffer start with both CP threads
+ * selected and into separate BR/BV bin-restore preambles.  Keep the original
+ * register order for BR, but never send RB-only state to BV.
+ */
+enum tu_static_reg_thread {
+   TU_STATIC_REG_THREAD_BOTH,
+   TU_STATIC_REG_THREAD_BR,
+   TU_STATIC_REG_THREAD_BV,
+};
+
+static bool
+tu7_reg_is_rb(uint32_t reg)
+{
+   /* Raw magic entries have no block metadata.  The A7xx RB register aperture
+    * starts at RB_CNTL and ends where the VPC aperture starts; the pack
+    * builders are the non-deprecated source of these offsets.
+    */
+   return reg >= RB_CNTL(A6XX).reg && reg < VPC_GS_PARAM(A6XX).reg;
+}
+
+template <chip CHIP>
+static bool
+tu_begin_br_only_static_regs(struct tu_cs *cs, enum tu_static_reg_thread thread)
+{
+   assert(thread == TU_STATIC_REG_THREAD_BOTH || thread == TU_STATIC_REG_THREAD_BR ||
+          thread == TU_STATIC_REG_THREAD_BV);
+
+   if (CHIP != A7XX || thread == TU_STATIC_REG_THREAD_BR)
+      return true;
+
+   if (thread == TU_STATIC_REG_THREAD_BV)
+      return false;
+
+   tu_cond_exec_start(cs, CP_COND_REG_EXEC_0_MODE(THREAD_MODE) | CP_COND_REG_EXEC_0_BR);
+   return true;
+}
+
 template <chip CHIP>
 static void
-tu6_init_static_regs(struct tu_device *dev, struct tu_cs *cs)
+tu_end_br_only_static_regs(struct tu_cs *cs, enum tu_static_reg_thread thread)
+{
+   if (CHIP == A7XX && thread == TU_STATIC_REG_THREAD_BOTH)
+      tu_cond_exec_end(cs);
+}
+
+template <chip CHIP>
+static void
+tu6_init_static_regs(struct tu_device *dev, struct tu_cs *cs,
+                     enum tu_static_reg_thread thread)
 {
    const struct tu_physical_device *phys_dev = dev->physical_device;
 
-   if (CHIP == A7XX) {
+   if (CHIP == A7XX && tu_begin_br_only_static_regs<CHIP>(cs, thread)) {
       /* On A7XX, RB_CCU_CNTL was broken into two registers, RB_CCU_CNTL which has
        * static properties that can be set once, this requires a WFI to take effect.
        * While the newly introduced register RB_CCU_CACHE_CNTL has properties that may
@@ -2181,13 +2261,22 @@ tu6_init_static_regs(struct tu_device *dev, struct tu_cs *cs)
        * events are required.
        */
 
-      enum a7xx_concurrent_resolve_mode resolve_mode = CONCURRENT_RESOLVE_MODE_2;
-      if (TU_DEBUG(NO_CONCURRENT_RESOLVES))
-         resolve_mode = CONCURRENT_RESOLVE_MODE_DISABLED;
+      /* Concurrent (un)resolves let the resolve engine run ahead of the command
+       * stream, so every operation that depends on a grouped (un)resolve has to
+       * be ordered against it explicitly. Getting that wrong has caused
+       * corruption more than once (see 2817a286e04 and e3d477a04fb), and the
+       * modes are not enabled by the reference driver, so keep them disabled by
+       * default. The debug options re-enable them for experiments.
+       */
+      enum a7xx_concurrent_resolve_mode resolve_mode =
+         CONCURRENT_RESOLVE_MODE_DISABLED;
+      if (TU_DEBUG(CONCURRENT_RESOLVES))
+         resolve_mode = CONCURRENT_RESOLVE_MODE_2;
 
-      enum a7xx_concurrent_unresolve_mode unresolve_mode = CONCURRENT_UNRESOLVE_MODE_FULL;
-      if (TU_DEBUG(NO_CONCURRENT_UNRESOLVES))
-         unresolve_mode = CONCURRENT_UNRESOLVE_MODE_DISABLED;
+      enum a7xx_concurrent_unresolve_mode unresolve_mode =
+         CONCURRENT_UNRESOLVE_MODE_DISABLED;
+      if (TU_DEBUG(CONCURRENT_UNRESOLVES))
+         unresolve_mode = CONCURRENT_UNRESOLVE_MODE_FULL;
 
       tu_cs_emit_regs(cs, RB_CCU_CNTL(A7XX,
          .gmem_fast_clear_disable =
@@ -2195,12 +2284,27 @@ tu6_init_static_regs(struct tu_device *dev, struct tu_cs *cs)
          .concurrent_resolve_mode = resolve_mode,
          .concurrent_unresolve_mode = unresolve_mode,
       ));
+      tu_end_br_only_static_regs<CHIP>(cs, thread);
    }
 
+   bool raw_br_cond_open = false;
    for (size_t i = 0; i < ARRAY_SIZE(phys_dev->info->magic_raw); i++) {
       auto magic_reg = phys_dev->info->magic_raw[i];
       if (!magic_reg.reg)
          break;
+
+      const bool br_only = CHIP == A7XX && tu7_reg_is_rb(magic_reg.reg);
+      if (br_only && thread == TU_STATIC_REG_THREAD_BV)
+         continue;
+
+      if (CHIP == A7XX && thread == TU_STATIC_REG_THREAD_BOTH &&
+          br_only != raw_br_cond_open) {
+         if (raw_br_cond_open)
+            tu_cond_exec_end(cs);
+         if (br_only)
+            tu_cond_exec_start(cs, CP_COND_REG_EXEC_0_MODE(THREAD_MODE) | CP_COND_REG_EXEC_0_BR);
+         raw_br_cond_open = br_only;
+      }
 
       uint32_t value = magic_reg.value;
       switch(magic_reg.reg) {
@@ -2231,6 +2335,8 @@ tu6_init_static_regs(struct tu_device *dev, struct tu_cs *cs)
 
       tu_cs_emit_write_reg(cs, magic_reg.reg, value);
    }
+   if (raw_br_cond_open)
+      tu_cond_exec_end(cs);
 
    if (dev->physical_device->info->props.has_attachment_shading_rate) {
       tu_cs_emit_regs(cs, GRAS_LRZ_QUALITY_LOOKUP_TABLE_REG(CHIP, 0,
@@ -2260,11 +2366,17 @@ tu6_init_static_regs(struct tu_device *dev, struct tu_cs *cs)
                                             .shared_consts_enable = false));
 
    tu_cs_emit_regs(cs, A6XX_VFD_MODE_CNTL(.vertex = true, .instance = true));
-   tu_cs_emit_write_reg(cs, REG_A6XX_RB_MODE_CNTL, 0x00000010);
+   if (tu_begin_br_only_static_regs<CHIP>(cs, thread)) {
+      tu_cs_emit_write_reg(cs, REG_A6XX_RB_MODE_CNTL, 0x00000010);
+      tu_end_br_only_static_regs<CHIP>(cs, thread);
+   }
 
    tu_cs_emit_regs(cs, GRAS_MODE_CNTL(CHIP, 0x2));
 
-   tu_cs_emit_write_reg(cs, REG_A6XX_RB_UNKNOWN_8818, 0);
+   if (tu_begin_br_only_static_regs<CHIP>(cs, thread)) {
+      tu_cs_emit_write_reg(cs, REG_A6XX_RB_UNKNOWN_8818, 0);
+      tu_end_br_only_static_regs<CHIP>(cs, thread);
+   }
 
    if (CHIP == A6XX) {
       tu_cs_emit_write_reg(cs, REG_A6XX_RB_UNKNOWN_8819, 0);
@@ -2309,7 +2421,11 @@ tu6_init_static_regs(struct tu_device *dev, struct tu_cs *cs)
 
    tu_cs_emit_write_reg(cs, REG_A6XX_VFD_RENDER_MODE, 0x00000000);
 
-   tu_cs_emit_regs(cs, A6XX_RB_ALPHA_TEST_CNTL()); /* always disable alpha test */
+   if (tu_begin_br_only_static_regs<CHIP>(cs, thread)) {
+      /* always disable alpha test */
+      tu_cs_emit_regs(cs, A6XX_RB_ALPHA_TEST_CNTL());
+      tu_end_br_only_static_regs<CHIP>(cs, thread);
+   }
    if (CHIP >= A8XX)
       tu_cs_emit_regs(cs, SP_ALPHA_TEST_CNTL(CHIP));
 
@@ -2386,7 +2502,8 @@ template <chip CHIP>
 static void
 tu_emit_bin_preamble(struct tu_device *dev, struct tu_cs *cs, bool bv)
 {
-   tu6_init_static_regs<CHIP>(dev, cs);
+   tu6_init_static_regs<CHIP>(dev, cs,
+      bv ? TU_STATIC_REG_THREAD_BV : TU_STATIC_REG_THREAD_BR);
 
    if (!bv)
       emit_rb_ccu_cntl<CHIP>(cs, dev, true);
@@ -2456,7 +2573,15 @@ tu_init_hw_rp(struct tu_cs *cs)
 {
    if (CHIP >= A7XX) {
       tu_cs_emit_regs(cs, VPC_UNKNOWN_CNTL(CHIP));
+
+      /* This helper is also called from command-buffer start while both A7xx
+       * threads are selected.
+       */
+      if (CHIP == A7XX)
+         tu_cond_exec_start(cs, CP_COND_REG_EXEC_0_MODE(THREAD_MODE) | CP_COND_REG_EXEC_0_BR);
       tu_cs_emit_regs(cs, RB_A2D_DEST_BUFFER_ARRAY_PITCH(CHIP));
+      if (CHIP == A7XX)
+         tu_cond_exec_end(cs);
    }
 }
 TU_GENX(tu_init_hw_rp);
@@ -2503,10 +2628,16 @@ tu_init_hw(struct tu_cmd_buffer *cmd, struct tu_cs *cs)
    cmd->state.cache.pending_flush_bits &=
       ~(TU_CMD_FLAG_WAIT_FOR_IDLE | TU_CMD_FLAG_CACHE_INVALIDATE);
 
-   tu6_init_static_regs<CHIP>(cmd->device, cs);
+   tu6_init_static_regs<CHIP>(cmd->device, cs,
+      CHIP == A6XX ? TU_STATIC_REG_THREAD_BR : TU_STATIC_REG_THREAD_BOTH);
    tu_init_hw_rp<CHIP>(cs);
 
+   /* The initial thread remains BOTH until the patchpoint below. */
+   if (CHIP == A7XX)
+      tu_cond_exec_start(cs, CP_COND_REG_EXEC_0_MODE(THREAD_MODE) | CP_COND_REG_EXEC_0_BR);
    emit_rb_ccu_cntl<CHIP>(cs, cmd->device, false);
+   if (CHIP == A7XX)
+      tu_cond_exec_end(cs);
    emit_vpc_attr_buf<CHIP>(cs, cmd->device, false);
    cmd->state.ccu_state = TU_CMD_CCU_SYSMEM;
 
@@ -7209,8 +7340,8 @@ tu_CmdBeginRenderPass2(VkCommandBuffer commandBuffer,
 
    for (unsigned i = 0; i < pass->attachment_count - pass->user_attachment_count; i++) {
       /* With imageless attachments, the only attachments in the framebuffer
-       * are MSRTSS attachments. Without imageless attachments, they are after
-       * the user's attachments.
+       * are driver-internal attachments. Without imageless attachments, they
+       * are after the user's attachments.
        */
       unsigned fb_idx = i + (pAttachmentInfo ? 0 : pass->user_attachment_count);
       cmd->state.attachments[i + pass->user_attachment_count] =

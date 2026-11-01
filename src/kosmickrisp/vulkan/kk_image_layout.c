@@ -17,7 +17,8 @@
 #include "util/format/u_format.h"
 
 static enum mtl_texture_type
-vk_image_to_mtl_texture_type(const struct vk_image *image)
+vk_image_to_mtl_texture_type(const struct vk_image *image,
+                             VkImageUsageFlags usage)
 {
    uint32_t array_layers = image->array_layers;
    uint32_t samples = image->samples;
@@ -25,8 +26,7 @@ vk_image_to_mtl_texture_type(const struct vk_image *image)
    case VK_IMAGE_TYPE_1D:
    case VK_IMAGE_TYPE_2D:
       /* We require input attachments to be arrays */
-      if (array_layers > 1 ||
-          (image->usage & VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT))
+      if (array_layers > 1 || (usage & VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT))
          return samples > 1u ? MTL_TEXTURE_TYPE_2D_ARRAY_MULTISAMPLE
                              : MTL_TEXTURE_TYPE_2D_ARRAY;
       return samples > 1u ? MTL_TEXTURE_TYPE_2D_MULTISAMPLE
@@ -142,19 +142,23 @@ kk_image_layout_calc_tiled(const struct kk_device *dev,
    if (!kk_image_layout_layer_stride_defined(layout))
       return;
 
-   if (layout->layers != 1) {
-      uint32_t old_layers = layout->layers;
+   uint32_t layer_count = layout->layers;
+   if (layout->type == MTL_TEXTURE_TYPE_3D) {
+      /* 3D texture are laid out as 2D array textures */
+      layer_count = layout->depth_px;
+      layout->layer_stride_B = layout->size_B / layer_count;
+   } else if (layout->layers != 1) {
       layout->layers = 1;
       mtl_heap_texture_size_and_align_with_descriptor(
          dev->mtl_handle, layout, &layout->layer_stride_B, NULL);
-      layout->layers = old_layers;
+      layout->layers = layer_count;
    } else {
       /* For one layer, stride is same as image size */
       layout->layer_stride_B = layout->size_B;
    }
 
    /* Layer stride times number of layers should equal total size. */
-   assert(layout->layer_stride_B * layout->layers == layout->size_B);
+   assert(layout->layer_stride_B * layer_count == layout->size_B);
 }
 
 static void
@@ -175,6 +179,12 @@ kk_image_layout_calc_offsets(const struct kk_device *dev,
    struct kk_image_layout calc_layout = *layout;
    calc_layout.layers = 1;
    calc_layout.levels = 1;
+
+   /* 3D texture are laid out as 2D array textures */
+   if (calc_layout.type == MTL_TEXTURE_TYPE_3D) {
+      calc_layout.type = MTL_TEXTURE_TYPE_2D;
+      calc_layout.depth_px = 1u;
+   }
 
    /* Default sparse tile size follows regular tile size */
    uint32_t tile_size_B = mtl_sparse_tile_size_in_bytes(dev->mtl_handle);
@@ -220,7 +230,6 @@ kk_image_layout_calc_offsets(const struct kk_device *dev,
    for (uint8_t level = 0; level < layout->levels; ++level) {
       calc_layout.width_px = u_minify(layout->width_px, level);
       calc_layout.height_px = u_minify(layout->height_px, level);
-      calc_layout.depth_px = u_minify(layout->depth_px, level);
 
       uint64_t level_size;
       mtl_heap_texture_size_and_align_with_descriptor(
@@ -255,7 +264,8 @@ kk_image_layout_init(const struct kk_device *dev, const struct vk_image *image,
 {
    const struct kk_physical_device *pdev = kk_device_physical(dev);
    const struct kk_va_format *supported_format = kk_get_va_format(format);
-   layout->type = vk_image_to_mtl_texture_type(image);
+   VkImageUsageFlags usage = vk_image_usage(image, image->aspects);
+   layout->type = vk_image_to_mtl_texture_type(image, usage);
    layout->width_px = image->extent.width / width_scale;
    layout->height_px = image->extent.height / height_scale;
    layout->depth_px = image->extent.depth;
@@ -263,9 +273,9 @@ kk_image_layout_init(const struct kk_device *dev, const struct vk_image *image,
    layout->levels = image->mip_levels;
    layout->linear = image->tiling != VK_IMAGE_TILING_OPTIMAL;
    layout->optimized_layout = kk_image_layout_can_optimize(
-      pdev, image->usage, image->tiling, image->create_flags, format);
+      pdev, usage, image->tiling, image->create_flags, format);
    layout->usage = vk_image_usage_flags_to_mtl_texture_usage(
-      image->usage, image->create_flags, supported_format->atomic);
+      usage, image->create_flags, supported_format->atomic);
    layout->create_flags = image->create_flags;
    layout->format.pipe = format;
    layout->format.mtl = supported_format->mtl_pixel_format;

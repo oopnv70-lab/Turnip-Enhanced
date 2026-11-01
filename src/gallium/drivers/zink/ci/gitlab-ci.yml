@@ -11,8 +11,6 @@ zink-lavapipe:
   variables:
     DEQP_SUITE: zink-lavapipe
     PIGLIT_NO_WINDOW: 1
-    # Enable validation (except for on piglit, see deqp-zink-lavapipe.toml), logging
-    # to stdout and aborting on unknown failures.
     ZINK_DEBUG: validation
     VK_DRIVER: lvp
   parallel: 3
@@ -216,13 +214,14 @@ zink-tu-a750:
     - .zink-turnip-valve-rules
     - .test-piglit
   parallel: 2
-  timeout: 15m  # base runtime 6.5min of testing, 8min total
+  timeout: 17m  # base runtime 8.5min of testing, 10min total
   variables:
-    CI_TRON_TIMEOUT__OVERALL__MINUTES: 12
+    CI_TRON_TIMEOUT__OVERALL__MINUTES: 16
     DEQP_SUITE: zink-tu-a750
     GPU_VERSION: zink-tu-a750
     HWCI_START_WESTON: 1
     DRIVER_NAME: null  # Don't use freedreno skips
+    ZINK_DEBUG: validation
 
 ############### Combined testing (GL, GLES, Piglit) on NVK / RADV
 zink-nvk-ga106-valve:

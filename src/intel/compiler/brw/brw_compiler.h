@@ -71,6 +71,7 @@ struct brw_compiler {
    void (*shader_perf_log)(void *, unsigned *id, const char *str, ...) PRINTFLIKE(3, 4);
 
    struct nir_shader_compiler_options nir_options[MESA_ALL_SHADER_STAGES];
+   struct nir_shader_compiler_options nir_options_fs_single_prim;
 
    /**
     * Apply workarounds for SIN and COS output range problems.

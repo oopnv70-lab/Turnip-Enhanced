@@ -662,9 +662,11 @@ insert_traversal_triangle_case(const struct radv_compiler_info *compiler_info, n
          not_cull = nir_imm_true(b);
       }
 
-      nir_push_if(b, nir_iand(b,
+      /* The ray triangle emulation doesn't check tmin. */
+      if (compiler_info->key.emulate_rt || !args->tmin_zero)
+         not_cull = nir_iand(b, nir_flt(b, args->tmin, intersection.t), not_cull);
 
-                              nir_flt(b, args->tmin, intersection.t), not_cull));
+      nir_push_if(b, not_cull);
       {
          intersection.base.node_addr = build_node_to_addr(compiler_info, b, bvh_node, false);
          nir_def *triangle_info = nir_load_global(
@@ -1066,17 +1068,20 @@ radv_build_ray_traversal(const struct radv_compiler_info *compiler_info, nir_bui
 
                nir_store_deref(b, args->vars.top_stack, nir_load_deref(b, args->vars.stack), 1);
 
-               /* If ray flags dictate a forced opaqueness/nonopaqueness, instance flags dictating the same are
-                * meaningless.
-                */
-               uint32_t forced_opaqueness_mask = SpvRayFlagsOpaqueKHRMask | SpvRayFlagsNoOpaqueKHRMask;
-               nir_def *instance_flag_mask =
-                  nir_bcsel(b, nir_test_mask(b, ptr_flags, forced_opaqueness_mask),
-                            nir_imm_int64(b, ~((uint64_t)forced_opaqueness_mask << 54ull)), nir_imm_int64(b, ~0ull));
-
-               nir_def *instance_pointer = nir_pack_64_2x32(b, nir_trim_vector(b, instance_data, 2));
-               instance_pointer = nir_iand(b, instance_pointer, instance_flag_mask);
-
+               nir_def *instance_pointer = nir_trim_vector(b, instance_data, 2);
+               if (compiler_info->ac->gfx_level >= GFX11 && !compiler_info->key.emulate_rt) {
+                  /* If ray flags dictate a forced opaqueness/nonopaqueness, instance flags dictating the same are
+                   * meaningless.
+                   */
+                  uint32_t forced_opaqueness_mask = SpvRayFlagsOpaqueKHRMask | SpvRayFlagsNoOpaqueKHRMask;
+                  nir_def *instance_flag_mask =
+                     nir_bcsel(b, nir_test_mask(b, ptr_flags, forced_opaqueness_mask),
+                               nir_imm_int(b, ~(forced_opaqueness_mask << (54 - 32))), nir_imm_int(b, -1));
+                  nir_def *instance_pointer_lo = nir_channel(b, instance_pointer, 0);
+                  nir_def *instance_pointer_hi = nir_iand(b, nir_channel(b, instance_pointer, 1), instance_flag_mask);
+                  instance_pointer = nir_vec2(b, instance_pointer_lo, instance_pointer_hi);
+               }
+               instance_pointer = nir_pack_64_2x32(b, instance_pointer);
                nir_store_deref(b, args->vars.bvh_base,
                                build_bvh_base(b, compiler_info, instance_pointer, ptr_flags, false), 0x1);
 

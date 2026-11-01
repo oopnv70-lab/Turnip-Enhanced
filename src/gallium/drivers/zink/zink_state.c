@@ -329,7 +329,7 @@ zink_create_blend_state(struct pipe_context *pctx,
       if (rt->colormask & PIPE_MASK_A)
          att.colorWriteMask |= VK_COLOR_COMPONENT_A_BIT;
 
-      cso->wrmask |= (rt->colormask << i);
+      cso->wrmask |= ((uint32_t)rt->colormask << (4 * i));
       if (rt->blend_enable)
          cso->enables |= BITFIELD_BIT(i);
 
@@ -364,10 +364,7 @@ zink_bind_blend_state(struct pipe_context *pctx, void *cso)
          state->blend_id = blend ? blend->id : 0;
          zink_gfx_pipeline_state_dirty(ctx);
       }
-      bool force_dual_color_blend = screen->driconf.dual_color_blend_by_location &&
-                                    blend && blend->dual_src_blend && state->blend_state->attachments[0].blendEnable;
-      if (force_dual_color_blend != zink_get_fs_base_key(ctx)->force_dual_color_blend)
-         zink_set_fs_base_key(ctx)->force_dual_color_blend = force_dual_color_blend;
+      zink_update_fs_key_color_mode(ctx);
       zink_mark_atom_dirty(ctx, ZINK_ATOM_BLEND);
 
       if (cso && screen->have_full_ds3) {
@@ -629,9 +626,12 @@ zink_create_rasterizer_state(struct pipe_context *pctx,
       state->hw_state.line_mode = VK_LINE_RASTERIZATION_MODE_BRESENHAM;
    }
    state->dynamic_line_mode = state->hw_state.line_mode;
+
+   const bool rectangular_lines = screen->info.line_rast_feats.rectangularLines &&
+                                  !(screen->driver_workarounds.no_thin_rectangular_lines && rs_state->line_width <= 2.0f);
    switch (state->hw_state.line_mode) {
    case VK_LINE_RASTERIZATION_MODE_RECTANGULAR:
-      if (!screen->info.line_rast_feats.rectangularLines)
+      if (!rectangular_lines)
          state->dynamic_line_mode = VK_LINE_RASTERIZATION_MODE_DEFAULT;
       break;
    case VK_LINE_RASTERIZATION_MODE_RECTANGULAR_SMOOTH:
@@ -644,6 +644,10 @@ zink_create_rasterizer_state(struct pipe_context *pctx,
       break;
    default: break;
    }
+   state->dynamic_line_mode_float = state->dynamic_line_mode;
+   if (state->dynamic_line_mode == VK_LINE_RASTERIZATION_MODE_RECTANGULAR_SMOOTH)
+      state->dynamic_line_mode_float = rectangular_lines ? VK_LINE_RASTERIZATION_MODE_RECTANGULAR :
+                                                           VK_LINE_RASTERIZATION_MODE_DEFAULT;
 
    if (!rs_state->line_stipple_enable) {
       state->base.line_stipple_factor = 1;
@@ -651,6 +655,8 @@ zink_create_rasterizer_state(struct pipe_context *pctx,
    }
 
    state->offset_fill = util_get_offset(rs_state, rs_state->fill_front);
+   state->offset_all_prims = state->offset_fill && rs_state->fill_front == PIPE_POLYGON_MODE_FILL &&
+                             screen->driver_workarounds.fill_mode_no_line_point_bias;
    state->offset_units = rs_state->offset_units * 2;
    state->offset_clamp = rs_state->offset_clamp;
    state->offset_scale = rs_state->offset_scale;
@@ -728,6 +734,7 @@ zink_bind_rasterizer_state(struct pipe_context *pctx, void *cso)
          STATE_CHECK(hw_state.clip_halfz, HALFZ);
          STATE_CHECK(hw_state.pv_last, PV);
          STATE_CHECK(dynamic_line_mode, LINE);
+         STATE_CHECK(dynamic_line_mode_float, LINE);
 
 #undef STATE_CHECK
       }

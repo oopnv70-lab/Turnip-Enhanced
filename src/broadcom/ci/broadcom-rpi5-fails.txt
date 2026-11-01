@@ -18,7 +18,6 @@ spec@!opengl 1.1@texwrap formats bordercolor-swizzled@GL_LUMINANCE16_ALPHA16- sw
 spec@!opengl 1.1@texwrap formats bordercolor@GL_LUMINANCE12_ALPHA12- border color only,Fail
 spec@!opengl 1.1@texwrap formats bordercolor@GL_LUMINANCE12_ALPHA4- border color only,Fail
 spec@!opengl 1.1@texwrap formats bordercolor@GL_LUMINANCE16_ALPHA16- border color only,Fail
-spec@!opengl 1.4@gl-1.4-polygon-offset,Fail
 spec@arb_depth_buffer_float@fbo-generatemipmap-formats,Fail
 spec@arb_depth_buffer_float@fbo-generatemipmap-formats@GL_DEPTH_COMPONENT32F NPOT,Fail
 spec@arb_depth_buffer_float@fbo-generatemipmap-formats@GL_DEPTH_COMPONENT32F,Fail
@@ -366,6 +365,8 @@ vk_xfermodes3,Fail
 # Bisected to 08b5876c379 ("v3d: only expose rgba buffer-textures")
 TransferPixelsTest,Fail
 
+dEQP-VK.api.driver_properties.conformance_version,Fail
+
 # OpenCL CTS tests
 API,Fail
 API@get_command_queue_info,Fail
@@ -376,8 +377,6 @@ API@queue_properties_queries,Fail
 Basic,Fail
 Basic@bufferreadwriterect,Fail
 Basic@enqueued_local_size,Fail
-Basic@get_global_linear_id,Fail
-Basic@get_local_linear_id,Fail
 Contractions,Fail
 Contractions@contractions_float_0,Fail
 Contractions@contractions_float_1,Fail

@@ -11,7 +11,6 @@
 
 #include <stdio.h>
 
-#include "tools/radv_debug.h"
 #include "radv_amdgpu_bo.h"
 
 #include <inttypes.h>
@@ -588,7 +587,7 @@ radv_amdgpu_winsys_bo_create(struct radeon_winsys *_ws, uint64_t size, unsigned 
        * e.g. Horizon Zero Dawn allocates more memory than we have
        * VRAM.
        */
-      if (!(ws->perftest & RADV_PERFTEST_NO_GTT_SPILL))
+      if (ws->gtt_spill)
          request.preferred_heap |= AMDGPU_GEM_DOMAIN_GTT;
    }
 
@@ -610,7 +609,7 @@ radv_amdgpu_winsys_bo_create(struct radeon_winsys *_ws, uint64_t size, unsigned 
    if (!(flags & RADEON_FLAG_IMPLICIT_SYNC))
       request.flags |= AMDGPU_GEM_CREATE_EXPLICIT_SYNC;
    if ((initial_domain & RADEON_DOMAIN_VRAM_GTT) && (flags & RADEON_FLAG_NO_INTERPROCESS_SHARING) &&
-       ((ws->perftest & RADV_PERFTEST_LOCAL_BOS) || (flags & RADEON_FLAG_PREFER_LOCAL_BO))) {
+       (ws->always_valid_bos || (flags & RADEON_FLAG_PREFER_LOCAL_BO))) {
       bo->base.is_local = true;
       request.flags |= AMDGPU_GEM_CREATE_VM_ALWAYS_VALID;
    }

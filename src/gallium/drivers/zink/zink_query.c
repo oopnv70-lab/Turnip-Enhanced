@@ -14,6 +14,7 @@
 #define NOWAIT_CHECK_THRESHOLD 10 //prevent spinning
 
 #define ZINK_QUERY_RENDER_PASSES (PIPE_QUERY_DRIVER_SPECIFIC + 0)
+#define ZINK_QUERY_SUBMITS_PER_FRAME (PIPE_QUERY_DRIVER_SPECIFIC + 1)
 
 static unsigned NUM_QUERIES = 16;
 
@@ -96,6 +97,7 @@ struct zink_query {
 
 static const struct pipe_driver_query_info zink_specific_queries[] = {
    {"render-passes", ZINK_QUERY_RENDER_PASSES, { 0 }},
+   {"submits-per-frame", ZINK_QUERY_SUBMITS_PER_FRAME, { 0 }},
 };
 
 static inline int
@@ -1152,6 +1154,11 @@ zink_get_query_result(struct pipe_context *pctx,
       return true;
    }
 
+   if (query->type == ZINK_QUERY_SUBMITS_PER_FRAME) {
+      result->u64 = p_atomic_read_relaxed(&ctx->hud.frame_submits);
+      return true;
+   }
+
    if (query->needs_update) {
       assert(!ctx->tc || !threaded_query(q)->flushed);
       update_qbo(ctx, query);
@@ -1519,11 +1526,14 @@ zink_get_timestamp(struct pipe_screen *pscreen)
          mesa_loge("ZINK: vkGetCalibratedTimestampsEXT failed (%s)", vk_Result_to_str(result));
       }
    } else {
-      zink_screen_lock_context(screen);
+      if (!zink_screen_lock_context(screen))
+         return 0;
       struct pipe_context *pctx = &screen->copy_context->base;
       struct pipe_query *pquery = pctx->create_query(pctx, PIPE_QUERY_TIMESTAMP, 0);
-      if (!pquery)
+      if (!pquery) {
+         zink_screen_unlock_context(screen);
          return 0;
+      }
       union pipe_query_result result = {0};
       pctx->begin_query(pctx, pquery);
       pctx->end_query(pctx, pquery);

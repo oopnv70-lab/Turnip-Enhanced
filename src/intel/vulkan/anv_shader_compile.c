@@ -2472,7 +2472,10 @@ anv_shader_compile(struct vk_device *vk_device,
 
       shader_data->prog_data.base.source_hash = shader_data->source_hash;
 
-      if (intel_use_jay(devinfo, nir)) {
+      const bool use_jay = intel_use_jay(devinfo, nir);
+      brw_nir_select_divergence_options(compiler, nir, use_jay);
+
+      if (use_jay) {
          struct jay_shader_bin *bin =
             anv_shader_compile_jay(devinfo, mem_ctx, nir, &params, shader_data);
 

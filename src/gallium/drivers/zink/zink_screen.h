@@ -91,7 +91,7 @@ zink_screen_handle_vkresult(struct zink_screen *screen, VkResult ret)
       screen->device_lost = true;
       mesa_loge("zink: DEVICE LOST!\n");
       /* if nothing can save us, abort */
-      if (screen->abort_on_hang && !screen->robust_ctx_count)
+      if (screen->abort_on_hang && !p_atomic_read_relaxed(&screen->robust_ctx_count))
          abort();
       FALLTHROUGH;
    default:
@@ -147,7 +147,7 @@ zink_driver_is_venus(const struct zink_screen *screen)
    return screen->info.driver_props.driverID == VK_DRIVER_ID_MESA_VENUS;
 }
 
-void
+bool
 zink_screen_lock_context(struct zink_screen *screen);
 void
 zink_screen_unlock_context(struct zink_screen *screen);

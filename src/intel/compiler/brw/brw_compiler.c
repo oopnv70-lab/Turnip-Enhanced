@@ -223,6 +223,11 @@ brw_compiler_create(void *mem_ctx, const struct intel_device_info *devinfo)
       stage_options->force_indirect_unrolling |= brw_nir_no_indirect_mask(i);
    }
 
+   compiler->nir_options_fs_single_prim =
+      compiler->nir_options[MESA_SHADER_FRAGMENT];
+   compiler->nir_options_fs_single_prim.divergence_analysis_options |=
+      nir_divergence_single_prim_per_subgroup;
+
    /* Build a list of storage format compatible in component bit size &
     * isl_base_type. We can apply the same lowering to those.
     */

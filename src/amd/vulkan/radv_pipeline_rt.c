@@ -6,7 +6,6 @@
 
 #include "nir/nir.h"
 #include "nir/nir_builder.h"
-#include "nir/nir_serialize.h"
 
 #include "ac_shader_util.h"
 
@@ -703,7 +702,10 @@ radv_rt_compile_shaders(struct radv_device *device, struct vk_pipeline_cache *ca
 
    struct radv_ray_tracing_stage *rt_stages = pipeline->stages;
 
-   struct radv_shader_stage *stages = calloc(pCreateInfo->stageCount, sizeof(struct radv_shader_stage));
+   struct {
+      struct radv_shader_stage stage;
+      struct vk_pipeline_cache_object *nir_handle;
+   } *stages = calloc(pCreateInfo->stageCount, sizeof(*stages));
    if (!stages)
       return VK_ERROR_OUT_OF_HOST_MEMORY;
 
@@ -728,12 +730,31 @@ radv_rt_compile_shaders(struct radv_device *device, struct vk_pipeline_cache *ca
 
       int64_t stage_start = os_time_get_nano();
 
-      struct radv_shader_stage *stage = &stages[i];
+      struct radv_shader_stage *stage = &stages[i].stage;
       radv_pipeline_stage_init(pipeline->base.base.create_flags, &pCreateInfo->pStages[i], pipeline_layout,
                                &rt_stages[i].key, stage);
 
       /* precompile the shader */
       radv_rt_spirv_to_nir(&device->compiler_info, stage, &payload_size, &hit_attrib_size, &rt_stages[i].info);
+
+      /* Retain compact, uncached NIR until this stage is needed for compilation. */
+      /* On partial cache hits (when binaries are found but not NIR), the stack size is already
+       * restored from the cache but NIR must be recompiled in some cases. Do not overwrite it
+       * with the NIR scratch size which might be zero.
+       */
+      rt_stages[i].stack_size = MAX2(rt_stages[i].stack_size, stage->nir->scratch_size);
+      stages[i].nir_handle = radv_pipeline_cache_nir_to_handle(device, stage->nir, rt_stages[i].blake3);
+      if (!stages[i].nir_handle) {
+         result = VK_ERROR_OUT_OF_HOST_MEMORY;
+         goto cleanup;
+      }
+
+      /* Keep the original debug information, which cache serialization strips. */
+      if (!stage->key.keep_executable_info && !stage->nir->has_debug_info &&
+          !radv_can_dump_shader(&device->compiler_info, stage->nir)) {
+         ralloc_free(stage->nir);
+         stage->nir = NULL;
+      }
 
       stage->feedback.duration = os_time_get_nano() - stage_start;
    }
@@ -783,7 +804,7 @@ radv_rt_compile_shaders(struct radv_device *device, struct vk_pipeline_cache *ca
 
       int64_t stage_start = os_time_get_nano();
 
-      struct radv_shader_stage *stage = &stages[idx];
+      struct radv_shader_stage *stage = &stages[idx].stage;
 
       /* Cases in which we need to keep around the NIR:
        *    - pipeline library: The final pipeline might be monolithic in which case it will need every NIR shader.
@@ -796,13 +817,12 @@ radv_rt_compile_shaders(struct radv_device *device, struct vk_pipeline_cache *ca
       bool nir_always_needed = radv_ray_tracing_stage_nir_always_needed(&rt_stages[idx]);
       bool nir_needed =
          (library && !has_callable) || nir_always_needed || (monolithic && rt_stages[idx].stage != MESA_SHADER_RAYGEN);
-      nir_needed &= !rt_stages[idx].nir;
       if (nir_needed) {
          const bool cached = !stage->key.optimisations_disabled &&
                              !(pipeline->base.base.create_flags & VK_PIPELINE_CREATE_2_CAPTURE_DATA_BIT_KHR);
-         rt_stages[idx].stack_size = stage->nir->scratch_size;
-         rt_stages[idx].nir =
-            radv_pipeline_cache_nir_to_handle(device, cache, stage->nir, rt_stages[idx].blake3, cached);
+         rt_stages[idx].nir = vk_pipeline_cache_object_ref(stages[idx].nir_handle);
+         if (cached)
+            rt_stages[idx].nir = radv_pipeline_cache_insert_nir_handle(device, cache, rt_stages[idx].nir);
       }
 
       stage->feedback.duration += os_time_get_nano() - stage_start;
@@ -810,7 +830,7 @@ radv_rt_compile_shaders(struct radv_device *device, struct vk_pipeline_cache *ca
 
    for (uint32_t idx = 0; idx < pCreateInfo->stageCount; idx++) {
       int64_t stage_start = os_time_get_nano();
-      struct radv_shader_stage *stage = &stages[idx];
+      struct radv_shader_stage *stage = &stages[idx].stage;
 
       /* Cases in which we need to compile the shader (raygen/callable/chit/miss):
        *    TODO: - monolithic: Extend the loop to cover imported stages and force compilation of imported raygen
@@ -821,6 +841,15 @@ radv_rt_compile_shaders(struct radv_device *device, struct vk_pipeline_cache *ca
       bool shader_needed = !radv_ray_tracing_stage_nir_always_needed(&rt_stages[idx]) && !rt_stages[idx].shader;
       if (rt_stages[idx].stage != MESA_SHADER_RAYGEN)
          shader_needed &= raygen_lowering_mode != RADV_RT_LOWERING_MODE_MONOLITHIC || raygen_imported;
+
+      if (shader_needed && !stage->nir) {
+         /* De-serialize NIR from handle. */
+         stage->nir = radv_pipeline_cache_handle_to_nir(&device->compiler_info, stages[idx].nir_handle);
+         if (!stage->nir) {
+            result = VK_ERROR_OUT_OF_HOST_MEMORY;
+            goto cleanup;
+         }
+      }
 
       if (shader_needed) {
          uint32_t stack_size = 0;
@@ -847,6 +876,10 @@ radv_rt_compile_shaders(struct radv_device *device, struct vk_pipeline_cache *ca
          stage->feedback.duration += os_time_get_nano() - stage_start;
          creation_feedback->pPipelineStageCreationFeedbacks[idx] = stage->feedback;
       }
+
+      /* Later stages use the serialized NIR in rt_stages, if needed. */
+      radv_pipeline_stage_finish(stage);
+      stage->nir = NULL;
    }
 
    if (!inline_any_hit_shaders) {
@@ -966,8 +999,11 @@ radv_rt_compile_shaders(struct radv_device *device, struct vk_pipeline_cache *ca
    ralloc_free(traversal_nir);
 
 cleanup:
-   for (uint32_t i = 0; i < pCreateInfo->stageCount; i++)
-      radv_pipeline_stage_finish(&stages[i]);
+   for (uint32_t i = 0; i < pCreateInfo->stageCount; i++) {
+      radv_pipeline_stage_finish(&stages[i].stage);
+      if (stages[i].nir_handle)
+         vk_pipeline_cache_object_unref(&device->vk, stages[i].nir_handle);
+   }
    free(stages);
    return result;
 }
@@ -1337,13 +1373,9 @@ radv_ray_tracing_pipeline_import_binary(struct radv_device *device, struct radv_
       if (header->has_nir) {
          uint32_t nir_size = blob_read_uint32(&blob);
          const void *nir_data = blob_read_bytes(&blob, nir_size);
-         struct blob_reader nir_blob;
-         blob_reader_init(&nir_blob, nir_data, nir_size);
-         nir_shader *nir = nir_deserialize(NULL, NULL, &nir_blob);
-
-         pipeline->stages[i].nir = radv_pipeline_cache_nir_to_handle(device, NULL, nir, header->stage_blake3, false);
-         ralloc_free(nir);
-
+         /* Pipeline binaries already contain the serialized NIR used by cache handles. */
+         pipeline->stages[i].nir =
+            radv_pipeline_cache_create_nir_handle(device, header->stage_blake3, nir_data, nir_size);
          if (!pipeline->stages[i].nir)
             return VK_ERROR_OUT_OF_HOST_MEMORY;
       }

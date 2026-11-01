@@ -1597,6 +1597,10 @@ void ResourceTracker::setThreadingCallbacks(const ResourceTracker::ThreadingCall
 
 bool ResourceTracker::usingDirectMapping() const { return true; }
 
+bool ResourceTracker::supportsGuestCapabilities() const {
+    return mCaps.vulkanCapset.hasGuestCapabilities;
+}
+
 uint32_t ResourceTracker::getStreamFeatures() const { return ResourceTracker::streamFeatureBits; }
 
 bool ResourceTracker::supportsDeferredCommands() const {
@@ -3610,23 +3614,11 @@ VkResult ResourceTracker::on_vkAllocateMemory(void* context, VkResult input_resu
     // AHardwareBuffers. As such, the VkMemoryDedicatedAllocateInfo is passed to the
     // host and the host will decide whether or not to use it.
 
-    bool shouldPassThroughDedicatedAllocInfo =
-        !exportAllocateInfoPtr && !importBufferCollectionInfoPtr && !importVmoInfoPtr;
-
     const VkPhysicalDeviceMemoryProperties& physicalDeviceMemoryProps =
         getPhysicalDeviceMemoryProperties(context, device, VK_NULL_HANDLE);
 
     const bool requestedMemoryIsHostVisible =
         isHostVisible(&physicalDeviceMemoryProps, pAllocateInfo->memoryTypeIndex);
-
-#if defined(VK_USE_PLATFORM_ANDROID_KHR) || DETECT_OS_LINUX
-    shouldPassThroughDedicatedAllocInfo &= !requestedMemoryIsHostVisible;
-#endif  // VK_USE_PLATFORM_FUCHSIA
-
-    if (shouldPassThroughDedicatedAllocInfo && dedicatedAllocInfoPtr) {
-        dedicatedAllocInfo = vk_make_orphan_copy(*dedicatedAllocInfoPtr);
-        vk_append_struct(&structChainIter, &dedicatedAllocInfo);
-    }
 
     // State needed for import/export.
     bool exportAhb = false;
@@ -4225,6 +4217,19 @@ VkResult ResourceTracker::on_vkAllocateMemory(void* context, VkResult input_resu
     }
 #endif
 
+    bool shouldPassThroughDedicatedAllocInfo =
+        (!exportAllocateInfoPtr || ahw != nullptr || bufferBlob != nullptr) &&
+        !importBufferCollectionInfoPtr && !importVmoInfoPtr;
+#if defined(VK_USE_PLATFORM_ANDROID_KHR) || DETECT_OS_LINUX
+    shouldPassThroughDedicatedAllocInfo &=
+        (ahw != nullptr || bufferBlob != nullptr || !requestedMemoryIsHostVisible);
+#endif
+
+    if (shouldPassThroughDedicatedAllocInfo && dedicatedAllocInfoPtr) {
+        dedicatedAllocInfo = vk_make_orphan_copy(*dedicatedAllocInfoPtr);
+        vk_append_struct(&structChainIter, &dedicatedAllocInfo);
+    }
+
     if (ahw || bufferBlob || !requestedMemoryIsHostVisible) {
         input_result =
             enc->vkAllocateMemory(device, &finalAllocInfo, pAllocator, pMemory, true /* do lock */);
@@ -4582,8 +4587,8 @@ VkResult ResourceTracker::on_vkCreateImage(void* context, VkResult, VkDevice dev
                 if (canUseLinearModifier) {
                     mesa_logd(
                         "vkCreateImage: emulating DRM_FORMAT_MOD_LINEAR with "
-                        "VK_IMAGE_TILING_LINEAR");
-                    localCreateInfo.tiling = VK_IMAGE_TILING_LINEAR;
+                        "VK_IMAGE_TILING_OPTIMAL");
+                    localCreateInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
                 } else {
                     mesa_loge(
                         "Host does not support DRM format modifiers; DRM_FORMAT_MOD_LINEAR must be "
@@ -5745,40 +5750,21 @@ void ResourceTracker::on_vkGetImageSubresourceLayout(void* context, VkDevice dev
 
     VkEncoder* enc = (VkEncoder*)context;
 #if defined(LINUX_GUEST_BUILD)
-    VkImageSubresource hostSubresource = *pSubresource;
-
-    VkImageCreateInfo imageCreateInfo = {};
-    bool emulatingModifiers = false;
-
     {
         std::lock_guard<std::recursive_mutex> lock(mLock);
         auto it = info_VkImage.find(image);
         if (it != info_VkImage.end() && it->second.emulatedDrmFormatModifier) {
-            emulatingModifiers = true;
-            imageCreateInfo = it->second.createInfo;
             if (it->second.hasExplicitDrmModifier) {
                 *pLayout = it->second.explicitPlaneLayout;
-                return;
+            } else {
+                *pLayout = {};
+                fillEmulatedLinearSubresourceLayout(it->second.createInfo, pLayout);
             }
+            return;
         }
     }
-
-    if (emulatingModifiers) {
-        if (hostSubresource.aspectMask & (VK_IMAGE_ASPECT_MEMORY_PLANE_0_BIT_EXT |
-                                          VK_IMAGE_ASPECT_PLANE_0_BIT)) {
-            hostSubresource.aspectMask = VK_IMAGE_ASPECT_COLOR_BIT;
-        }
-    }
-
-    enc->vkGetImageSubresourceLayout(device, image, &hostSubresource, pLayout, true /* do lock */);
-
-    if (emulatingModifiers && pLayout->rowPitch == 0 && imageCreateInfo.extent.width > 0) {
-        *pLayout = {};
-        fillEmulatedLinearSubresourceLayout(imageCreateInfo, pLayout);
-    }
-#else
-    enc->vkGetImageSubresourceLayout(device, image, pSubresource, pLayout, true /* do lock */);
 #endif
+    enc->vkGetImageSubresourceLayout(device, image, pSubresource, pLayout, true /* do lock */);
 }
 
 VkResult ResourceTracker::on_vkBindImageMemory(void* context, VkResult, VkDevice device,
@@ -7602,16 +7588,17 @@ static void fillEmulatedDrmFormatModPropsList(
     const VkFormatProperties* pFormatProperties,
     VkDrmFormatModifierPropertiesListEXT* emulatedDrmFmtModPropsList) {
     mesa_logd(
-        "VkDrmFormatModifierPropertiesListEXT: emulating DRM_FORMAT_MOD_LINEAR with linear tiling "
+        "VkDrmFormatModifierPropertiesListEXT: emulating DRM_FORMAT_MOD_LINEAR with optimal tiling "
         "features");
+    VkFormatFeatureFlags tilingFeatures =
+        pFormatProperties ? pFormatProperties->optimalTilingFeatures : 0;
+    if (!tilingFeatures) {
+        emulatedDrmFmtModPropsList->drmFormatModifierCount = 0;
+        return;
+    }
     uint32_t count = emulatedDrmFmtModPropsList->drmFormatModifierCount;
     emulatedDrmFmtModPropsList->drmFormatModifierCount = 1;
     if (emulatedDrmFmtModPropsList->pDrmFormatModifierProperties && count > 0) {
-        VkFormatFeatureFlags tilingFeatures =
-            pFormatProperties ? pFormatProperties->linearTilingFeatures : 0;
-        tilingFeatures |= VK_FORMAT_FEATURE_SAMPLED_IMAGE_BIT |
-                          VK_FORMAT_FEATURE_SAMPLED_IMAGE_FILTER_LINEAR_BIT |
-                          VK_FORMAT_FEATURE_COLOR_ATTACHMENT_BIT;
         emulatedDrmFmtModPropsList->pDrmFormatModifierProperties[0] = {
             .drmFormatModifier = DRM_FORMAT_MOD_LINEAR,
             .drmFormatModifierPlaneCount = 1,
@@ -7722,10 +7709,8 @@ VkResult ResourceTracker::on_vkGetPhysicalDeviceImageFormatProperties2(
                                  PHYSICAL_DEVICE_IMAGE_DRM_FORMAT_MODIFIER_INFO_EXT);
                 mesa_logd(
                     "getPhysicalDeviceImageFormatProperties2: emulating DRM_FORMAT_MOD_LINEAR with "
-                    "VK_IMAGE_TILING_LINEAR");
-                localImageFormatInfo.tiling = VK_IMAGE_TILING_LINEAR;
-                localImageFormatInfo.usage &=
-                    ~(VK_IMAGE_USAGE_COLOR_ATTACHMENT_BIT | VK_IMAGE_USAGE_INPUT_ATTACHMENT_BIT);
+                    "VK_IMAGE_TILING_OPTIMAL");
+                localImageFormatInfo.tiling = VK_IMAGE_TILING_OPTIMAL;
             } else {
                 return VK_ERROR_FORMAT_NOT_SUPPORTED;
             }

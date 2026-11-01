@@ -82,7 +82,10 @@ iris_backend_compile(const struct iris_screen *screen,
 
    params->prog_data->source_hash = *(uint64_t *)nir->info.source_blake3;
 
-   if (intel_use_jay(devinfo, nir)) {
+   const bool use_jay = intel_use_jay(devinfo, nir);
+   brw_nir_select_divergence_options(screen->brw, nir, use_jay);
+
+   if (use_jay) {
       const struct jay_compile_params jc_params = {
          .mem_ctx = params->mem_ctx,
          .nir = nir,

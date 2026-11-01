@@ -159,7 +159,10 @@ zink_get_gfx_pipeline(struct zink_context *ctx,
          sanitized.val = zink_sanitize_optimal_key_mesh(ctx->gfx_stages, ctx->gfx_pipeline_state.shader_keys_optimal.key.val);
          assert(state->mesh_optimal_key == sanitized.val);
       } else {
-         sanitized.val = zink_sanitize_optimal_key(ctx->gfx_stages, ctx->gfx_pipeline_state.shader_keys_optimal.key.val);
+         /* draw variants which aren't ready are filtered out of the key which is bound */
+         const uint32_t key = ctx->gfx_pipeline_state.shader_keys_optimal.key.val;
+         const uint32_t bits = get_draw_variant_bits(key) & get_draw_variant_bits(state->optimal_key);
+         sanitized.val = zink_sanitize_optimal_key(ctx->gfx_stages, set_draw_variant_bits(key, bits));
          assert(state->optimal_key == sanitized.val);
       }
       assert(opt->val == sanitized.val);
@@ -172,6 +175,8 @@ zink_get_gfx_pipeline(struct zink_context *ctx,
          !prog->inline_variants && likely(prog->last_pipeline[idx]) &&
          /* this data is too big to compare in the fast-path */
          likely(!prog->shaders[MESA_SHADER_FRAGMENT]->fs.legacy_shadow_mask)) {
+         if (unlikely(prog->last_pipeline[idx]->compile_pending))
+            zink_gfx_program_compile_queue(ctx, prog->last_pipeline[idx]);
          state->mesh_pipeline = prog->last_pipeline[idx]->pipeline;
          return state->mesh_pipeline;
       }
@@ -214,6 +219,8 @@ zink_get_gfx_pipeline(struct zink_context *ctx,
             !prog->inline_variants && likely(prog->last_pipeline[idx]) &&
             /* this data is too big to compare in the fast-path */
             likely(!prog->shaders[MESA_SHADER_FRAGMENT]->fs.legacy_shadow_mask)) {
+            if (unlikely(prog->last_pipeline[idx]->compile_pending))
+               zink_gfx_program_compile_queue(ctx, prog->last_pipeline[idx]);
             state->pipeline = prog->last_pipeline[idx]->pipeline;
             return state->pipeline;
          }
@@ -293,6 +300,8 @@ zink_get_gfx_pipeline(struct zink_context *ctx,
    }
 
    struct zink_gfx_pipeline_cache_entry *cache_entry = (struct zink_gfx_pipeline_cache_entry *)entry->data;
+   if (unlikely(cache_entry->compile_pending))
+      zink_gfx_program_compile_queue(ctx, cache_entry);
    if (IS_MESH)
       state->mesh_pipeline = cache_entry->pipeline;
    else

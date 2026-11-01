@@ -78,7 +78,7 @@ add_gpus([
         gmem_align_w = 64,  gmem_align_h = 32,
         tile_align_w = 64,  tile_align_h = 32,
         tile_max_w   = 1024, # max_bitfield_val(7, 0, 5)
-        tile_max_h   = max_bitfield_val(16, 9, 5),
+        tile_max_h   = 1024, # bins of 2048 rows and up render wrong with hw binning
         num_vsc_pipes = 16,
         cs_shared_mem_size = 32 * 1024,
         num_sp_cores = 1,
@@ -97,7 +97,7 @@ add_gpus([
         gmem_align_w = 64,  gmem_align_h = 32,
         tile_align_w = 64,  tile_align_h = 32,
         tile_max_w   = 1024, # max_bitfield_val(7, 0, 5)
-        tile_max_h   = max_bitfield_val(16, 9, 5),
+        tile_max_h   = 1024, # bins of 2048 rows and up render wrong with hw binning
         num_vsc_pipes = 16,
         cs_shared_mem_size = 32 * 1024,
         num_sp_cores = 2,
@@ -116,7 +116,7 @@ add_gpus([
         gmem_align_w = 64,  gmem_align_h = 32,
         tile_align_w = 64,  tile_align_h = 32,
         tile_max_w   = 1024, # max_bitfield_val(7, 0, 5)
-        tile_max_h   = max_bitfield_val(16, 9, 5),
+        tile_max_h   = 1024, # bins of 2048 rows and up render wrong with hw binning
         num_vsc_pipes = 16,
         cs_shared_mem_size = 32 * 1024,
         num_sp_cores = 4,
@@ -935,7 +935,9 @@ a730_raw_magic_regs = [
 a740_raw_magic_regs = [
         [A6XXRegs.REG_A6XX_UCHE_CACHE_WAYS, 0x00040004],
         [A6XXRegs.REG_A6XX_TPL1_DBG_ECO_CNTL, 0x11100000],
-        [A6XXRegs.REG_A6XX_TPL1_DBG_ECO_CNTL1, 0x00040724],
+        # Value the platform firmware programs on a740; bit 18 is added
+        # conditionally through enable_tp_ubwc_flag_hint.
+        [A6XXRegs.REG_A6XX_TPL1_DBG_ECO_CNTL1, 0x00040700],
 
         [A6XXRegs.REG_A6XX_SP_CHICKEN_BITS, 0x10001400],
         [A6XXRegs.REG_A7XX_SP_CHICKEN_BITS_1, 0x00400400],
@@ -1175,7 +1177,7 @@ add_gpus([
 
 add_gpus([
         GPUId(chip_id=0xffff43030c00, name="Adreno X1-45"),
-        GPUId(chip_id=0x43030B00, name="FD735"),
+        GPUId(chip_id=0xffff43030B00, name="FD735"),
         GPUId(chip_id=0xffff43030E01, name="Adreno (TM) 735"),
     ], A6xxGPUInfo(
         CHIP.A7XX,
@@ -1242,7 +1244,7 @@ add_gpus([
         GPUId(chip_id=0xffff43050c01, name="Adreno X1-85"),
     ], A6xxGPUInfo(
         CHIP.A7XX,
-        [a7xx_base, a7xx_gen2],
+        [a7xx_base, a7xx_gen2, GPUProps(enable_tp_ubwc_flag_hint = True)],
         num_ccu = 6,
         tile_align_w = 96,
         tile_align_h = 32,
@@ -1336,6 +1338,8 @@ add_gpus([
     ))
 
 add_gpus([
+        GPUId(chip_id=0x43051400, name="FD750"), # KGSL, pineapple v1 DTS chipid
+        GPUId(chip_id=0xffff43051400, name="FD750"), # Default no-speedbin fallback
         GPUId(chip_id=0x43051401, name="FD750"), # KGSL, no speedbin data
         GPUId(chip_id=0xffff43051401, name="FD750"), # Default no-speedbin fallback
         GPUId(chip_id=0xffff43051701, name="Adreno (TM) 753"),

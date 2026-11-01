@@ -1370,8 +1370,7 @@ hk_compile_shader(struct hk_device *dev, struct vk_shader_compile_info *info,
 
       nir_shader *count = NULL, *rast = NULL, *pre_gs = NULL;
 
-      NIR_PASS(_, nir, poly_nir_lower_gs, &count, &rast, &pre_gs,
-               &count_variant->info.gs);
+      poly_nir_lower_gs(nir, &count, &rast, &pre_gs, &count_variant->info.gs);
 
       agx_preprocess_nir(count);
       agx_preprocess_nir(rast);

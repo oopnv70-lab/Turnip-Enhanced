@@ -653,14 +653,15 @@ radv_get_shader(struct radv_shader *const *shaders, mesa_shader_stage stage)
 }
 
 struct radv_ps_epilog_state {
-   uint8_t color_attachment_count;
    VkFormat color_attachment_formats[MAX_RTS];
-   uint8_t color_attachment_mappings[MAX_RTS];
-
    uint32_t color_write_mask;
-   uint8_t color_blend_enable;
-
    uint32_t colors_written;
+
+   uint8_t color_attachment_count;
+   uint8_t color_attachment_mappings[MAX_RTS];
+   uint8_t color_blend_enable;
+   uint8_t need_src_alpha;
+
    bool mrt0_is_dual_src;
    bool has_depth_output;
    bool has_stencil_output;
@@ -670,8 +671,9 @@ struct radv_ps_epilog_state {
    bool lower_1bit_sample_mask_to_discard;
    bool alpha_to_coverage_via_mrtz;
    bool alpha_to_one;
-   uint8_t need_src_alpha;
 };
+
+void radv_init_ps_epilog_format_infos(struct radv_compiler_info *compiler_info);
 
 struct radv_ps_epilog_key radv_generate_ps_epilog_key(const struct radv_compiler_info *compiler_info,
                                                       const struct radv_ps_epilog_state *state);
@@ -722,6 +724,8 @@ struct radv_graphics_pipeline_state {
    struct radv_graphics_pipeline_key key;
 
    struct radv_pipeline_layout layout;
+
+   blake3_hash libs_blake3;
 };
 
 void radv_graphics_pipeline_hash(const struct radv_device *device, const struct radv_graphics_pipeline_state *gfx_state,

@@ -36,6 +36,14 @@ fdl6_get_ubwc_blockwidth(const struct fdl_layout *layout,
 
    unsigned num_planes = util_format_get_num_planes(layout->format);
 
+   /* special case for P010 planar formats */
+   if (layout->format == PIPE_FORMAT_X6R10_UNORM ||
+       layout->format == PIPE_FORMAT_X6G10_X6B10X6R10_420_UNORM) {
+      *blockwidth = layout->plane == 1 ? 16 : 32;
+      *blockheight = 4;
+      return;
+   }
+
    /* special case for r8g8 and UV plane (plane 1) of 2-plane YUV formats */
    if (fdl6_is_r8g8_layout(layout) || (num_planes == 2 && layout->plane == 1)) {
       *blockwidth = 16;
@@ -152,8 +160,13 @@ fdl6_layout_image(struct fdl_layout *layout, const struct fd_dev_info *info,
    layout->linear_fallback_threshold_texels =
       fdl_linear_fallback_threshold_texels(layout, info);
 
-   if (!params->force_ubwc &&
-       layout->width0 < layout->linear_fallback_threshold_texels) {
+   if (params->force_ubwc) {
+      /* An explicit compressed modifier describes UBWC storage for every
+       * level.  Falling back to a linear level would describe a different
+       * memory layout than the producer allocated.
+       */
+      layout->tile_all = true;
+   } else if (layout->width0 < layout->linear_fallback_threshold_texels) {
       layout->ubwc = false;
       /* Linear D/S is not supported by HW. */
       if (!util_format_is_depth_or_stencil(params->format))
@@ -218,7 +231,25 @@ fdl6_layout_image(struct fdl_layout *layout, const struct fd_dev_info *info,
    if (explicit_layout) {
       offset = explicit_layout->offset;
       layout->pitch0 = explicit_layout->pitch;
-      if (align(layout->pitch0, 1 << layout->pitchalign) != layout->pitch0)
+      layout->has_explicit_pitch = true;
+
+      if (explicit_layout->skip_last_level_padding &&
+          (layout->tile_mode != TILE6_LINEAR || layout->ubwc ||
+           params->mip_levels != 1 || params->array_size != 1 ||
+           params->depth0 != 1 || params->is_3d))
+         return false;
+
+      uint32_t pitch_alignment = 1u << layout->pitchalign;
+      if (explicit_layout->pitch_alignment) {
+         if (layout->tile_mode != TILE6_LINEAR || params->mip_levels != 1 ||
+             !util_is_power_of_two_nonzero(explicit_layout->pitch_alignment) ||
+             explicit_layout->pitch_alignment < layout->cpp)
+            return false;
+
+         pitch_alignment = explicit_layout->pitch_alignment;
+      }
+
+      if (align(layout->pitch0, pitch_alignment) != layout->pitch0)
          return false;
    }
 
@@ -284,7 +315,8 @@ fdl6_layout_image(struct fdl_layout *layout, const struct fd_dev_info *info,
        * The pitch is already sufficiently aligned, but height
        * may not be. note this only matters if last level is linear
        */
-      if (level == params->mip_levels - 1)
+      if (level == params->mip_levels - 1 &&
+          !(explicit_layout && explicit_layout->skip_last_level_padding))
          nblocksy = align(nblocksy, 4);
 
       slice->offset = offset + layout->size;

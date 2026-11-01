@@ -47,6 +47,8 @@
 #include "util/perf/u_trace.h"
 #include "util/u_transfer_helper.h"
 #include "util/hex.h"
+#include "util/bitscan.h"
+#include "util/u_qsort.h"
 #include "util/xmlconfig.h"
 
 #include "util/u_cpu_detect.h"
@@ -748,7 +750,8 @@ zink_init_screen_caps(struct zink_screen *screen)
    caps->ignored_output_varyings[MESA_SHADER_GEOMETRY] =
    caps->ignored_output_varyings[MESA_SHADER_MESH] = 0;
 
-   caps->null_textures = screen->info.rb_image_feats.robustImageAccess;
+   /* nullDescriptor is required */
+   caps->null_textures = true;
    /* support OVR_multiview and OVR_multiview2 */
    caps->multiview = screen->info.feats11.multiview * 2;
    caps->texrect = false;
@@ -811,6 +814,7 @@ zink_init_screen_caps(struct zink_screen *screen)
    caps->can_bind_const_buffer_as_vertex = true;
    caps->allow_mapped_buffers_during_execution = true;
    caps->map_unsynchronized_thread_safe = true;
+   caps->map_unsynchronized_texture_thread_safe = true;
    caps->shareable_shaders = true;
    caps->device_reset_status_query = true;
    caps->query_memory_info = true;
@@ -864,9 +868,8 @@ zink_init_screen_caps(struct zink_screen *screen)
       screen->info.feats.features.pipelineStatisticsQuery;
 
    caps->robust_buffer_access_behavior =
-      screen->info.feats.features.robustBufferAccess &&
-      (screen->info.rb2_feats.robustImageAccess2 ||
-       screen->driver_compiler_workarounds.lower_robustImageAccess2);
+      screen->robustness & ZINK_ROBUSTNESS_BUFFER &&
+      screen->robustness & (ZINK_ROBUSTNESS_IMAGE | ZINK_ROBUSTNESS_IMAGE2);
 
    caps->multi_draw_indirect = screen->info.feats.features.multiDrawIndirect;
 
@@ -955,6 +958,15 @@ zink_init_screen_caps(struct zink_screen *screen)
          quirk |= PIPE_QUIRK_TEXTURE_BORDER_COLOR_SWIZZLE_NV50;
       caps->texture_border_color_quirk = quirk;
    }
+
+   /* On PVR HW that have a small custom border colour table disable the caching
+    * of samplers that use custom border color.
+    */
+   if (zink_driverid(screen) == VK_DRIVER_ID_IMAGINATION_OPEN_SOURCE_MESA &&
+       screen->info.border_color_props.maxCustomBorderColorSamplers < 64) {
+      caps->disable_custom_border_color_caching = true;
+   }
+
    /* TODO: 32K textures are broken */
    caps->max_texture_2d_size =
       MIN3(screen->info.props.limits.maxImageDimension1D,
@@ -1079,6 +1091,12 @@ zink_init_screen_caps(struct zink_screen *screen)
 
    caps->video_memory = get_video_mem(screen) >> 20;
    caps->uma = screen->info.props.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU;
+   /* a quarter of vram like radeonsi, but an image still needs a single allocation, so an
+    * unreported allocation limit keeps the default */
+   if (!caps->uma && !screen->is_cpu && screen->info.props11.maxMemoryAllocationSize) {
+      unsigned max_mb = MIN2(caps->video_memory / 4, screen->info.props11.maxMemoryAllocationSize >> 20);
+      caps->max_texture_mb = MAX2(caps->max_texture_mb, max_mb);
+   }
 
    caps->max_vertex_attrib_stride =
       screen->info.props.limits.maxVertexInputBindingStride;
@@ -1291,7 +1309,7 @@ zink_init_screen_caps(struct zink_screen *screen)
 
    caps->mesh.pipeline_statistic_queries = screen->info.mesh_feats.meshShaderQueries;
 
-   if (screen->info.feats12.subgroupBroadcastDynamicId && screen->info.feats12.shaderSubgroupExtendedTypes && screen->info.feats.features.shaderFloat64) {
+   if (screen->info.feats12.subgroupBroadcastDynamicId && screen->info.feats12.shaderSubgroupExtendedTypes) {
       caps->shader_subgroup_size = screen->info.subgroup.subgroupSize;
       if (screen->info.have_EXT_mesh_shader)
          caps->shader_subgroup_supported_stages = screen->info.subgroup.supportedStages & BITFIELD_MASK(MESA_SHADER_MESH_STAGES);
@@ -1693,6 +1711,7 @@ zink_destroy_screen(struct pipe_screen *pscreen)
 #endif
    disk_cache_destroy(screen->disk_cache);
 
+   zink_resource_object_cache_release(screen);
    zink_bo_deinit(screen);
    util_live_shader_cache_deinit(&screen->shaders);
 
@@ -1767,6 +1786,7 @@ zink_destroy_screen(struct pipe_screen *pscreen)
       free(screen->video_format_prop_output[i].pVideoFormatProperties);
    }
    slab_destroy_parent(&screen->transfer_pool);
+   zink_resource_struct_pools_deinit(screen);
    ralloc_free(screen);
    glsl_type_singleton_decref();
 }
@@ -2010,7 +2030,7 @@ zink_flush_frontbuffer(struct pipe_screen *pscreen,
 
    ctx = zink_tc_context_unwrap(pctx);
 
-   if (!zink_kopper_acquired(res->obj->dt, res->obj->dt_idx)) {
+   if (!zink_kopper_acquired(res->obj->dt, zink_kopper_get_dt_idx(res))) {
       /* swapbuffers to an undefined surface: acquire and present garbage */
       if (!zink_kopper_acquire(ctx, res, UINT64_MAX))
          return;
@@ -3138,6 +3158,10 @@ init_driver_workarounds(struct zink_screen *screen)
    case VK_DRIVER_ID_QUALCOMM_PROPRIETARY:
       screen->driver_workarounds.implicit_sync = false;
       break;
+   case VK_DRIVER_ID_NVIDIA_PROPRIETARY:
+      /* x11 swapchains stay inside this driver, so the present semaphore is enough */
+      screen->driver_workarounds.implicit_sync_not_x11 = true;
+      break;
    default:
       break;
    }
@@ -3208,6 +3232,26 @@ init_driver_workarounds(struct zink_screen *screen)
                                                          screen->info.gpl_props.graphicsPipelineLibraryFastLinking ||
                                                          screen->is_cpu);
    screen->driver_workarounds.broken_l4a4 = zink_driverid(screen) == VK_DRIVER_ID_NVIDIA_PROPRIETARY;
+   /* the NVIDIA GL driver rewrites index buffers, the NVIDIA and NVK Vulkan drivers are slow for list topologies
+    * with restart indices */
+   screen->driver_workarounds.compact_list_restart = (zink_driverid(screen) == VK_DRIVER_ID_NVIDIA_PROPRIETARY ||
+                                                      zink_driverid(screen) == VK_DRIVER_ID_MESA_NVK) &&
+                                                     screen->info.subgroup.subgroupSize == 32 &&
+                                                     (screen->info.subgroup.supportedStages & VK_SHADER_STAGE_COMPUTE_BIT) &&
+                                                     (screen->info.subgroup.supportedOperations &
+                                                      (VK_SUBGROUP_FEATURE_BASIC_BIT | VK_SUBGROUP_FEATURE_ARITHMETIC_BIT)) ==
+                                                     (VK_SUBGROUP_FEATURE_BASIC_BIT | VK_SUBGROUP_FEATURE_ARITHMETIC_BIT) &&
+                                                     /* the index buffers are loaded with their own element size */
+                                                     screen->info.have_KHR_8bit_storage && screen->info.have_KHR_16bit_storage &&
+                                                     screen->info.have_KHR_shader_float16_int8 &&
+                                                     screen->info.shader_float16_int8_feats.shaderInt8 &&
+                                                     screen->info.feats.features.shaderInt16;
+   /* the NVIDIA GL driver draws plain lines into float targets, and the proprietary Vulkan smooth
+    * lines cost about 50x more than plain ones; only the dynamic line mode path can switch them */
+   screen->driver_workarounds.no_float_linesmooth = (zink_driverid(screen) == VK_DRIVER_ID_NVIDIA_PROPRIETARY ||
+                                                     zink_driverid(screen) == VK_DRIVER_ID_MESA_NVK) &&
+                                                    screen->info.have_EXT_extended_dynamic_state3 &&
+                                                    screen->info.dynamic_state3_feats.extendedDynamicState3LineRasterizationMode;
    if (zink_driverid(screen) == VK_DRIVER_ID_MESA_TURNIP) {
       /* performance */
       screen->info.border_color_feats.customBorderColorWithoutFormat = VK_FALSE;
@@ -3217,6 +3261,17 @@ init_driver_workarounds(struct zink_screen *screen)
        VK_DRIVER_ID_IMAGINATION_PROPRIETARY &&
        screen->info.feats.features.geometryShader)
       screen->driver_workarounds.no_linesmooth = true;
+
+   /* non-strict default lines match rectangular ones up to 2 pixels wide and are faster */
+   switch (zink_driverid(screen)) {
+   case VK_DRIVER_ID_MESA_RADV:
+   case VK_DRIVER_ID_AMD_OPEN_SOURCE:
+   case VK_DRIVER_ID_AMD_PROPRIETARY:
+      if (!screen->info.props.limits.strictLines)
+         screen->driver_workarounds.no_thin_rectangular_lines = true;
+      break;
+   default: break;
+   }
 
    /* these drivers don't use VK_PIPELINE_CREATE_COLOR_ATTACHMENT_FEEDBACK_LOOP_BIT_EXT, so it can always be set */
    switch (zink_driverid(screen)) {
@@ -3291,9 +3346,7 @@ init_driver_workarounds(struct zink_screen *screen)
 
    /* When robust contexts are advertised but robustImageAccess2 is not available */
    screen->driver_compiler_workarounds.lower_robustImageAccess2 =
-      !screen->info.rb2_feats.robustImageAccess2 &&
-      screen->info.feats.features.robustBufferAccess &&
-      screen->info.rb_image_feats.robustImageAccess;
+      screen->robustness == (ZINK_ROBUSTNESS_BUFFER | ZINK_ROBUSTNESS_IMAGE);
 
    /* once more testing has been done, use the #if 0 block */
    unsigned illegal = ZINK_DEBUG_RP | ZINK_DEBUG_NORP;
@@ -3406,8 +3459,33 @@ init_driver_workarounds(struct zink_screen *screen)
       break;
    }
 
+   /* only these drivers were checked to not bias line and point draws in fill polygon mode */
+   switch (zink_driverid(screen)) {
+   case VK_DRIVER_ID_MESA_RADV:
+   case VK_DRIVER_ID_MESA_NVK:
+   case VK_DRIVER_ID_INTEL_OPEN_SOURCE_MESA:
+   case VK_DRIVER_ID_MESA_TURNIP:
+   case VK_DRIVER_ID_MESA_LLVMPIPE:
+   case VK_DRIVER_ID_NVIDIA_PROPRIETARY:
+      screen->driver_workarounds.fill_mode_no_line_point_bias = true;
+      break;
+   default:
+      break;
+   }
+
    if (zink_debug & ZINK_DEBUG_NOGENERAL)
       screen->driver_workarounds.general_layout = false;
+
+   screen->driver_workarounds.max_batch_rps = UINT32_MAX;
+   switch (zink_driverid(screen)) {
+   case VK_DRIVER_ID_INTEL_OPEN_SOURCE_MESA:
+      /* keeps command buffers well under the xe job timeout */
+      if (screen->info.props.deviceType == VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU)
+         screen->driver_workarounds.max_batch_rps = 32;
+      break;
+   default:
+      break;
+   }
 
    if (!screen->info.have_EXT_vertex_input_dynamic_state || !screen->info.have_EXT_transform_feedback)
       screen->info.have_KHR_device_address_commands = false;
@@ -3436,6 +3514,28 @@ disable_features(struct zink_screen *screen)
    screen->info.mesh_feats.primitiveFragmentShadingRateMeshShader = false;
    /* if this is used anywhere it should just be enabled with driconf */
    screen->info.view2d_feats.sampler2DViewOf3D = false;
+
+   if (screen->info.feats.features.robustBufferAccess)
+      screen->robustness |= ZINK_ROBUSTNESS_BUFFER;
+   if (screen->info.rb_image_feats.robustImageAccess)
+      screen->robustness |= ZINK_ROBUSTNESS_IMAGE;
+   if (screen->info.rb2_feats.robustImageAccess2)
+      screen->robustness |= ZINK_ROBUSTNESS_IMAGE2;
+
+   /* GL doesn't require this behavior */
+   screen->info.rb2_feats.robustBufferAccess2 = false;
+   if (screen->info.have_EXT_pipeline_robustness && screen->info.pipeline_rb_feats.pipelineRobustness) {
+      /* every pipeline sets its own robustness, so the device-wide features are not needed:
+       * robust contexts ask for robustness and all other contexts explicitly ask for none,
+       * regardless of what the driver does by default
+       */
+      screen->info.feats.features.robustBufferAccess = false;
+      screen->info.rb_image_feats.robustImageAccess = false;
+      screen->info.rb2_feats.robustImageAccess2 = false;
+      screen->info.feats13.robustImageAccess = false;
+   } else {
+      screen->info.have_EXT_pipeline_robustness = false;
+   }
 }
 
 static void
@@ -3484,9 +3584,12 @@ init_optimal_keys(struct zink_screen *screen)
       if (screen->driver_workarounds.no_linesmooth)
          fprintf(stderr, "driver does not support smooth lines\n");
       CHECK_OR_PRINT(maint5_props.polygonModePointSize);
-      CHECK_OR_PRINT(rb2_feats.robustImageAccess2);
-      CHECK_OR_PRINT(feats.features.robustBufferAccess);
-      CHECK_OR_PRINT(rb_image_feats.robustImageAccess);
+      if (!(screen->robustness & ZINK_ROBUSTNESS_IMAGE2))
+         fprintf(stderr, "zink: driver does not support robustImageAccess2\n");
+      if (!(screen->robustness & ZINK_ROBUSTNESS_BUFFER))
+         fprintf(stderr, "zink: driver does not support robustBufferAccess\n");
+      if (!(screen->robustness & ZINK_ROBUSTNESS_IMAGE))
+         fprintf(stderr, "zink: driver does not support robustImageAccess\n");
       printf("\n");
       mesa_logw("zink: force-enabling optimal_keys despite missing features. Good luck!");
    }
@@ -3532,7 +3635,8 @@ zink_create_semaphore(struct zink_screen *screen)
    return ret == VK_SUCCESS ? sem : VK_NULL_HANDLE;
 }
 
-void
+/* returns false (with the lock released) if the copy context couldn't be created */
+bool
 zink_screen_lock_context(struct zink_screen *screen)
 {
    simple_mtx_lock(&screen->copy_context_lock);
@@ -3541,7 +3645,10 @@ zink_screen_lock_context(struct zink_screen *screen)
    if (!screen->copy_context) {
       mesa_loge("zink: failed to create copy context");
       /* realistically there's nothing that can be done here */
+      simple_mtx_unlock(&screen->copy_context_lock);
+      return false;
    }
+   return true;
 }
 
 void
@@ -3611,6 +3718,48 @@ zink_cl_cts_version(struct pipe_screen *pscreen)
    return "v2024-08-08-00";
 }
 
+/* host-visible vram last, then larger heaps and simpler types first */
+static int
+compare_mem_types(const void *a, const void *b, void *data)
+{
+   const struct zink_screen *screen = data;
+   const VkPhysicalDeviceMemoryProperties *props = &screen->info.mem_props;
+   const unsigned idx_a = *(const uint8_t *)a;
+   const unsigned idx_b = *(const uint8_t *)b;
+   const bool vis_a = zink_is_vis_vram_type(screen, idx_a);
+   const bool vis_b = zink_is_vis_vram_type(screen, idx_b);
+   if (vis_a != vis_b)
+      return vis_a ? 1 : -1;
+
+   const VkDeviceSize size_a = props->memoryHeaps[props->memoryTypes[idx_a].heapIndex].size;
+   const VkDeviceSize size_b = props->memoryHeaps[props->memoryTypes[idx_b].heapIndex].size;
+   if (size_a != size_b)
+      return size_a > size_b ? -1 : 1;
+
+   const VkMemoryPropertyFlags flags_a = props->memoryTypes[idx_a].propertyFlags;
+   const VkMemoryPropertyFlags flags_b = props->memoryTypes[idx_b].propertyFlags;
+   const unsigned count_a = util_bitcount(flags_a);
+   const unsigned count_b = util_bitcount(flags_b);
+   if (count_a != count_b)
+      return count_a < count_b ? -1 : 1;
+   if (flags_a != flags_b)
+      return flags_a < flags_b ? -1 : 1;
+   return (int)idx_a - (int)idx_b;
+}
+
+/* sort a heap holding host-visible vram so its order ignores the driver's listing */
+static void
+sort_mem_types(struct zink_screen *screen, enum zink_heap heap)
+{
+   for (unsigned i = 0; i < screen->heap_count[heap]; i++) {
+      if (zink_is_vis_vram_type(screen, screen->heap_map[heap][i])) {
+         util_qsort_r(screen->heap_map[heap], screen->heap_count[heap], sizeof(uint8_t),
+                      compare_mem_types, screen);
+         return;
+      }
+   }
+}
+
 static struct zink_screen *
 zink_internal_create_screen(const struct pipe_screen_config *config, int64_t dev_major, int64_t dev_minor, uint64_t adapter_luid)
 {
@@ -3625,6 +3774,7 @@ zink_internal_create_screen(const struct pipe_screen_config *config, int64_t dev
          mesa_loge("ZINK: failed to allocate screen");
       return NULL;
    }
+   zink_resource_struct_pools_init(screen);
 
    screen->driver_name_is_inferred = config && config->driver_name_is_inferred;
    screen->drm_fd = -1;
@@ -3784,6 +3934,19 @@ zink_internal_create_screen(const struct pipe_screen_config *config, int64_t dev
       /* determine if vis vram is roughly equal to total vram */
       if (biggest_vis_vram > biggest_vram * 0.9)
          screen->resizable_bar = true;
+   }
+   if (!screen->resizable_bar) {
+      /* a small bar is scarce, so host allocations use it last */
+      sort_mem_types(screen, ZINK_HEAP_HOST_VISIBLE_COHERENT);
+      sort_mem_types(screen, ZINK_HEAP_HOST_VISIBLE_COHERENT_CACHED);
+   } else {
+      /* coherent maps may only use host-visible VRAM if every memory type for it is coherent */
+      screen->vis_vram_coherent = true;
+      for (unsigned i = 0; i < screen->heap_count[ZINK_HEAP_DEVICE_LOCAL_VISIBLE]; i++) {
+         if (!(screen->info.mem_props.memoryTypes[screen->heap_map[ZINK_HEAP_DEVICE_LOCAL_VISIBLE][i]].propertyFlags &
+               VK_MEMORY_PROPERTY_HOST_COHERENT_BIT))
+            screen->vis_vram_coherent = false;
+      }
    }
 
    setup_renderdoc(screen);
@@ -4033,6 +4196,10 @@ zink_internal_create_screen(const struct pipe_screen_config *config, int64_t dev
 
    simple_mtx_init(&screen->free_batch_states_lock, mtx_plain);
    simple_mtx_init(&screen->submit_lock, mtx_plain);
+   simple_mtx_init(&screen->buffer_objs.lock, mtx_plain);
+   screen->buffer_objs.max_bytes = MIN2(ZINK_OBJ_CACHE_MAX_BYTES, get_video_mem(screen) / ZINK_OBJ_CACHE_MEM_DIV);
+   for (unsigned i = 0; i < ARRAY_SIZE(screen->buffer_objs.buckets); i++)
+      list_inithead(&screen->buffer_objs.buckets[i]);
    simple_mtx_init(&screen->active_batch_states_lock, mtx_plain);
    simple_mtx_init(&screen->dt_lock, mtx_plain);
 

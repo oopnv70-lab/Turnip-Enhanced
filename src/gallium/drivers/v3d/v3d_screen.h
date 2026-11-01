@@ -71,6 +71,10 @@ struct v3d_screen {
                 uint32_t size_list_size;
 
                 mtx_t lock;
+
+                uint32_t cache_size;
+                uint32_t cache_count;
+                uint32_t max_cache_size;
         } bo_cache;
 
         const struct v3d_compiler *compiler;
@@ -89,6 +93,7 @@ struct v3d_screen {
         bool dual_color_blend_by_location;
         bool has_cpu_queue;
         bool has_multisync;
+        bool has_tfu_ccol;
 
         float heap_memory_percent;
 

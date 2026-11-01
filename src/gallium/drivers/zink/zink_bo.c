@@ -105,11 +105,17 @@ static unsigned get_slab_entry_alignment(struct zink_screen *screen, unsigned si
    return entry_size;
 }
 
+/* host-visible vram on a small bar fills up fast, and running out is not an error */
+static bool
+is_small_bar_type(const struct zink_screen *screen, unsigned mem_type_idx)
+{
+   return !screen->resizable_bar && zink_is_vis_vram_type(screen, mem_type_idx);
+}
+
 static void
 bo_clear_vis_vram_full(struct zink_screen *screen, struct zink_bo *bo)
 {
-   if (screen->vis_vram_full &&
-       (screen->info.mem_props.memoryTypes[bo->base.placement].propertyFlags & VK_VIS_VRAM) == VK_VIS_VRAM)
+   if (screen->vis_vram_full && bo->mem && zink_is_vis_vram_type(screen, bo->base.placement))
       screen->vis_vram_full = false;
 }
 
@@ -193,14 +199,16 @@ bo_slab_destroy(struct zink_screen *screen, struct zink_bo *bo)
    struct zink_clientptr_heap *clientptr_heap = bo->u.slab.real->u.real.clientptr_heap;
    struct pb_slabs *slabs = clientptr_heap ? &clientptr_heap->slabs : &screen->pb.bo_slabs;
 
-   bo_clear_vis_vram_full(screen, bo);
    pb_slab_free(slabs, &bo->u.slab.entry);
+   if (!p_atomic_read_relaxed(&screen->base.num_contexts))
+      pb_slabs_reclaim(slabs);
 }
 
 static bool
 clean_up_buffer_managers(struct zink_screen *screen)
 {
-   unsigned num_reclaims = pb_slabs_reclaim(&screen->pb.bo_slabs);
+   unsigned num_reclaims = zink_resource_object_cache_release(screen);
+   num_reclaims += pb_slabs_reclaim(&screen->pb.bo_slabs);
    num_reclaims += pb_cache_release_all_buffers(&screen->pb.bo_cache);
    return !!num_reclaims;
 }
@@ -228,7 +236,7 @@ bo_destroy_or_cache(struct zink_screen *screen, struct zink_bo *bo)
    bo->reads.u = NULL;
    bo->writes.u = NULL;
 
-   if (bo->u.real.use_reusable_pool)
+   if (bo->u.real.use_reusable_pool && p_atomic_read_relaxed(&screen->base.num_contexts))
       pb_cache_add_buffer(&screen->pb.bo_cache, bo->cache_entry);
    else
       bo_destroy(screen, bo);
@@ -277,8 +285,14 @@ bo_create_internal(struct zink_screen *screen,
       alignment = MAX2(alignment, screen->info.props.limits.minMemoryMapAlignment);
       mai.allocationSize = align64(mai.allocationSize, screen->info.props.limits.minMemoryMapAlignment);
    }
+   bool small_bar = is_small_bar_type(screen, mem_type_idx);
+   /* skip the driver call while the heap is known to be full */
+   if (small_bar && screen->vis_vram_full)
+      return NULL;
    unsigned vk_heap_idx = screen->info.mem_props.memoryTypes[mem_type_idx].heapIndex;
    if (mai.allocationSize > screen->info.mem_props.memoryHeaps[vk_heap_idx].size) {
+      if (small_bar)
+         return NULL;
       mesa_loge("zink: can't allocate %"PRIu64" bytes from heap that's only %"PRIu64" bytes!\n", mai.allocationSize, screen->info.mem_props.memoryHeaps[vk_heap_idx].size);
       return NULL;
    }
@@ -291,6 +305,14 @@ bo_create_internal(struct zink_screen *screen,
 
    VkResult ret = VKSCR(AllocateMemory)(screen->dev, &mai, NULL, &bo->mem);
    if (!zink_screen_handle_vkresult(screen, ret)) {
+      bo->mem = VK_NULL_HANDLE;
+      /* a full small bar is expected, so it is not an error */
+      if (small_bar && ret == VK_ERROR_OUT_OF_DEVICE_MEMORY) {
+         /* larger requests can fail while small ones still fit */
+         if (mai.allocationSize <= 2 * 1024 * 1024)
+            screen->vis_vram_full = true;
+         goto fail;
+      }
       mesa_loge("zink: couldn't allocate memory: heap=%u size=%" PRIu64, heap, size);
       if (zink_debug & ZINK_DEBUG_MEM) {
          zink_debug_mem_print_stats(screen);
@@ -608,17 +630,18 @@ zink_bo_create(struct zink_screen *screen, uint64_t size, unsigned alignment, en
 
       struct pb_slabs *slabs = clientptr_heap ? &clientptr_heap->slabs : &screen->pb.bo_slabs;
       bool reclaim_all = false;
-      if (heap == ZINK_HEAP_DEVICE_LOCAL_VISIBLE && !screen->resizable_bar) {
+      bool small_bar = is_small_bar_type(screen, mem_type_idx);
+      if (small_bar) {
          unsigned low_bound = 128 * 1024 * 1024; //128MB is a very small BAR
          if (zink_driverid(screen) == VK_DRIVER_ID_NVIDIA_PROPRIETARY)
             low_bound *= 2; //nvidia has fat textures or something
          unsigned vk_heap_idx = screen->info.mem_props.memoryTypes[mem_type_idx].heapIndex;
+         /* reuse idle entries before growing a very small heap */
          reclaim_all = screen->info.mem_props.memoryHeaps[vk_heap_idx].size <= low_bound;
-         if (reclaim_all)
-            reclaim_all = clean_up_buffer_managers(screen);
       }
       entry = pb_slab_alloc_reclaimed(slabs, alloc_size, mem_type_idx, reclaim_all);
-      if (!entry) {
+      /* running out of a small bar is routine, don't drop every cached buffer */
+      if (!entry && !small_bar) {
          /* Clean up buffer managers and try again. */
          if (clean_up_buffer_managers(screen))
             entry = pb_slab_alloc_reclaimed(slabs, alloc_size, mem_type_idx, true);
@@ -693,7 +716,7 @@ no_slab:
    bo = bo_create_internal(screen, size, alignment, heap, mem_type_idx, flags, pNext, clientptr_heap);
    if (!bo) {
       /* Clean up buffer managers and try again. */
-      if (clean_up_buffer_managers(screen))
+      if (!is_small_bar_type(screen, mem_type_idx) && clean_up_buffer_managers(screen))
          bo = bo_create_internal(screen, size, alignment, heap, mem_type_idx, flags, pNext, clientptr_heap);
       if (!bo)
          return NULL;
@@ -720,7 +743,7 @@ zink_bo_map(struct zink_screen *screen, struct zink_bo *bo)
    p_atomic_inc(&real->u.real.map_count);
    cpu = p_atomic_read(&real->u.real.cpu_ptr);
    if (!cpu) {
-      simple_mtx_lock(&real->lock);
+      zink_bo_lock_mem(real);
       /* Must re-check due to the possibility of a race. Re-check need not
        * be atomic thanks to the lock. */
       cpu = real->u.real.cpu_ptr;
@@ -728,7 +751,7 @@ zink_bo_map(struct zink_screen *screen, struct zink_bo *bo)
          VkResult result = VKSCR(MapMemory)(screen->dev, real->mem, 0, real->base.size, 0, &cpu);
          if (result != VK_SUCCESS) {
             mesa_loge("ZINK: vkMapMemory failed (%s)", vk_Result_to_str(result));
-            simple_mtx_unlock(&real->lock);
+            zink_bo_unlock_mem(real);
             p_atomic_dec(&real->u.real.map_count);
             return NULL;
          }
@@ -738,7 +761,7 @@ zink_bo_map(struct zink_screen *screen, struct zink_bo *bo)
          }
          p_atomic_set(&real->u.real.cpu_ptr, cpu);
       }
-      simple_mtx_unlock(&real->lock);
+      zink_bo_unlock_mem(real);
    }
 
    return (uint8_t*)cpu + offset;
@@ -756,7 +779,7 @@ zink_bo_unmap(struct zink_screen *screen, struct zink_bo *bo)
       if (real->u.real.clientptr_heap)
          return;
 
-      simple_mtx_lock(&real->lock);
+      zink_bo_lock_mem(real);
       void *cpu_ptr = real->u.real.cpu_ptr;
       p_atomic_set(&real->u.real.cpu_ptr, NULL);
 
@@ -770,7 +793,7 @@ zink_bo_unmap(struct zink_screen *screen, struct zink_bo *bo)
       } else {
          p_atomic_set(&real->u.real.cpu_ptr, cpu_ptr);
       }
-      simple_mtx_unlock(&real->lock);
+      zink_bo_unlock_mem(real);
    }
 }
 
@@ -1408,6 +1431,12 @@ bo_slab_alloc_normal(void *priv, unsigned mem_type_idx, unsigned entry_size, uns
    return bo_slab_alloc(priv, mem_type_idx, entry_size, group_index, false, NULL);
 }
 
+void
+zink_bo_release_unused(struct zink_screen *screen)
+{
+   clean_up_buffer_managers(screen);
+}
+
 bool
 zink_bo_init(struct zink_screen *screen)
 {
@@ -1581,7 +1610,7 @@ zink_bo_map_clientptr(struct zink_screen *screen, struct zink_bo *bo,
       return true;
    }
 
-   simple_mtx_lock(&real->lock);
+   zink_bo_lock_mem(real);
 
    /* check again incase we raced with ourselves */
    if (!real->u.real.clientptr_range) {
@@ -1594,7 +1623,7 @@ zink_bo_map_clientptr(struct zink_screen *screen, struct zink_bo *bo,
 
          p_atomic_set(&real->u.real.cpu_ptr, old_cpu);
 
-         simple_mtx_unlock(&real->lock);
+         zink_bo_unlock_mem(real);
          p_atomic_dec(&real->u.real.map_count);
 
          return false;
@@ -1611,7 +1640,7 @@ zink_bo_map_clientptr(struct zink_screen *screen, struct zink_bo *bo,
 
       if (zink_bo_do_placed_map(screen, real, new_clientptr_range) != VK_SUCCESS) {
          p_atomic_dec(&real->u.real.map_count);
-         simple_mtx_unlock(&real->lock);
+         zink_bo_unlock_mem(real);
          return false;
       }
 
@@ -1624,7 +1653,7 @@ zink_bo_map_clientptr(struct zink_screen *screen, struct zink_bo *bo,
       p_atomic_set(&real->u.real.clientptr_range, clientptr_range);
    }
 
-   simple_mtx_unlock(&real->lock);
+   zink_bo_unlock_mem(real);
 
    *ptr = (uint8_t *)real->u.real.cpu_ptr + offset;
    *range_size = 0;
@@ -1648,14 +1677,14 @@ zink_bo_unmap_clientptr_range(struct zink_screen *screen, struct zink_bo *bo, st
       return false;
    }
 
-   simple_mtx_lock(&bo->lock);
+   zink_bo_lock_mem(bo);
 
    void *old_ptr = bo->u.real.cpu_ptr;
    struct zink_clientptr_range *old_range = bo->u.real.clientptr_range;
 
    /* check again in case of race with ourselves */
    if (!old_range) {
-      simple_mtx_unlock(&bo->lock);
+      zink_bo_unlock_mem(bo);
       return true;
    }
 
@@ -1665,7 +1694,7 @@ zink_bo_unmap_clientptr_range(struct zink_screen *screen, struct zink_bo *bo, st
    if (p_atomic_read(&bo->u.real.map_count) > 0) {
       p_atomic_set(&bo->u.real.cpu_ptr, old_ptr);
       p_atomic_set(&bo->u.real.clientptr_range, old_range);
-      simple_mtx_unlock(&bo->lock);
+      zink_bo_unlock_mem(bo);
       return false;
    }
 
@@ -1689,7 +1718,7 @@ zink_bo_unmap_clientptr_range(struct zink_screen *screen, struct zink_bo *bo, st
    UNREACHABLE("client ptr not supported on Windows");
 #endif
 
-   simple_mtx_unlock(&bo->lock);
+   zink_bo_unlock_mem(bo);
 
    *range = old_range;
    return true;

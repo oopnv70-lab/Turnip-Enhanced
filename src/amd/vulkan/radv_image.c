@@ -313,11 +313,6 @@ radv_use_fmask_for_image(const struct radv_device *device, const struct radv_ima
 {
    const struct radv_physical_device *pdev = radv_device_physical(device);
 
-   if (pdev->info.gfx_level == GFX9 && image->vk.array_layers > 1) {
-      /* On GFX9, FMASK can be interleaved with layers and this isn't properly supported. */
-      return false;
-   }
-
    return pdev->use_fmask && image->vk.samples > 1 && (image->vk.usage & VK_IMAGE_USAGE_2_COLOR_ATTACHMENT_BIT_KHR);
 }
 
@@ -360,7 +355,7 @@ radv_use_htile_for_image(const struct radv_device *device, const struct radv_ima
 }
 
 static bool
-radv_use_tc_compat_cmask_for_image(struct radv_device *device, struct radv_image *image)
+radv_use_tc_compat_cmask_early(struct radv_device *device, struct radv_image *image)
 {
    const struct radv_physical_device *pdev = radv_device_physical(device);
    const struct radv_instance *instance = radv_physical_device_instance(pdev);
@@ -369,8 +364,17 @@ radv_use_tc_compat_cmask_for_image(struct radv_device *device, struct radv_image
    if (pdev->info.gfx_level < GFX8)
       return false;
 
-   /* GFX9 has issues when sample count is greater than 2 */
-   if (pdev->info.gfx_level == GFX9 && image->vk.samples > 2)
+   /* TC-compat CMASK doesn't have contiguous CMASK slices on GFX8. The solution would be to add
+    * a CMASK slice clear shader that uses cmask_equation.
+    *
+    * This should be reproducible by testing partial-range image transitions from UNDEFINED, e.g:
+    * 1. transition layer 0 from UNDEFINED
+    * 2. draw into layer 0
+    * 3. transitioning layer 1 from UNDEFINED should corrupt layer 0 if TC-compat CMASK is enabled
+    *
+    * There doesn't seem to be such a CTS test currently.
+    */
+   if (pdev->info.gfx_level == GFX8 && image->vk.array_layers > 1)
       return false;
 
    if (RADV_DEBUG(instance, NO_TC_COMPAT_CMASK))
@@ -385,6 +389,15 @@ radv_use_tc_compat_cmask_for_image(struct radv_device *device, struct radv_image
     */
    if (!(image->vk.usage & (VK_IMAGE_USAGE_2_SAMPLED_BIT_KHR | VK_IMAGE_USAGE_2_INPUT_ATTACHMENT_BIT_KHR |
                             VK_IMAGE_USAGE_2_TRANSFER_SRC_BIT_KHR)))
+      return false;
+
+   return true;
+}
+
+static bool
+radv_use_tc_compat_cmask_late(struct radv_device *device, struct radv_image *image)
+{
+   if (!(image->planes[0].surface.flags & RADEON_SURF_TC_COMPATIBLE_CMASK))
       return false;
 
    /* If the image doesn't have FMASK, it can't be fetchable. */
@@ -652,6 +665,19 @@ radv_get_surface_flags(struct radv_device *device, struct radv_image *image, uns
        !radv_use_dcc_for_image_early(device, image, pCreateInfo, image_format, &image->dcc_sign_reinterpret))
       flags |= RADEON_SURF_DISABLE_DCC;
 
+   /* We can't use CMASK for images with multiple layers when CMASK slices are non-contiguous because our
+    * CMASK clears can't handle it.
+    *
+    * CMASK slices are non-contiguous on GFX9 depending on image dimensions, sample count, FMASK tiling,
+    * and chip config. Even for samples == 1, but only on Vega12.
+    *
+    * CMASK slices are also non-contiguous with TC-compatible CMASK on GFX8, but that's fine because
+    * we can still use TC-incompatible CMASK on GFX8, whose slices are always contiguous.
+    */
+   if (pdev->info.gfx_level == GFX9 && image->vk.array_layers > 1 &&
+       image->vk.usage & VK_IMAGE_USAGE_2_COLOR_ATTACHMENT_BIT_KHR)
+      flags |= RADEON_SURF_REQUIRE_CONTIGUOUS_CMASK_SLICES;
+
    if (!radv_use_fmask_for_image(device, image))
       flags |= RADEON_SURF_NO_FMASK;
 
@@ -702,6 +728,9 @@ radv_get_surface_flags(struct radv_device *device, struct radv_image *image, uns
    if (image->vk.usage & VK_IMAGE_USAGE_2_HOST_TRANSFER_BIT_KHR)
       flags |= RADEON_SURF_HOST_TRANSFER | RADEON_SURF_NO_FMASK | RADEON_SURF_NO_HTILE |
                (pdev->info.gfx_level < GFX12 ? RADEON_SURF_DISABLE_DCC : 0);
+
+   if (image->vk.samples > 1 && radv_use_tc_compat_cmask_early(device, image))
+      flags |= RADEON_SURF_TC_COMPATIBLE_CMASK;
 
    return flags;
 }
@@ -1267,7 +1296,7 @@ radv_image_create_layout(struct radv_device *device, struct radv_image_create_in
       image->planes[plane].format = radv_image_get_plane_format(pdev, image, plane);
    }
 
-   image->tc_compatible_cmask = radv_image_has_cmask(image) && radv_use_tc_compat_cmask_for_image(device, image);
+   image->tc_compatible_cmask = radv_image_has_cmask(image) && radv_use_tc_compat_cmask_late(device, image);
 
    if (pdev->info.gfx_level >= GFX10 && pdev->info.gfx_level < GFX12)
       radv_image_init_first_mip_pipe_misaligned(device, image);
@@ -2014,4 +2043,30 @@ radv_GetImageOpaqueCaptureDataEXT(VkDevice device, uint32_t imageCount, const Vk
    }
 
    return VK_SUCCESS;
+}
+
+void
+radv_image_get_cmask_clear_copy_buffer_range(const struct radv_image *image, unsigned z, unsigned layer_count,
+                                             uint64_t *offset, uint64_t *size)
+{
+   const unsigned slice_size = image->planes[0].surface.cmask_slice_size;
+   const unsigned slices_per_group = image->planes[0].surface.cmask_slices_per_group;
+   const uint64_t cmask_offset_layer0 = image->planes[0].surface.cmask_offset;
+   const unsigned cmask_size = image->planes[0].surface.cmask_size;
+   /* Note: This is needed even if the image has only 1 layer because a CMASK slice can have holes
+    * reserved for other slices.
+    */
+   const bool return_remainder = slices_per_group > 1 && z + layer_count == image->vk.array_layers;
+
+   /* Slices can only be copied in groups of "cmask_slices_per_group" slices except the last group. */
+   const bool ranged_clear_valid = !(z % slices_per_group) && (return_remainder || !(layer_count % slices_per_group));
+   assert(ranged_clear_valid);
+
+   const uint64_t slice_offset = slice_size * z;
+   *offset = cmask_offset_layer0 + slice_offset;
+
+   /* If we clear the last layer, we should clear the whole remainder of CMASK because slice_size is unusable
+    * if the layer count is not aligned to cmask_slices_per_group.
+    */
+   *size = return_remainder ? cmask_size - slice_offset : slice_size * layer_count;
 }

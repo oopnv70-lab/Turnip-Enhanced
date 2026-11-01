@@ -658,7 +658,7 @@ can_use_opsel(amd_gfx_level gfx_level, aco_opcode op, int idx)
 }
 
 bool
-can_write_m0(const aco_ptr<Instruction>& instr)
+can_write_m0(const Instruction* instr)
 {
    if (instr->isSALU())
       return true;
@@ -1246,13 +1246,6 @@ get_vcmpx(aco_opcode op)
 {
    CmpInfo info;
    return get_cmp_info(op, &info) ? info.vcmpx : aco_opcode::num_opcodes;
-}
-
-bool
-is_cmpx(aco_opcode op)
-{
-   CmpInfo info;
-   return !get_cmp_info(op, &info);
 }
 
 aco_opcode

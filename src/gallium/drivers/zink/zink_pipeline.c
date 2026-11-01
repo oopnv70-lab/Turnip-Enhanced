@@ -38,6 +38,32 @@
 
 #define GFX_INPUT_MESH 32
 
+/* the device-wide robustness features are off when pipeline robustness is used: pipelines are
+ * robust once any robust context exists on the screen, and otherwise explicitly ask for none
+ * so a driver's default behavior doesn't apply
+ */
+static void
+set_pipeline_robustness(const struct zink_screen *screen, VkPipelineRobustnessCreateInfo *rb, const void **pnext)
+{
+   if (!screen->info.have_EXT_pipeline_robustness)
+      return;
+   const bool robust = screen->has_robust_ctx;
+   const VkPipelineRobustnessBufferBehavior buffers = robust ?
+      VK_PIPELINE_ROBUSTNESS_BUFFER_BEHAVIOR_ROBUST_BUFFER_ACCESS :
+      VK_PIPELINE_ROBUSTNESS_BUFFER_BEHAVIOR_DISABLED;
+   *rb = (VkPipelineRobustnessCreateInfo){
+      .sType = VK_STRUCTURE_TYPE_PIPELINE_ROBUSTNESS_CREATE_INFO,
+      .storageBuffers = buffers,
+      .uniformBuffers = buffers,
+      .vertexInputs = buffers,
+      .images = !robust ? VK_PIPELINE_ROBUSTNESS_IMAGE_BEHAVIOR_DISABLED :
+                screen->robustness & ZINK_ROBUSTNESS_IMAGE2 ?
+                VK_PIPELINE_ROBUSTNESS_IMAGE_BEHAVIOR_ROBUST_IMAGE_ACCESS_2 :
+                VK_PIPELINE_ROBUSTNESS_IMAGE_BEHAVIOR_ROBUST_IMAGE_ACCESS,
+   };
+   *pnext = rb;
+}
+
 VkPipeline
 zink_create_gfx_pipeline(struct zink_screen *screen,
                          struct zink_gfx_program *prog,
@@ -390,6 +416,7 @@ zink_create_gfx_pipeline(struct zink_screen *screen,
 
    VkPipelineShaderStageCreateInfo shader_stages[MESA_SHADER_MESH_STAGES];
    VkShaderModuleCreateInfo smci[MESA_SHADER_MESH_STAGES] = {0};
+   VkPipelineRobustnessCreateInfo rb;
    uint32_t num_stages = 0;
    for (int i = 0; i < MESA_SHADER_MESH_STAGES; ++i) {
       if (!(prog->stages_present & BITFIELD_BIT(i)))
@@ -399,10 +426,12 @@ zink_create_gfx_pipeline(struct zink_screen *screen,
       stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
       stage.stage = mesa_to_vk_shader_stage(i);
       stage.pName = "main";
+      set_pipeline_robustness(screen, &rb, &stage.pNext);
       if (objs[i].mod) {
          stage.module = objs[i].mod;
       } else {
          smci[i].sType = VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO;
+         smci[i].pNext = stage.pNext;
          stage.pNext = &smci[i];
          smci[i].codeSize = objs[i].spirv->num_words * sizeof(uint32_t);
          smci[i].pCode = objs[i].spirv->words;
@@ -438,11 +467,13 @@ zink_create_compute_pipeline(struct zink_screen *screen, struct zink_compute_pro
    if (zink_descriptor_mode == ZINK_DESCRIPTOR_MODE_DB)
       pci.flags |= VK_PIPELINE_CREATE_DESCRIPTOR_BUFFER_BIT_EXT;
 
+   VkPipelineRobustnessCreateInfo rb;
    VkPipelineShaderStageCreateInfo stage = {0};
    stage.sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_CREATE_INFO;
    stage.stage = VK_SHADER_STAGE_COMPUTE_BIT;
    stage.module = comp->curr->obj.mod;
    stage.pName = "main";
+   set_pipeline_robustness(screen, &rb, &stage.pNext);
 
    VkSpecializationInfo sinfo = {0};
    VkSpecializationMapEntry me[4];
@@ -486,6 +517,7 @@ zink_create_compute_pipeline(struct zink_screen *screen, struct zink_compute_pro
    /* pin the subgroup size whenever the driver can't tell us on compute kernels. */
    VkPipelineShaderStageRequiredSubgroupSizeCreateInfo subInfo = {
       .sType = VK_STRUCTURE_TYPE_PIPELINE_SHADER_STAGE_REQUIRED_SUBGROUP_SIZE_CREATE_INFO,
+      .pNext = stage.pNext
    };
    if (comp->shader->info.stage == MESA_SHADER_KERNEL &&
        screen->info.feats13.subgroupSizeControl &&
@@ -640,11 +672,13 @@ zink_create_gfx_pipeline_input(struct zink_screen *screen,
                                const uint8_t *binding_map,
                                VkPrimitiveTopology primitive_topology)
 {
+   VkPipelineRobustnessCreateInfo rb;
    VkGraphicsPipelineLibraryCreateInfoEXT gplci = {
       VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_LIBRARY_CREATE_INFO_EXT,
       NULL,
       VK_GRAPHICS_PIPELINE_LIBRARY_VERTEX_INPUT_INTERFACE_BIT_EXT
    };
+   set_pipeline_robustness(screen, &rb, &gplci.pNext);
 
    VkPipelineVertexInputStateCreateInfo vertex_input_state;
    memset(&vertex_input_state, 0, sizeof(vertex_input_state));
@@ -745,7 +779,7 @@ zink_create_mesh_pipeline_input(struct zink_screen *screen)
 }
 
 static VkPipeline
-create_gfx_pipeline_library(struct zink_screen *screen, struct zink_shader_object *objs, unsigned stage_mask, VkPipelineLayout layout, VkPipelineCache pipeline_cache)
+create_gfx_pipeline_library(struct zink_screen *screen, const struct zink_shader_object *objs, unsigned stage_mask, VkPipelineLayout layout, VkPipelineCache pipeline_cache)
 {
    assert(screen->info.have_EXT_extended_dynamic_state && screen->info.have_EXT_extended_dynamic_state2);
    VkPipelineRenderingCreateInfo rendering_info;
@@ -847,6 +881,7 @@ create_gfx_pipeline_library(struct zink_screen *screen, struct zink_shader_objec
       tdci.domainOrigin = VK_TESSELLATION_DOMAIN_ORIGIN_LOWER_LEFT;
    }
 
+   VkPipelineRobustnessCreateInfo rb;
    VkPipelineShaderStageCreateInfo shader_stages[MESA_SHADER_MESH_STAGES];
    uint32_t num_stages = 0;
    for (int i = 0; i < MESA_SHADER_MESH_STAGES; ++i) {
@@ -858,6 +893,7 @@ create_gfx_pipeline_library(struct zink_screen *screen, struct zink_shader_objec
       stage.stage = mesa_to_vk_shader_stage(i);
       stage.module = objs[i].mod;
       stage.pName = "main";
+      set_pipeline_robustness(screen, &rb, &stage.pNext);
       shader_stages[num_stages++] = stage;
    }
    assert(num_stages > 0);
@@ -885,10 +921,10 @@ create_gfx_pipeline_library(struct zink_screen *screen, struct zink_shader_objec
 }
 
 VkPipeline
-zink_create_gfx_pipeline_library(struct zink_screen *screen, struct zink_gfx_program *prog)
+zink_create_gfx_pipeline_library(struct zink_screen *screen, struct zink_gfx_program *prog, const struct zink_shader_object *objs)
 {
    u_rwlock_wrlock(&prog->base.pipeline_cache_lock);
-   VkPipeline pipeline = create_gfx_pipeline_library(screen, prog->objs, prog->stages_present, prog->base.layout, prog->base.pipeline_cache);
+   VkPipeline pipeline = create_gfx_pipeline_library(screen, objs, prog->stages_present, prog->base.layout, prog->base.pipeline_cache);
    u_rwlock_wrunlock(&prog->base.pipeline_cache_lock);
    return pipeline;
 }

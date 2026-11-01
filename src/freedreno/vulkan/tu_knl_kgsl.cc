@@ -34,6 +34,21 @@
 /* ION_HEAP(ION_SYSTEM_HEAP_ID) */
 #define KGSL_ION_SYSTEM_HEAP_MASK (1u << 25)
 
+/*
+ * tu_get_submitqueue_priority() maps Vulkan priorities to four abstract
+ * levels ordered from highest to lowest.  KGSL exposes a four-bit context
+ * priority and groups it into four corresponding scheduling levels.
+ *
+ * Keep level 0 undefined: KGSL substitutes its default priority for it.  This
+ * is used by sparse queues and also avoids granting the unadvertised REALTIME
+ * priority.  The three advertised Vulkan levels map to separate KGSL bands.
+ */
+static constexpr uint32_t kgsl_context_priorities[] = {
+   KGSL_CONTEXT_PRIORITY_UNDEF,
+   4,  /* HIGH */
+   8,  /* MEDIUM */
+   12, /* LOW */
+};
 
 static int
 safe_ioctl(int fd, unsigned long request, void *arg)
@@ -50,10 +65,13 @@ safe_ioctl(int fd, unsigned long request, void *arg)
 static int
 kgsl_submitqueue_new(struct tu_device *dev, struct tu_queue *queue)
 {
+   if (queue->priority >= ARRAY_SIZE(kgsl_context_priorities))
+      return -EINVAL;
+
+   const uint32_t priority = kgsl_context_priorities[queue->priority];
    struct kgsl_drawctxt_create req = {
-      .flags = KGSL_CONTEXT_SAVE_GMEM |
-              KGSL_CONTEXT_NO_GMEM_ALLOC |
-              KGSL_CONTEXT_PREAMBLE,
+      .flags = KGSL_CONTEXT_SAVE_GMEM | KGSL_CONTEXT_NO_GMEM_ALLOC | KGSL_CONTEXT_PREAMBLE |
+               (KGSL_CONTEXT_TYPE_VK << KGSL_CONTEXT_TYPE_SHIFT) | (priority << KGSL_CONTEXT_PRIORITY_SHIFT),
    };
 
    int ret = safe_ioctl(dev->physical_device->local_fd, IOCTL_KGSL_DRAWCTXT_CREATE, &req);
@@ -1602,8 +1620,23 @@ kgsl_queue_submit(struct tu_queue *queue, void *_submit,
       VkResult result = kgsl_syncobj_merge(queue->device, wait_semaphores, wait_count + 1, &wait_sync);
       if (result != VK_SUCCESS)
          return result;
-      assert(wait_sync.state !=
-             KGSL_SYNCOBJ_STATE_UNSIGNALED); // Would wait forever
+      if (unlikely(wait_sync.state == KGSL_SYNCOBJ_STATE_UNSIGNALED)) {
+         kgsl_syncobj_destroy(&wait_sync);
+         kgsl_syncobj_destroy(&last_submit_sync);
+         return vk_device_set_lost(&queue->device->vk, "refusing to submit an unsignaled semaphore wait to KGSL");
+      }
+
+      /* Vulkan represents an already-signaled sync-file payload as fd -1,
+       * while Android EGL native-fence consumers require a real sync_file.
+       * Keep the no-op submission tied to this KGSL context so export can
+       * lazily materialize an immediately-signaled fence.  Timestamp zero is
+       * retired before the first submission on a KGSL context.
+       */
+      if (wait_sync.state == KGSL_SYNCOBJ_STATE_SIGNALED) {
+         wait_sync.state = KGSL_SYNCOBJ_STATE_TS;
+         wait_sync.queue = queue;
+         wait_sync.timestamp = 0;
+      }
 
       if (signal_count == 1) {
          /* Move instead of duplicating the syncobj, as we don't need to
@@ -1656,7 +1689,10 @@ kgsl_queue_submit(struct tu_queue *queue, void *_submit,
    result = kgsl_syncobj_merge(queue->device, wait_semaphores, wait_count, &wait_sync);
    if (result != VK_SUCCESS)
       return result;
-   assert(wait_sync.state != KGSL_SYNCOBJ_STATE_UNSIGNALED); // Would wait forever
+   if (unlikely(wait_sync.state == KGSL_SYNCOBJ_STATE_UNSIGNALED)) {
+      kgsl_syncobj_destroy(&wait_sync);
+      return vk_device_set_lost(&queue->device->vk, "refusing to submit an unsignaled semaphore wait to KGSL");
+   }
 
    if (u_trace_submission_data) {
       mtx_lock(&queue->device->kgsl_profiling_mutex);
@@ -1692,6 +1728,7 @@ kgsl_queue_submit(struct tu_queue *queue, void *_submit,
    struct kgsl_cmd_syncpoint_fence fn;
    struct kgsl_command_syncpoint sync = { 0 };
    bool has_sync = false;
+
    switch (wait_sync.state) {
    case KGSL_SYNCOBJ_STATE_SIGNALED:
       break;
@@ -2040,8 +2077,8 @@ tu_knl_kgsl_load(struct tu_instance *instance, int fd)
 
    device->has_raytracing = tu_kgsl_get_raytracing(fd);
 
-   device->submitqueue_priority_count = 1;
-   
+   device->submitqueue_priority_count = ARRAY_SIZE(kgsl_context_priorities);
+
    device->timeline_type = vk_sync_timeline_get_type(&vk_kgsl_sync_type);
 
    device->sync_types[0] = &vk_kgsl_sync_type;

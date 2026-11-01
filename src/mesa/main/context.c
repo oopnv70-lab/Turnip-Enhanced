@@ -390,7 +390,6 @@ _mesa_init_constants(struct gl_constants *consts, gl_api api)
    consts->MaxTextureLodBias = MAX_TEXTURE_LOD_BIAS;
    consts->MaxTextureBufferSize = 65536;
    consts->TextureBufferOffsetAlignment = 1;
-   consts->MaxArrayLockSize = MAX_ARRAY_LOCK_SIZE;
    consts->SubPixelBits = SUB_PIXEL_BITS;
    consts->MinPointSize = MIN_POINT_SIZE;
    consts->MaxPointSize = MAX_POINT_SIZE;
@@ -403,9 +402,6 @@ _mesa_init_constants(struct gl_constants *consts, gl_api api)
    consts->MaxLineWidthAA = MAX_LINE_WIDTH;
    consts->LineWidthGranularity = (GLfloat) LINE_WIDTH_GRANULARITY;
    consts->MaxClipPlanes = 6;
-   consts->MaxLights = MAX_LIGHTS;
-   consts->MaxShininess = 128.0;
-   consts->MaxSpotExponent = 128.0;
    consts->MaxViewportWidth = 16384;
    consts->MaxViewportHeight = 16384;
    consts->MinMapBufferAlignment = 64;
@@ -434,9 +430,6 @@ _mesa_init_constants(struct gl_constants *consts, gl_api api)
 
    for (i = 0; i < MESA_SHADER_MESH_STAGES; i++)
       init_program_limits(consts, i, &consts->Program[i]);
-
-   consts->MaxProgramMatrices = MAX_PROGRAM_MATRICES;
-   consts->MaxProgramMatrixStackDepth = MAX_PROGRAM_MATRIX_STACK_DEPTH;
 
    /* Set the absolute minimum possible GLSL version.  API_OPENGL_CORE can
     * mean an OpenGL 3.0 forward-compatible context, so that implies a minimum
@@ -530,7 +523,6 @@ _mesa_init_constants(struct gl_constants *consts, gl_api api)
 
    /* GL_ARB_vertex_attrib_binding */
    consts->MaxVertexAttribRelativeOffset = 2047;
-   consts->MaxVertexAttribBindings = MAX_VERTEX_GENERIC_ATTRIBS;
 
    /* GL_ARB_compute_shader */
    consts->MaxComputeWorkGroupCount[0] = 65535;
@@ -550,12 +542,9 @@ _mesa_init_constants(struct gl_constants *consts, gl_api api)
    consts->ContextReleaseBehavior = GL_CONTEXT_RELEASE_BEHAVIOR_FLUSH;
 
    /** GL_ARB_tessellation_shader */
-   consts->MaxTessGenLevel = MAX_TESS_GEN_LEVEL;
-   consts->MaxPatchVertices = MAX_PATCH_VERTICES;
    consts->Program[MESA_SHADER_TESS_CTRL].MaxTextureImageUnits = MAX_TEXTURE_IMAGE_UNITS;
    consts->Program[MESA_SHADER_TESS_EVAL].MaxTextureImageUnits = MAX_TEXTURE_IMAGE_UNITS;
    consts->MaxTessPatchComponents = MAX_TESS_PATCH_COMPONENTS;
-   consts->MaxTessControlTotalOutputComponents = MAX_TESS_CONTROL_TOTAL_OUTPUT_COMPONENTS;
    consts->PrimitiveRestartForPatches = false;
 
    /** GL_ARB_compute_variable_group_size */

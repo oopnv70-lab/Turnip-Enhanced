@@ -1288,11 +1288,11 @@ is_same_type_reg(struct ir3_register *dst, struct ir3_register *src)
 }
 
 /* Is it a non-transformative (ie. not type changing) mov?  This can
- * also include absneg.s/absneg.f, which for the most part can be
- * treated as a mov (single src argument).
+ * also include absneg.s/absneg.f/not.b, which for the most part can be
+ * treated as a mov (single src argument) with source modifiers.
  */
 static inline bool
-is_same_type_mov(struct ir3_instruction *instr)
+is_same_type_mov(struct ir3_instruction *instr, bool allow_src_mods)
 {
    struct ir3_register *dst;
 
@@ -1300,25 +1300,27 @@ is_same_type_mov(struct ir3_instruction *instr)
    case OPC_MOV:
       if (instr->cat1.src_type != instr->cat1.dst_type)
          return false;
-      /* If the type of dest reg and src reg are different,
-       * it shouldn't be considered as same type mov
-       */
-      if (!is_same_type_reg(instr->dsts[0], instr->srcs[0]))
-         return false;
       break;
    case OPC_ABSNEG_F:
    case OPC_ABSNEG_S:
+      if (!allow_src_mods)
+         return false;
       if (instr->flags & IR3_INSTR_SAT)
          return false;
-      /* If the type of dest reg and src reg are different,
-       * it shouldn't be considered as same type mov
-       */
-      if (!is_same_type_reg(instr->dsts[0], instr->srcs[0]))
+      break;
+   case OPC_NOT_B:
+      if (!allow_src_mods)
          return false;
       break;
    default:
       return false;
    }
+
+   /* If the type of dest reg and src reg are different,
+    * it shouldn't be considered as same type mov
+    */
+   if (!is_same_type_reg(instr->dsts[0], instr->srcs[0]))
+      return false;
 
    dst = instr->dsts[0];
 
@@ -1902,7 +1904,8 @@ ir3_cat2_int(opc_t opc)
 }
 
 /* map cat2 instruction to valid abs/neg flags: */
-unsigned ir3_cat2_absneg(opc_t opc);
+unsigned ir3_cat2_absneg(struct ir3_compiler *compiler, opc_t opc,
+                         unsigned src_n);
 
 /* map cat3 instructions to valid abs/neg flags: */
 unsigned ir3_cat3_absneg(struct ir3_compiler *compiler, opc_t opc,
@@ -3173,11 +3176,14 @@ INSTR2NODST(STC)
 INSTR2NODST(STSC)
 INSTR2(SHFL)
 #ifndef GPU
+#elif GPU >= 500
+INSTR5(LDG_A);
+INSTR6NODST(STG_A);
+#endif
+#ifndef GPU
 #elif GPU >= 600
 INSTR4NODST(STIB);
 INSTR3(LDIB);
-INSTR5(LDG_A);
-INSTR6NODST(STG_A);
 INSTR2(ATOMIC_G_ADD)
 INSTR2(ATOMIC_G_SUB)
 INSTR2(ATOMIC_G_XCHG)

@@ -341,7 +341,7 @@ static inline struct v3d_varying_slot
 v3d_slot_from_slot_and_component(uint8_t slot, uint8_t component)
 {
         assert(slot < 255 / 4);
-        return (struct v3d_varying_slot){ (uint8_t)((slot << 2) + component) };
+        return (struct v3d_varying_slot){ (slot << 2) + component };
 }
 
 static inline uint8_t v3d_slot_get_slot(struct v3d_varying_slot slot)
@@ -645,7 +645,13 @@ struct v3d_compile {
         struct v3d_interp_input *interp;
         struct qreg *outputs;
         bool msaa_per_sample_output;
+
+        /* Cache of TLB color and Depth/Stencil reads, should the shader have any.
+         * For Color, we have a vec4 per sample for each possible RT.
+         * For Depth/Stencil, we have a depth and stencil scalar per sample.
+         */
         struct qreg color_reads[V3D_MAX_DRAW_BUFFERS * V3D_MAX_SAMPLES * 4];
+        struct qreg ds_reads[2 * V3D_MAX_SAMPLES];
         struct qreg sample_colors[V3D_MAX_DRAW_BUFFERS * V3D_MAX_SAMPLES * 4];
         uint32_t inputs_array_size;
         uint32_t outputs_array_size;
@@ -1208,10 +1214,11 @@ bool v3d_nir_lower_algebraic(struct nir_shader *shader, const struct v3d_compile
 bool v3d_nir_lower_tlb_loads(nir_shader *s, struct v3d_compile *c);
 bool v3d_nir_lower_blend(nir_shader *s, struct v3d_compile *c);
 
-nir_def *v3d_nir_get_tlb_color(nir_builder *b, struct v3d_compile *c, int rt,
+nir_def *v3d_nir_get_tlb_color(nir_builder *b, int rt,
                                int sample, unsigned component,
                                unsigned num_components);
-
+nir_def *v3d_nir_get_tlb_depth_stencil(nir_builder *b, nir_io_semantics sem,
+                                       unsigned sample);
 void v3d_vir_emit_tex(struct v3d_compile *c, nir_tex_instr *instr);
 void v3d_vir_emit_image_load_store(struct v3d_compile *c,
                                    nir_intrinsic_instr *instr);
@@ -1536,7 +1543,7 @@ vir_UMUL(struct v3d_compile *c, struct qreg src0, struct qreg src1)
 }
 
 static inline struct qreg
-vir_TLBU_COLOR_READ(struct v3d_compile *c, uint32_t config)
+vir_TLBU_READ(struct v3d_compile *c, uint32_t config)
 {
         assert((config & 0xffffff00) == 0xffffff00);
 
@@ -1548,7 +1555,7 @@ vir_TLBU_COLOR_READ(struct v3d_compile *c, uint32_t config)
 }
 
 static inline struct qreg
-vir_TLB_COLOR_READ(struct v3d_compile *c)
+vir_TLB_READ(struct v3d_compile *c)
 {
         struct qinst *ldtlb = vir_add_inst(V3D_QPU_A_NOP, c->undef,
                                            c->undef, c->undef);

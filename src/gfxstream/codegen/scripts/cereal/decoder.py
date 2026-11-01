@@ -345,17 +345,22 @@ def emit_dispatch_call(api, cgen):
     decodingParams = DecodingParameters(api)
 
     customParams = []
+    capturedParams = []
 
     delay = api.name in DELAYED_DECODER_DELETES
 
     for i, p in enumerate(api.parameters):
+        if delay and p.accessibleAsPointer():
+            customParams.append("nullptr")
+            continue
         customParam = p.paramName
         if decodingParams.params[i].dispatchHandle:
             customParam = "unboxed_%s" % p.paramName
         customParams.append(customParam)
+        capturedParams.append(customParam)
 
     if delay:
-        cgen.line("std::function<void()> delayed_remove_callback = [vk, %s]() {" % ", ".join(customParams))
+        cgen.line("std::function<void()> delayed_remove_callback = [vk, %s]() {" % ", ".join(capturedParams))
 
     if api.name in driver_workarounds_global_lock_apis:
         if delay:
@@ -386,13 +391,15 @@ def emit_dispatch_call(api, cgen):
 def emit_global_state_wrapped_call(api, cgen, context):
     # Delayed deletes will call wrapped call with a callback without pool or snapshot info
     delay = api.name in DELAYED_DECODER_DELETES
-    coreCustomParams = list(map(lambda p: p.paramName, api.parameters))
 
     if delay:
-        cgen.line("std::function<void()> delayed_remove_callback = [vk, %s]() {" % ", ".join(coreCustomParams))
+        capturedParams = [p.paramName for p in api.parameters if not p.accessibleAsPointer()]
+        coreCustomParams = ["nullptr" if p.accessibleAsPointer() else p.paramName for p in api.parameters]
+        cgen.line("std::function<void()> delayed_remove_callback = [vk, %s]() {" % ", ".join(capturedParams))
         cgen.stmt("auto m_state = VkDecoderGlobalState::get()")
         customParams = ["nullptr", "kInvalidSnapshotApiCallHandle"] + coreCustomParams
     else:
+        coreCustomParams = list(map(lambda p: p.paramName, api.parameters))
         customParams = ["&m_pool", SNAPSHOT_API_CALL_HANDLE_VARNAME] + coreCustomParams
 
     if context:
@@ -768,7 +775,11 @@ custom_decodes = {
     "vkAllocateMemory" : emit_global_state_wrapped_decoding,
     "vkFreeMemory" : emit_global_state_wrapped_decoding,
     "vkMapMemory" : emit_global_state_wrapped_decoding,
+    "vkMapMemory2" : emit_global_state_wrapped_decoding,
+    "vkMapMemory2KHR" : emit_global_state_wrapped_decoding,
     "vkUnmapMemory" : emit_global_state_wrapped_decoding,
+    "vkMapMemory2" : emit_global_state_wrapped_decoding,
+    "vkMapMemory2KHR" : emit_global_state_wrapped_decoding,
     "vkFlushMappedMemoryRanges" : decode_vkFlushMappedMemoryRanges,
     "vkInvalidateMappedMemoryRanges" : decode_vkInvalidateMappedMemoryRanges,
 
@@ -776,6 +787,7 @@ custom_decodes = {
     "vkCmdExecuteCommands" : emit_global_state_wrapped_decoding,
     "vkQueueSubmit" : emit_global_state_wrapped_decoding,
     "vkQueueSubmit2" : emit_global_state_wrapped_decoding,
+    "vkQueueSubmit2KHR" : emit_global_state_wrapped_decoding,
     "vkQueueWaitIdle" : emit_global_state_wrapped_decoding,
     "vkBeginCommandBuffer" : emit_global_state_wrapped_decoding_with_context,
     "vkEndCommandBuffer" : emit_global_state_wrapped_decoding_with_context,
@@ -786,6 +798,7 @@ custom_decodes = {
     "vkResetCommandPool" : emit_global_state_wrapped_decoding,
     "vkCmdPipelineBarrier" : emit_global_state_wrapped_decoding,
     "vkCmdPipelineBarrier2" : emit_global_state_wrapped_decoding,
+    "vkCmdPipelineBarrier2KHR" : emit_global_state_wrapped_decoding,
     "vkCmdWaitEvents" : emit_global_state_wrapped_decoding,
     "vkCmdWaitEvents2" : emit_global_state_wrapped_decoding,
     "vkCmdWaitEvents2KHR" : emit_global_state_wrapped_decoding,
@@ -992,7 +1005,8 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
             if (seqnoPtr && !m_forSnapshotLoad) {
                 {
                     while ((seqno - seqnoPtr->load(std::memory_order_seq_cst) != 1)) {
-                        if (shouldExit.load(std::memory_order_relaxed)) {
+                        if (shouldExit.load(std::memory_order_relaxed) ||
+                            (processResources && processResources->isGuestProcessDead())) {
                             GFXSTREAM_WARNING("Process=%s is exitting. Skip processing seqno=%d on thread=0x%x.",
                                  processName ? processName : "null", seqno, gfxstream::base::getCurrentThreadId());
                             return 0;

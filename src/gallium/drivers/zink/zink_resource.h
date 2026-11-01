@@ -46,6 +46,16 @@ zink_resource_image_hic_transition(struct zink_screen *screen, struct zink_resou
 
 bool
 zink_screen_resource_init(struct pipe_screen *pscreen);
+void
+zink_resource_struct_pools_init(struct zink_screen *screen);
+void
+zink_resource_struct_pools_deinit(struct zink_screen *screen);
+#define ZINK_OBJ_CACHE_MAX_BYTES (256 * 1024 * 1024)
+/* the byte limit is also capped to this fraction of device memory */
+#define ZINK_OBJ_CACHE_MEM_DIV 64
+
+unsigned
+zink_resource_object_cache_release(struct zink_screen *screen);
 
 void
 zink_context_resource_init(struct pipe_context *pctx);
@@ -109,6 +119,12 @@ zink_resource_copies_reset(struct zink_resource *res);
 #include "zink_batch.h"
 #include "zink_bo.h"
 #include "zink_kopper.h"
+
+static inline bool
+zink_resource_has_bindless(const struct zink_resource *res)
+{
+   return res->bindless[0] || res->bindless[1];
+}
 
 static ALWAYS_INLINE bool
 zink_resource_usage_is_unflushed(const struct zink_resource *res)

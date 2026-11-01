@@ -110,7 +110,7 @@ _libkraid_proc_macros_rs = rust.proc_macro(
 
 _libkraid_rust_args = [
   panfrost_rust_args,
-  '--cfg', 'kraid_isa_xml_path="' + meson.current_source_dir() + '"',
+  '--cfg', 'kraid_isa_xml_path="' + meson.current_source_dir() / 'isa-v9-v14.xml"',
   # Otherwise, rustc trips up on -pthread
   '-Clink-arg=-Wno-unused-command-line-argument',
 ]
@@ -180,7 +180,7 @@ endif
 
 # TODO: Linking Rust executables (such as unit tests) doesn't play nicely
 # with the sanitizers because meson doesn't know to pass -fsanitize to the
-# Rust linker.  See also https://github.com/mesonbuild/meson/issues/11741
+# Rust linker.  See also https://github.com/mesonbuild/meson/issues/15222
 if with_tests and get_option('b_sanitize') == 'none' and not with_platform_android
   subdir('hw_runner')
 
