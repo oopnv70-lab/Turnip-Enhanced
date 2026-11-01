@@ -431,6 +431,15 @@ jay_emit_alu(struct nir_to_jay_state *nj, nir_alu_instr *alu)
       jay_##jay_op(b, type, dst, src[0], src[1]);                              \
       break;
 
+/* HW masks non-64-bit shift counts with 31.  NIR assumes mask is bit_size-1. */
+#define SHIFT(nir, jay_op)                                                     \
+   case nir_op_##nir: {                                                        \
+      jay_def count = alu->def.bit_size >= 32 ?                                \
+         src[1] : jay_AND_u16(b, src[1], alu->def.bit_size - 1);               \
+      jay_##jay_op(b, type, dst, src[0], count);                               \
+      break;                                                                   \
+   }
+
 #define DP4A(nir, jay_op, sat_)                                                \
    case nir_op_##nir:                                                          \
       jay_DP4A_##jay_op(b, dst, src[2], src[0], src[1])->saturate = sat_;      \
@@ -479,9 +488,6 @@ jay_emit_alu(struct nir_to_jay_state *nj, nir_alu_instr *alu)
       BINOP(fmul, MUL)
       BINOP(imul_32x16, MUL_32X16)
       BINOP(umul_32x16, MUL_32X16)
-      BINOP(ishl, SHL)
-      BINOP(ishr, ASR)
-      BINOP(ushr, SHR)
       BINOP(urol, ROL)
       BINOP(uror, ROR)
       BINOP(urhadd, AVG)
@@ -489,6 +495,10 @@ jay_emit_alu(struct nir_to_jay_state *nj, nir_alu_instr *alu)
       BINOP(iand, AND)
       BINOP(ior, OR)
       BINOP(ixor, XOR)
+
+      SHIFT(ishl, SHL)
+      SHIFT(ishr, ASR)
+      SHIFT(ushr, SHR)
 
       DP4A(sdot_4x8_iadd, SS, false)
       DP4A(sdot_4x8_iadd_sat, SS, true)
@@ -501,6 +511,7 @@ jay_emit_alu(struct nir_to_jay_state *nj, nir_alu_instr *alu)
 #undef UNOP
 #undef UNOP_UNTYPED
 #undef BINOP
+#undef SHIFT
 #undef DP4A
 
    case nir_op_imul:
@@ -1035,6 +1046,12 @@ jay_emit_derivative(jay_builder *b,
 {
    assert(intr->def.bit_size == 32 && "todo");
    jay_def val = nj_src(intr->src[0]);
+
+   /* Keep x - x for NaNs and Infs. */
+   if (jay_is_uniform(val)) {
+      jay_ADD(b, JAY_TYPE_F32, dst, val, jay_negate(val));
+      return;
+   }
 
    /* dFdyfine gets split down to SIMD4 which requires UGPR vector temporaries
     * for correctness (to get NoMask in non-uniform control flow).
@@ -2117,9 +2134,13 @@ jay_emit_btd_ops(struct nir_to_jay_state *nj, nir_intrinsic_instr *instr)
     *    "When this bit is set in the header, Trace Ray Message behaves like
     *    a Ray Query. This message requires a write-back message indicating
     *    RayQuery for all valid Rays (SIMD lanes) have completed."
+    *
+    * Note that writeback ignores channel masking, so we need a UGPR vector
+    * destination for correctness with divergent control flow.
     */
    jay_def notif = synchronous ?
-      nj_def(&instr->def) : jay_null();
+                      jay_alloc_def(&nj->bld, UGPR, jay_ugpr_per_gpr(s)) :
+                      jay_null();
 
    switch (instr->intrinsic) {
    case nir_intrinsic_trace_ray_intel: {
@@ -2157,6 +2178,7 @@ jay_emit_btd_ops(struct nir_to_jay_state *nj, nir_intrinsic_instr *instr)
    if (synchronous) {
       assert(instr->intrinsic == nir_intrinsic_trace_ray_intel);
       jay_SCHEDULE_BARRIER(&nj->bld);
+      jay_MOV(&nj->bld, nj_def(&instr->def), notif);
    }
 }
 

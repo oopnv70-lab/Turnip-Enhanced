@@ -1830,7 +1830,80 @@ v3dX(cmd_buffer_emit_varyings_state)(struct v3dv_cmd_buffer *cmd_buffer)
    }
 }
 
-#if V3D_VERSION == 42
+/* Decides, once per job, whether EZ must be disabled for the entire job based
+ * on state that doesn't depend on the current draw or pipeline. Returns false
+ * if EZ ends up disabled.
+ */
+static bool
+cmd_buffer_decide_global_ez_enable(struct v3dv_cmd_buffer *cmd_buffer)
+{
+   struct v3dv_job *job = cmd_buffer->state.job;
+   assert(job);
+   assert(!job->decided_global_ez_enable);
+   job->decided_global_ez_enable = true;
+
+   struct v3dv_cmd_buffer_state *state = &cmd_buffer->state;
+   assert(state->subpass_idx < state->pass->subpass_count);
+   struct v3dv_subpass *subpass = &state->pass->subpasses[state->subpass_idx];
+   if (subpass->ds_attachment == VK_ATTACHMENT_UNUSED) {
+      job->first_ez_state = V3D_EZ_DISABLED;
+      job->ez_state = V3D_EZ_DISABLED;
+      return false;
+   }
+
+   /* GFXH-1918: the early-z buffer may load incorrect depth values if the
+    * frame has odd width or height, or if the buffer is 16-bit and
+    * multisampled.
+    *
+    * So we need to disable EZ in these cases.
+    */
+   const struct v3dv_render_pass_attachment *ds_attachment =
+      &state->pass->attachments[subpass->ds_attachment];
+
+   const VkImageAspectFlags ds_aspects =
+      vk_format_aspects(ds_attachment->desc.format);
+
+   bool needs_depth_load =
+      v3dv_cmd_buffer_check_needs_load(state,
+                                       ds_aspects & VK_IMAGE_ASPECT_DEPTH_BIT,
+                                       ds_attachment->first_subpass,
+                                       ds_attachment->desc.loadOp,
+                                       ds_attachment->last_subpass,
+                                       ds_attachment->desc.storeOp);
+
+   if (needs_depth_load) {
+      if (ds_attachment->desc.format == VK_FORMAT_D16_UNORM &&
+          ds_attachment->desc.samples != VK_SAMPLE_COUNT_1_BIT) {
+         perf_debug("Loading depth aspect from a multisampled 16-bit "
+                    "depth buffer disables early-Z tests.\n");
+         job->first_ez_state = V3D_EZ_DISABLED;
+         job->ez_state = V3D_EZ_DISABLED;
+         return false;
+      }
+
+      struct v3dv_framebuffer *fb = state->framebuffer;
+
+      if (!fb) {
+         assert(cmd_buffer->vk.level == VK_COMMAND_BUFFER_LEVEL_SECONDARY);
+         perf_debug("Loading depth aspect in a secondary command buffer "
+                    "without framebuffer info disables early-z tests.\n");
+         job->first_ez_state = V3D_EZ_DISABLED;
+         job->ez_state = V3D_EZ_DISABLED;
+         return false;
+      }
+
+      if (((fb->width % 2) != 0 || (fb->height % 2) != 0)) {
+         perf_debug("Loading depth aspect for framebuffer with odd width "
+                    "or height disables early-Z tests.\n");
+         job->first_ez_state = V3D_EZ_DISABLED;
+         job->ez_state = V3D_EZ_DISABLED;
+         return false;
+      }
+   }
+
+   return true;
+}
+
 /* Updates cmd_buffer, and their job, early z state tracking. Returns false if
  * EZ must be disabled for the current draw call.
  */
@@ -1885,67 +1958,9 @@ cmd_buffer_update_ez_state(struct v3dv_cmd_buffer *cmd_buffer,
     * job (based on state that is not related to the current draw call and
     * pipeline/cmd_buffer state).
     */
-   if (!job->decided_global_ez_enable) {
-      job->decided_global_ez_enable = true;
-
-      struct v3dv_cmd_buffer_state *state = &cmd_buffer->state;
-      assert(state->subpass_idx < state->pass->subpass_count);
-      struct v3dv_subpass *subpass = &state->pass->subpasses[state->subpass_idx];
-      if (subpass->ds_attachment == VK_ATTACHMENT_UNUSED) {
-         job->first_ez_state = V3D_EZ_DISABLED;
-         job->ez_state = V3D_EZ_DISABLED;
-         return false;
-      }
-
-      /* GFXH-1918: the early-z buffer may load incorrect depth values if the
-       * frame has odd width or height, or if the buffer is 16-bit and
-       * multisampled.
-       *
-       * So we need to disable EZ in these cases.
-       */
-      const struct v3dv_render_pass_attachment *ds_attachment =
-         &state->pass->attachments[subpass->ds_attachment];
-
-      const VkImageAspectFlags ds_aspects =
-         vk_format_aspects(ds_attachment->desc.format);
-
-      bool needs_depth_load =
-         v3dv_cmd_buffer_check_needs_load(state,
-                                          ds_aspects & VK_IMAGE_ASPECT_DEPTH_BIT,
-                                          ds_attachment->first_subpass,
-                                          ds_attachment->desc.loadOp,
-                                          ds_attachment->last_subpass,
-                                          ds_attachment->desc.storeOp);
-
-      if (needs_depth_load) {
-         if (ds_attachment->desc.format == VK_FORMAT_D16_UNORM &&
-             ds_attachment->desc.samples != VK_SAMPLE_COUNT_1_BIT) {
-            perf_debug("Loading depth aspect from a multisampled 16-bit "
-                       "depth buffer disables early-Z tests.\n");
-            job->first_ez_state = V3D_EZ_DISABLED;
-            job->ez_state = V3D_EZ_DISABLED;
-            return false;
-         }
-
-         struct v3dv_framebuffer *fb = state->framebuffer;
-
-         if (!fb) {
-            assert(cmd_buffer->vk.level == VK_COMMAND_BUFFER_LEVEL_SECONDARY);
-            perf_debug("Loading depth aspect in a secondary command buffer "
-                       "without framebuffer info disables early-z tests.\n");
-            job->first_ez_state = V3D_EZ_DISABLED;
-            job->ez_state = V3D_EZ_DISABLED;
-            return false;
-         }
-
-         if (((fb->width % 2) != 0 || (fb->height % 2) != 0)) {
-            perf_debug("Loading depth aspect for framebuffer with odd width "
-                       "or height disables early-Z tests.\n");
-            job->first_ez_state = V3D_EZ_DISABLED;
-            job->ez_state = V3D_EZ_DISABLED;
-            return false;
-         }
-      }
+   if (!job->decided_global_ez_enable &&
+       !cmd_buffer_decide_global_ez_enable(cmd_buffer)) {
+      return false;
    }
 
    /* Otherwise, we can decide to selectively enable or disable EZ for draw
@@ -1953,7 +1968,7 @@ cmd_buffer_update_ez_state(struct v3dv_cmd_buffer *cmd_buffer,
     * cmd_buffer state if some stencil/depth flags were dynamic.
     */
    bool disable_ez = false;
-   bool incompatible_test = false;
+   UNUSED bool incompatible_test = false;
    switch (cmd_buffer->state.ez_state) {
    case V3D_EZ_UNDECIDED:
       /* If the pipeline didn't pick a direction but didn't disable, then go
@@ -1990,17 +2005,84 @@ cmd_buffer_update_ez_state(struct v3dv_cmd_buffer *cmd_buffer,
     * and the cmd buffer writes depth then we need to disable EZ for the rest
     * of the frame.
     */
+#if V3D_VERSION == 42
    if (incompatible_test && cmd_buffer->state.z_updates_enable) {
       assert(disable_ez);
       job->ez_state = V3D_EZ_DISABLED;
    }
+#endif
 
    if (!disable_ez)
       job->has_ez_draws = true;
 
    return !disable_ez;
 }
+
+static void
+merge_secondary_ez_state(struct v3dv_cmd_buffer *primary,
+                         struct v3dv_job *p,
+                         const struct v3dv_job *s)
+{
+   /* The secondary may have emitted its first draw, in which case the
+    * primary hasn't made its global EZ decision yet. Make it now, using
+    * the primary's state, before merging.
+    */
+   if (s->decided_global_ez_enable && !p->decided_global_ez_enable) {
+      if (!cmd_buffer_decide_global_ez_enable(primary)) {
+         return;
+      }
+   }
+
+#if V3D_VERSION == 42
+   if (s->ez_state == V3D_EZ_DISABLED && !s->has_ez_draws) {
+      p->ez_state = V3D_EZ_DISABLED;
+      return;
+   }
 #endif
+
+   if (!s->has_ez_draws)
+      return;
+
+#if V3D_VERSION >= 71
+   if (p->ez_state == V3D_EZ_UNDECIDED) {
+      p->ez_state = s->ez_state;
+      p->first_ez_state = s->first_ez_state;
+      p->has_ez_draws = true;
+   }
+#else
+   switch (p->ez_state) {
+   case V3D_EZ_UNDECIDED:
+      /* Adopt the secondary's state. */
+      p->ez_state = s->ez_state;
+      p->first_ez_state = s->first_ez_state;
+      p->has_ez_draws = true;
+      break;
+
+   case V3D_EZ_LT_LE:
+   case V3D_EZ_GT_GE:
+      if (s->first_ez_state != V3D_EZ_UNDECIDED &&
+          s->first_ez_state != p->ez_state) {
+         /* The secondary's early-Z draws use the opposite direction;
+          * conflict, give up early-Z.
+          */
+         p->first_ez_state = V3D_EZ_DISABLED;
+         p->ez_state = V3D_EZ_DISABLED;
+      } else {
+         /* Compatible direction. */
+         if (s->ez_state == V3D_EZ_DISABLED)
+            p->ez_state = V3D_EZ_DISABLED;
+      }
+      break;
+
+   case V3D_EZ_DISABLED:
+      /* The primary already gave up, but the secondary's draws used early-Z,
+       * so the early-Z data for the job is invalid.
+       */
+      p->first_ez_state = V3D_EZ_DISABLED;
+      break;
+   }
+#endif /* V3D_VERSION >= 71 */
+}
 
 void
 v3dX(cmd_buffer_emit_configuration_bits)(struct v3dv_cmd_buffer *cmd_buffer)
@@ -2034,8 +2116,9 @@ v3dX(cmd_buffer_emit_configuration_bits)(struct v3dv_cmd_buffer *cmd_buffer)
       config.stencil_enable = dyn->ds.stencil.test_enable && has_stencil;
 
       cmd_buffer->state.z_updates_enable = config.z_updates_enable;
+
+      UNUSED bool enable_ez = cmd_buffer_update_ez_state(cmd_buffer, pipeline);
 #if V3D_VERSION == 42
-      bool enable_ez = cmd_buffer_update_ez_state(cmd_buffer, pipeline);
       config.early_z_enable = enable_ez;
       config.early_z_updates_enable = config.early_z_enable &&
          cmd_buffer->state.z_updates_enable;
@@ -2259,6 +2342,11 @@ v3dX(cmd_buffer_execute_inside_pass)(struct v3dv_cmd_buffer *primary,
                   secondary_job->double_buffer_score.render;
             }
             primary_job->tmu_dirty_rcl |= secondary_job->tmu_dirty_rcl;
+
+            primary_job->uses_buffer_device_address |=
+               secondary_job->uses_buffer_device_address;
+            primary_job->draw_count += secondary_job->draw_count;
+            merge_secondary_ez_state(primary, primary_job, secondary_job);
          } else {
             /* This is a regular job (CPU or GPU), so just finish the current
              * primary job (if any) and then add the secondary job to the
@@ -2304,6 +2392,16 @@ v3dX(cmd_buffer_execute_inside_pass)(struct v3dv_cmd_buffer *primary,
 
    if (pending_barrier.dst_mask)
       v3dv_merge_barrier_state(&primary->state.barrier, &pending_barrier);
+
+   /* Secondaries may have changed HW state, and the primary may now record
+    * more inline draws, so re-emit everything on the next draw. This is
+    * possible with VK_KHR_maintenance7, which introduces various flags that
+    * allow having both the primary and secondary command buffers to record
+    * draw calls.
+    */
+   primary->state.dirty = ~0;
+   primary->state.dirty_descriptor_stages = ~0;
+   vk_dynamic_graphics_state_dirty_all(&primary->vk.dynamic_graphics_state);
 }
 
 static void

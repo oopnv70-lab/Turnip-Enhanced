@@ -836,6 +836,16 @@ class VkEncoder {
                                             VkDescriptorSetLayoutSupport* pSupport,
                                             uint32_t doLock);
 #endif
+#ifdef VK_KHR_draw_indirect_count
+    void vkCmdDrawIndirectCountKHR(VkCommandBuffer commandBuffer, VkBuffer buffer,
+                                   VkDeviceSize offset, VkBuffer countBuffer,
+                                   VkDeviceSize countBufferOffset, uint32_t maxDrawCount,
+                                   uint32_t stride, uint32_t doLock);
+    void vkCmdDrawIndexedIndirectCountKHR(VkCommandBuffer commandBuffer, VkBuffer buffer,
+                                          VkDeviceSize offset, VkBuffer countBuffer,
+                                          VkDeviceSize countBufferOffset, uint32_t maxDrawCount,
+                                          uint32_t stride, uint32_t doLock);
+#endif
 #ifdef VK_KHR_timeline_semaphore
     VkResult vkGetSemaphoreCounterValueKHR(VkDevice device, VkSemaphore semaphore, uint64_t* pValue,
                                            uint32_t doLock);
@@ -875,6 +885,12 @@ class VkEncoder {
         VkDevice device, const VkPipelineExecutableInfoKHR* pExecutableInfo,
         uint32_t* pInternalRepresentationCount,
         VkPipelineExecutableInternalRepresentationKHR* pInternalRepresentations, uint32_t doLock);
+#endif
+#ifdef VK_KHR_map_memory2
+    VkResult vkMapMemory2KHR(VkDevice device, const VkMemoryMapInfo* pMemoryMapInfo, void** ppData,
+                             uint32_t doLock);
+    VkResult vkUnmapMemory2KHR(VkDevice device, const VkMemoryUnmapInfo* pMemoryUnmapInfo,
+                               uint32_t doLock);
 #endif
 #ifdef VK_KHR_synchronization2
     void vkCmdSetEvent2KHR(VkCommandBuffer commandBuffer, VkEvent event,
@@ -1013,6 +1029,10 @@ class VkEncoder {
     void vkCmdSetLineStippleEXT(VkCommandBuffer commandBuffer, uint32_t lineStippleFactor,
                                 uint16_t lineStipplePattern, uint32_t doLock);
 #endif
+#ifdef VK_EXT_host_query_reset
+    void vkResetQueryPoolEXT(VkDevice device, VkQueryPool queryPool, uint32_t firstQuery,
+                             uint32_t queryCount, uint32_t doLock);
+#endif
 #ifdef VK_EXT_extended_dynamic_state
     void vkCmdSetCullModeEXT(VkCommandBuffer commandBuffer, VkCullModeFlags cullMode,
                              uint32_t doLock);
@@ -1042,23 +1062,6 @@ class VkEncoder {
                               VkStencilOp failOp, VkStencilOp passOp, VkStencilOp depthFailOp,
                               VkCompareOp compareOp, uint32_t doLock);
 #endif
-#ifdef VK_EXT_host_image_copy
-    VkResult vkCopyMemoryToImageEXT(VkDevice device,
-                                    const VkCopyMemoryToImageInfo* pCopyMemoryToImageInfo,
-                                    uint32_t doLock);
-    VkResult vkCopyImageToMemoryEXT(VkDevice device,
-                                    const VkCopyImageToMemoryInfo* pCopyImageToMemoryInfo,
-                                    uint32_t doLock);
-    VkResult vkCopyImageToImageEXT(VkDevice device,
-                                   const VkCopyImageToImageInfo* pCopyImageToImageInfo,
-                                   uint32_t doLock);
-    VkResult vkTransitionImageLayoutEXT(VkDevice device, uint32_t transitionCount,
-                                        const VkHostImageLayoutTransitionInfo* pTransitions,
-                                        uint32_t doLock);
-    void vkGetImageSubresourceLayout2EXT(VkDevice device, VkImage image,
-                                         const VkImageSubresource2* pSubresource,
-                                         VkSubresourceLayout2* pLayout, uint32_t doLock);
-#endif
 #ifdef VK_EXT_private_data
     VkResult vkCreatePrivateDataSlotEXT(VkDevice device,
                                         const VkPrivateDataSlotCreateInfo* pCreateInfo,
@@ -1070,6 +1073,11 @@ class VkEncoder {
                                  VkPrivateDataSlot privateDataSlot, uint64_t data, uint32_t doLock);
     void vkGetPrivateDataEXT(VkDevice device, VkObjectType objectType, uint64_t objectHandle,
                              VkPrivateDataSlot privateDataSlot, uint64_t* pData, uint32_t doLock);
+#endif
+#ifdef VK_EXT_image_compression_control
+    void vkGetImageSubresourceLayout2EXT(VkDevice device, VkImage image,
+                                         const VkImageSubresource2* pSubresource,
+                                         VkSubresourceLayout2* pLayout, uint32_t doLock);
 #endif
 #ifdef VK_EXT_extended_dynamic_state2
     void vkCmdSetPatchControlPointsEXT(VkCommandBuffer commandBuffer, uint32_t patchControlPoints,

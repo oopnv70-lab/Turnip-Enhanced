@@ -1313,7 +1313,8 @@ radv_destroy_cmd_buffer(struct vk_command_buffer *vk_cmd_buffer)
 
       radv_destroy_msrtss_transients(cmd_buffer);
 
-      radv_rra_accel_struct_buffers_unref(device, cmd_buffer->accel_struct_buffers);
+      if (cmd_buffer->accel_struct_buffers)
+         radv_rra_accel_struct_buffers_unref(device, cmd_buffer->accel_struct_buffers);
       _mesa_set_destroy(cmd_buffer->accel_struct_buffers, NULL);
 
       for (unsigned i = 0; i < ARRAY_SIZE(cmd_buffer->linear_suballocators); i++) {
@@ -1385,6 +1386,7 @@ radv_create_cmd_buffer(struct vk_command_pool *pool, VkCommandBufferLevel level,
 
       for (unsigned i = 0; i < ARRAY_SIZE(cmd_buffer->linear_suballocators); i++)
          list_inithead(&cmd_buffer->linear_suballocators[i].list);
+      list_inithead(&cmd_buffer->msrtss_transients);
 
       radv_cmd_buffer_init_shader_part_cache(device, cmd_buffer);
       result =
@@ -1398,8 +1400,11 @@ radv_create_cmd_buffer(struct vk_command_pool *pool, VkCommandBufferLevel level,
          vk_object_base_init(&device->vk, &cmd_buffer->descriptors[i].push_set.set.base, VK_OBJECT_TYPE_DESCRIPTOR_SET);
 
       cmd_buffer->accel_struct_buffers = _mesa_pointer_set_create(NULL);
+      if (!cmd_buffer->accel_struct_buffers) {
+         radv_destroy_cmd_buffer(&cmd_buffer->vk);
+         return vk_error(device, VK_ERROR_OUT_OF_HOST_MEMORY);
+      }
       cmd_buffer->ray_history = UTIL_DYNARRAY_INIT;
-      list_inithead(&cmd_buffer->msrtss_transients);
    }
 
    if (device->utrace.context) {
@@ -1503,23 +1508,23 @@ radv_cmd_buffer_resize_linear_suballoc_buf(struct radv_cmd_buffer *cmd_buffer,
    struct radeon_winsys_bo *bo = NULL;
    struct radv_linear_suballoc_buffer *saved_suballoc;
 
-   enum radeon_bo_flag bo_flags = RADEON_FLAG_NO_INTERPROCESS_SHARING | RADEON_FLAG_32BIT | RADEON_FLAG_GTT_WC;
+   enum radeon_bo_flag bo_flags = RADEON_FLAG_NO_INTERPROCESS_SHARING | RADEON_FLAG_32BIT;
    enum radeon_bo_domain bo_domain;
    unsigned bo_priority;
    uint64_t new_size = min_needed;
 
    switch (suballocator) {
    case RADV_SUBALLOCATOR_VRAM:
-      bo_flags |= RADEON_FLAG_NO_CPU_ACCESS |
-                  (cmd_buffer->vk.pool->flags & VK_COMMAND_POOL_CREATE_PROTECTED_BIT ? RADEON_FLAG_ENCRYPTED : 0);
       bo_domain = RADEON_DOMAIN_VRAM;
+      bo_flags |= RADEON_FLAG_NO_CPU_ACCESS | RADEON_FLAG_GTT_WC |
+                  (cmd_buffer->vk.pool->flags & VK_COMMAND_POOL_CREATE_PROTECTED_BIT ? RADEON_FLAG_ENCRYPTED : 0);
       bo_priority = RADV_BO_PRIORITY_SCRATCH;
       new_size = MAX2(new_size, 4 * 1024);
       break;
 
    case RADV_SUBALLOCATOR_CPU_UPLOAD:
-      bo_flags |= RADEON_FLAG_CPU_ACCESS;
       bo_domain = must_use_vram ? RADEON_DOMAIN_VRAM : device->ws->cs_domain(device->ws);
+      bo_flags |= RADEON_FLAG_CPU_ACCESS | (bo_domain == RADEON_DOMAIN_GTT ? 0 : RADEON_FLAG_GTT_WC);
       bo_priority = RADV_BO_PRIORITY_UPLOAD_BUFFER;
       new_size = MAX2(new_size, 16 * 1024);
       break;
@@ -12669,6 +12674,8 @@ radv_emit_ps_state(struct radv_cmd_buffer *cmd_buffer)
    bool use_float_frag_coord_xy = false;
    bool use_quad_pos = false;
    bool use_sample_mask_in = false;
+   bool smooth_lines = false;
+   bool needs_sample_coverage = true;
    int front_face_select = 0;
    unsigned raster_prim = 0;
 
@@ -12710,16 +12717,24 @@ radv_emit_ps_state(struct radv_cmd_buffer *cmd_buffer)
       }
    }
 
-   if (ps->info.ps.selects_sample_mask_in_dynamically) {
-      use_sample_mask_in = cmd_buffer->state.num_rast_samples != 1;
+   if (ps->info.ps.load_rasterization_prim || ps->info.ps.selects_front_face_dynamically ||
+       ps->info.ps.needs_poly_line_smooth) {
+      raster_prim = radv_get_raster_prim(cmd_buffer);
 
-      if (!use_sample_mask_in)
-         spi_ps_input_ena &= C_0286CC_SAMPLE_COVERAGE_ENA;
+      smooth_lines = raster_prim == V_030998_LINESTRIP &&
+                     cmd_buffer->state.line_rast_mode == VK_LINE_RASTERIZATION_MODE_RECTANGULAR_SMOOTH;
    }
 
-   if (ps->info.ps.load_rasterization_prim || ps->info.ps.selects_front_face_dynamically ||
-       ps->info.ps.needs_poly_line_smooth)
-      raster_prim = radv_get_raster_prim(cmd_buffer);
+   if (ps->info.ps.selects_sample_mask_in_dynamically) {
+      use_sample_mask_in = cmd_buffer->state.num_rast_samples != 1;
+      needs_sample_coverage = use_sample_mask_in;
+   } else if (ps->info.ps.needs_poly_line_smooth_coverage && !ps->info.ps.reads_sample_mask_in &&
+              !ps->info.ps.reads_fully_covered) {
+      needs_sample_coverage = smooth_lines;
+   }
+
+   if (!needs_sample_coverage)
+      spi_ps_input_ena &= C_0286CC_SAMPLE_COVERAGE_ENA;
 
    if (ps->info.ps.selects_front_face_dynamically) {
       if (raster_prim != V_030998_TRISTRIP || cmd_buffer->state.dynamic.vk.rs.cull_mode == VK_CULL_MODE_BACK_BIT)
@@ -12742,8 +12757,6 @@ radv_emit_ps_state(struct radv_cmd_buffer *cmd_buffer)
    const uint32_t ps_state_offset = radv_get_user_sgpr_loc(ps, AC_UD_PS_STATE);
 
    if (ps_state_offset) {
-      const bool smooth_lines = raster_prim == V_030998_LINESTRIP &&
-                                cmd_buffer->state.line_rast_mode == VK_LINE_RASTERIZATION_MODE_RECTANGULAR_SMOOTH;
       const unsigned rasterization_samples = cmd_buffer->state.num_rast_samples;
       const unsigned ps_iter_samples = radv_get_ps_iter_samples(cmd_buffer);
       const uint16_t ps_iter_mask = ac_get_ps_iter_mask(ps_iter_samples);

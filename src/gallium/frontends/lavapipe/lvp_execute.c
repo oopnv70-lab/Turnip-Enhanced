@@ -29,9 +29,11 @@
 #include "pipe/p_context.h"
 #include "pipe/p_state.h"
 #include "lvp_conv.h"
+#include "lp_context.h"
+#include "lp_query.h"
 #include "lp_state.h"
 #include "lp_texture.h"
-#include "driver_trace/tr_context.h"
+
 
 #include "util/blend.h"
 #include "util/format/u_format.h"
@@ -227,6 +229,7 @@ struct rendering_state {
    struct {
       struct lvp_shader *compute_shader;
       uint8_t push_constants[128 * 4];
+      bool cond_render_enabled;
    } saved;
 
    struct {
@@ -4211,6 +4214,25 @@ lvp_emit_conditional_rendering(struct rendering_state *state)
    }
 }
 
+static void
+lvp_suspend_cond_render(struct rendering_state *state)
+{
+   if (state->conditional_rendering.enabled) {
+      state->saved.cond_render_enabled = state->conditional_rendering.enabled;
+      state->conditional_rendering.enabled = false;
+      lvp_emit_conditional_rendering(state);
+   }
+}
+
+static void
+lvp_resume_cond_render(struct rendering_state *state)
+{
+   if (state->saved.cond_render_enabled) {
+      state->conditional_rendering.enabled = true;
+      lvp_emit_conditional_rendering(state);
+   }
+}
+
 static void handle_begin_conditional_rendering(struct vk_cmd_queue_entry *cmd,
                                                struct rendering_state *state)
 {
@@ -5031,7 +5053,7 @@ handle_execute_generated_commands_ext(struct vk_cmd_queue_entry *cmd, struct ren
    struct list_head *list = (void*)p;
 
    struct vk_cmd_queue_entry *exec_cmd = list_first_entry(list, struct vk_cmd_queue_entry, cmd_link);
-   if (exec_cmd)
+   if (exec_cmd && llvmpipe_check_render_cond(llvmpipe_context(state->pctx)))
       lvp_execute_cmd_buffer(list, state, print_cmds);
 }
 
@@ -5410,18 +5432,9 @@ lvp_trace_rays(struct rendering_state *state, VkTraceRaysIndirectCommand2KHR *co
    state->trace_rays_info.grid[1] = DIV_ROUND_UP(command->height, state->trace_rays_info.block[1]);
    state->trace_rays_info.grid[2] = DIV_ROUND_UP(command->depth, state->trace_rays_info.block[2]);
 
-   bool conditional_rendering_enabled = state->conditional_rendering.enabled;
-   if (conditional_rendering_enabled) {
-      state->conditional_rendering.enabled = false;
-      lvp_emit_conditional_rendering(state);
-   }
-
+   lvp_suspend_cond_render(state);
    state->pctx->launch_grid(state->pctx, &state->trace_rays_info);
-
-   if (conditional_rendering_enabled) {
-      state->conditional_rendering.enabled = true;
-      lvp_emit_conditional_rendering(state);
-   }
+   lvp_resume_cond_render(state);
 }
 
 static void
@@ -5579,6 +5592,7 @@ handle_save_state(struct vk_cmd_queue_entry *cmd, struct rendering_state *state)
 {
    state->saved.compute_shader = state->shaders[MESA_SHADER_COMPUTE];
    memcpy(state->saved.push_constants, state->push_constants, sizeof(state->push_constants));
+   lvp_suspend_cond_render(state);
 }
 
 static void
@@ -5589,6 +5603,7 @@ handle_restore_state(struct vk_cmd_queue_entry *cmd, struct rendering_state *sta
 
    memcpy(state->push_constants, state->saved.push_constants, sizeof(state->push_constants));
    state->pcbuf_dirty[MESA_SHADER_COMPUTE] = true;
+   lvp_resume_cond_render(state);
 }
 
 void lvp_add_enqueue_cmd_entrypoints(struct vk_device_dispatch_table *disp)
@@ -6303,7 +6318,7 @@ VkResult lvp_execute_cmds(struct lvp_device *device,
    struct rendering_state *state = queue->state;
    memset(state, 0, sizeof(*state));
    state->pctx = queue->ctx;
-   state->drv_pctx = trace_get_possibly_threaded_context(queue->ctx);
+   state->drv_pctx = pipe_get_driver_context(queue->ctx);
    state->device = device;
    state->uploader = queue->uploader;
    state->cso = queue->cso;

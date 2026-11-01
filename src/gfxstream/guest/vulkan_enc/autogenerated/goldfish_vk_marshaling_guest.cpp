@@ -7977,6 +7977,18 @@ void unmarshal_VkDebugMetadataGuestThreadIdGOOGLE(
     vkStream->read((uint64_t*)&forUnmarshaling->id, sizeof(uint64_t));
 }
 
+void unmarshal_VkGuestCapabilitiesGOOGLE(VulkanStreamGuest* vkStream, VkStructureType rootType,
+                                         VkGuestCapabilitiesGOOGLE* forUnmarshaling) {
+    (void)rootType;
+    vkStream->read((VkStructureType*)&forUnmarshaling->sType, sizeof(VkStructureType));
+    if (rootType == VK_STRUCTURE_TYPE_MAX_ENUM) {
+        rootType = forUnmarshaling->sType;
+    }
+    unmarshal_extension_struct(vkStream, rootType, (void*)(forUnmarshaling->pNext));
+    vkStream->read((VkGuestCapabilityFlagsGOOGLE*)&forUnmarshaling->capabilities,
+                   sizeof(VkGuestCapabilityFlagsGOOGLE));
+}
+
 void unmarshal_VkDebugMetadataGOOGLE(VulkanStreamGuest* vkStream, VkStructureType rootType,
                                      VkDebugMetadataGOOGLE* forUnmarshaling) {
     (void)rootType;
@@ -9532,6 +9544,12 @@ void unmarshal_extension_struct(VulkanStreamGuest* vkStream, VkStructureType roo
                 reinterpret_cast<VkDebugMetadataGuestThreadIdGOOGLE*>(structExtension_out));
             break;
         }
+        case VK_STRUCTURE_TYPE_GUEST_CAPABILITIES_GOOGLE: {
+            unmarshal_VkGuestCapabilitiesGOOGLE(
+                vkStream, rootType,
+                reinterpret_cast<VkGuestCapabilitiesGOOGLE*>(structExtension_out));
+            break;
+        }
 #endif
 #ifdef VK_EXT_border_color_swizzle
         case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_BORDER_COLOR_SWIZZLE_FEATURES_EXT: {
@@ -10264,6 +10282,14 @@ const char* api_opcode_to_string(const uint32_t opcode) {
             return "OP_vkGetDescriptorSetLayoutSupportKHR";
         }
 #endif
+#ifdef VK_KHR_draw_indirect_count
+        case OP_vkCmdDrawIndirectCountKHR: {
+            return "OP_vkCmdDrawIndirectCountKHR";
+        }
+        case OP_vkCmdDrawIndexedIndirectCountKHR: {
+            return "OP_vkCmdDrawIndexedIndirectCountKHR";
+        }
+#endif
 #ifdef VK_ANDROID_native_buffer
         case OP_vkGetSwapchainGrallocUsageANDROID: {
             return "OP_vkGetSwapchainGrallocUsageANDROID";
@@ -10371,11 +10397,6 @@ const char* api_opcode_to_string(const uint32_t opcode) {
             return "OP_vkCmdSetScissorWithCountEXT";
         }
 #endif
-#ifdef VK_EXT_host_image_copy
-        case OP_vkCopyImageToMemoryEXT: {
-            return "OP_vkCopyImageToMemoryEXT";
-        }
-#endif
 #ifdef VK_GRAPHICS_VERSION_1_4
         case OP_vkCmdSetRenderingAttachmentLocations: {
             return "OP_vkCmdSetRenderingAttachmentLocations";
@@ -10441,11 +10462,6 @@ const char* api_opcode_to_string(const uint32_t opcode) {
             return "OP_vkCmdSetDepthWriteEnableEXT";
         }
 #endif
-#ifdef VK_EXT_host_image_copy
-        case OP_vkCopyMemoryToImageEXT: {
-            return "OP_vkCopyMemoryToImageEXT";
-        }
-#endif
 #ifdef VK_KHR_buffer_device_address
         case OP_vkGetBufferDeviceAddressKHR: {
             return "OP_vkGetBufferDeviceAddressKHR";
@@ -10494,11 +10510,6 @@ const char* api_opcode_to_string(const uint32_t opcode) {
             return "OP_vkCopyImageToImage";
         }
 #endif
-#ifdef VK_EXT_host_image_copy
-        case OP_vkCopyImageToImageEXT: {
-            return "OP_vkCopyImageToImageEXT";
-        }
-#endif
 #ifdef VK_BASE_VERSION_1_3
         case OP_vkDestroyPrivateDataSlot: {
             return "OP_vkDestroyPrivateDataSlot";
@@ -10534,6 +10545,11 @@ const char* api_opcode_to_string(const uint32_t opcode) {
             return "OP_vkGetSemaphoreCounterValueKHR";
         }
 #endif
+#ifdef VK_KHR_map_memory2
+        case OP_vkUnmapMemory2KHR: {
+            return "OP_vkUnmapMemory2KHR";
+        }
+#endif
 #ifdef VK_BASE_VERSION_1_4
         case OP_vkUnmapMemory2: {
             return "OP_vkUnmapMemory2";
@@ -10562,6 +10578,11 @@ const char* api_opcode_to_string(const uint32_t opcode) {
 #ifdef VK_COMPUTE_VERSION_1_3
         case OP_vkCmdSetEvent2: {
             return "OP_vkCmdSetEvent2";
+        }
+#endif
+#ifdef VK_KHR_map_memory2
+        case OP_vkMapMemory2KHR: {
+            return "OP_vkMapMemory2KHR";
         }
 #endif
 #ifdef VK_BASE_VERSION_1_3
@@ -10622,9 +10643,9 @@ const char* api_opcode_to_string(const uint32_t opcode) {
             return "OP_vkSetPrivateData";
         }
 #endif
-#ifdef VK_EXT_host_image_copy
-        case OP_vkTransitionImageLayoutEXT: {
-            return "OP_vkTransitionImageLayoutEXT";
+#ifdef VK_EXT_host_query_reset
+        case OP_vkResetQueryPoolEXT: {
+            return "OP_vkResetQueryPoolEXT";
         }
 #endif
 #ifdef VK_KHR_maintenance4
@@ -11073,7 +11094,7 @@ const char* api_opcode_to_string(const uint32_t opcode) {
             return "OP_vkGetDeviceMemoryOpaqueCaptureAddressKHR";
         }
 #endif
-#ifdef VK_EXT_host_image_copy
+#ifdef VK_EXT_image_compression_control
         case OP_vkGetImageSubresourceLayout2EXT: {
             return "OP_vkGetImageSubresourceLayout2EXT";
         }
