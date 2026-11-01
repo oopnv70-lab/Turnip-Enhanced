@@ -19,7 +19,17 @@ jobs:
           git remote add upstream https://github.com/LFRon/Turnip-Enhanced.git
           git fetch upstream main
           git log --oneline -1 upstream/main
-          git merge-base HEAD upstream/main
-          git merge --no-edit upstream/main -m "sync: merge upstream LFRon/Turnip-Enhanced" || { echo MERGE_CONFLICT; git status --short | head -60; git merge --abort; exit 1; }
-          echo MERGE_OK
+          git merge --no-edit upstream/main -m sync-merge-upstream || true
+          echo CONFLICTS
+          git diff --name-only --diff-filter=U
+          for f in $(git diff --name-only --diff-filter=U); do
+            case $f in
+              docs/features.txt) git checkout --theirs $f ;;
+              *) git checkout --ours $f ;;
+            esac
+            git add $f
+            echo resolved $f
+          done
+          git commit --no-edit
           git push origin main
+          echo MERGE_OK
