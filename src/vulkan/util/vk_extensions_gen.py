@@ -94,15 +94,33 @@ const VkExtensionProperties vk_device_extensions[VK_DEVICE_EXTENSION_COUNT] = {
 };
 
 #ifdef ANDROID_STRICT
+/* Turnip-Enhanced: Android CTS extension whitelist disabled.
+ *
+ * Stock Mesa builds these two tables from ALLOWED_ANDROID_VERSION and hides
+ * every VK_KHR / VK_GOOGLE / VK_ANDROID extension that is absent from it, or
+ * that asks for a newer API level than platform-sdk-version.  That silently
+ * suppressed extensions the driver already implements: maintenance7/8/9/10,
+ * shader_fma, robustness2, unified_image_layouts,
+ * internally_synchronized_queues, present_id2/wait2, GOOGLE_user_type.
+ *
+ * This fork is not submitted to CTS, so the whitelist has no purpose here.
+ * Both tables now mark every advertised extension as allowed, which turns the
+ * ANDROID_STRICT gates in vk_instance.c, vk_physical_device.c and vk_device.c
+ * into no-ops: enumeration and vkCreateDevice both follow exactly what the
+ * driver reports in tu_device.cc.
+ *
+ * The ANDROID_STRICT gates themselves are kept so the code still builds
+ * against either setting; pass -Dandroid-strict=false to compile them out.
+ */
 const struct vk_instance_extension_table vk_android_allowed_instance_extensions = {
 %for ext in instance_extensions:
-   .${ext.name[3:]} = ${ext.c_android_condition()},
+   .${ext.name[3:]} = true,
 %endfor
 };
 
 const struct vk_device_extension_table vk_android_allowed_device_extensions = {
 %for ext in device_extensions:
-   .${ext.name[3:]} = ${ext.c_android_condition()},
+   .${ext.name[3:]} = true,
 %endfor
 };
 #endif
