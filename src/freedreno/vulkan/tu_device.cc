@@ -344,7 +344,27 @@ get_device_extensions(const struct tu_physical_device *device,
       .EXT_extended_dynamic_state2 = true,
       .EXT_extended_dynamic_state3 = true,
       .EXT_external_memory_dma_buf = true,
-      .EXT_external_memory_host = is_kgsl(device->instance),
+      /* VK_EXT_external_memory_host is *not* advertised on KGSL.
+       *
+       * The userptr import path (kgsl_bo_init_userptr / MAP_USER_MEM) does not
+       * produce a bo that lives in the device bo sparse array, has gem_handle 0
+       * (which other code treats as "native BO" and shifts left by 12), and
+       * rounds the length up to a page without validating that the imported
+       * host pointer is page aligned.  Exposing the extension makes UE4 take
+       * that path and the GPU ends up reading a few bytes past the end of the
+       * KGSL mapping:
+       *
+       *   kgsl kgsl-3d0: GPU PAGE FAULT: addr = 4006AF7B00
+       *   name=.tencent.mf.uam  (read translation fault)  FAULTING BLOCK: CCU
+       *   [4006100000 - 4006AF5FFF]  (pid = 32279) (any(0))
+       *   <- fault @ 4006AF7B00
+       *
+       * followed by an ANR on the render thread and a SIGSEGV in libUE4.so
+       * (com.tencent.mf.uam dies after ~150s).  Mesa upstream leaves this
+       * extension disabled for KGSL; keep that behaviour until the userptr
+       * allocator is fixed properly.
+       */
+      .EXT_external_memory_host = false,
       .EXT_filter_cubic = device->info->props.has_tex_filter_cubic,
       .EXT_fragment_density_map = true,
       .EXT_fragment_density_map_offset = true,
