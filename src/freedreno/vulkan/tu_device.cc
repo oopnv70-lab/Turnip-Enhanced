@@ -275,6 +275,7 @@ get_device_extensions(const struct tu_physical_device *device,
       .KHR_maintenance7 = true,
       .KHR_maintenance8 = true,
       .KHR_maintenance9 = true,
+      .KHR_maintenance10 = true,
       .KHR_map_memory2 = true,
       .KHR_multiview = true,
       .KHR_performance_query = (TU_DEBUG(PERFC) || TU_DEBUG(PERFCRAW)) && device->is_perf_cntr_selectable,
@@ -301,6 +302,7 @@ get_device_extensions(const struct tu_physical_device *device,
       .KHR_shader_float16_int8 = true,
       .KHR_shader_float_controls = true,
       .KHR_shader_float_controls2 = true,
+      .KHR_shader_fma = true,
       .KHR_shader_integer_dot_product = true,
       .KHR_shader_non_semantic_info = true,
       .KHR_shader_quad_control = device->info->props.has_getfiberid,
@@ -340,6 +342,7 @@ get_device_extensions(const struct tu_physical_device *device,
       .EXT_depth_clamp_control = true,
       .EXT_depth_clamp_zero_one = true,
       .EXT_depth_clip_control = true,
+      .EXT_depth_bias_control = true,
       .EXT_depth_clip_enable = true,
       .EXT_descriptor_buffer = true,
       .EXT_descriptor_indexing = true,
@@ -353,6 +356,7 @@ get_device_extensions(const struct tu_physical_device *device,
       .EXT_extended_dynamic_state2 = true,
       .EXT_extended_dynamic_state3 = true,
       .EXT_external_memory_dma_buf = true,
+      .EXT_external_memory_host = is_kgsl(device->instance),
       .EXT_filter_cubic = device->info->props.has_tex_filter_cubic,
       .EXT_fragment_density_map = true,
       .EXT_fragment_density_map_offset = true,
@@ -653,6 +657,9 @@ tu_get_features(struct tu_physical_device *pdevice,
    /* VK_KHR_maintenance9 */
    features->maintenance9 = true;
 
+   /* VK_KHR_maintenance10 */
+   features->maintenance10 = true;
+
    /* VK_KHR_performance_query */
    features->performanceCounterQueryPools = true;
    features->performanceCounterMultipleQueryPools = false;
@@ -677,6 +684,11 @@ tu_get_features(struct tu_physical_device *pdevice,
 
    /* VK_KHR_shader_float_controls2 */
    features->shaderFloatControls2 = true;
+
+   /* VK_KHR_shader_fma */
+   features->shaderFmaFloat32 = true;
+   features->shaderFmaFloat16 = true;
+   features->shaderFmaFloat64 = false;
 
    /* VK_KHR_shader_quad_control */
    features->shaderQuadControl = pdevice->info->props.has_getfiberid;
@@ -727,6 +739,9 @@ tu_get_features(struct tu_physical_device *pdevice,
 
    /* VK_EXT_depth_clip_control */
    features->depthClipControl = true;
+
+   /* VK_EXT_depth_bias_control */
+   features->depthBiasControl = true;
 
    /* VK_EXT_depth_clip_enable */
    features->depthClipEnable = true;
@@ -1468,6 +1483,9 @@ tu_get_properties(struct tu_physical_device *pdevice,
    os_get_page_size(&os_page_size);
    props->minPlacedMemoryMapAlignment = os_page_size;
 
+   /* VK_EXT_external_memory_host */
+   props->minImportedHostPointerAlignment = os_page_size;
+
    /* VK_EXT_multi_draw */
    props->maxMultiDrawCount = 2048;
 
@@ -1570,6 +1588,10 @@ tu_get_properties(struct tu_physical_device *pdevice,
    props->image2DViewOf3DSparse = false;
    props->defaultVertexAttributeValue =
       VK_DEFAULT_VERTEX_ATTRIBUTE_VALUE_ZERO_ZERO_ZERO_ZERO_KHR;
+   /* VK_KHR_maintenance10 */
+   props->rgba4OpaqueBlackSwizzled = true;
+   props->resolveSrgbFormatAppliesTransferFunction = true;
+   props->resolveSrgbFormatSupportsTransferFunctionControl = true;
 
    /* VK_EXT_host_image_copy */
 
@@ -4247,7 +4269,20 @@ tu_AllocateMemory(VkDevice _device,
                            BUFFER_DEVICE_ADDRESS_ALIGNMENT_ALLOCATE_INFO_VALVE);
    uint64_t alignment = align_info ? align_info->alignment : 0;
 
-   if (fd_info && fd_info->handleType) {
+
+   char name[64] = "vkAlloc()";
+   if (device->bo_sizes)
+      snprintf(name, ARRAY_SIZE(name), "vkAlloc(%ldkb)",
+               static_cast<long>(DIV_ROUND_UP(pAllocateInfo->allocationSize, 1024)));
+   VkMemoryPropertyFlags mem_property =
+      device->physical_device->memory.types[pAllocateInfo->memoryTypeIndex];
+
+   if (mem->vk.host_ptr) {
+      result = tu_bo_init_userptr(device, &mem->vk.base, &mem->bo,
+                                  pAllocateInfo->allocationSize, alignment,
+                                  mem_property, alloc_flags,
+                                  mem->vk.host_ptr, name);
+   } else if (fd_info && fd_info->handleType) {
       assert(fd_info->handleType ==
                 VK_EXTERNAL_MEMORY_HANDLE_TYPE_OPAQUE_FD_BIT ||
              fd_info->handleType ==
@@ -4298,12 +4333,6 @@ tu_AllocateMemory(VkDevice _device,
       if (wsi_info && wsi_info->implicit_sync)
          alloc_flags |= TU_BO_ALLOC_IMPLICIT_SYNC;
 
-      char name[64] = "vkAlloc()";
-      if (device->bo_sizes)
-         snprintf(name, ARRAY_SIZE(name), "vkAlloc(%ldkb)",
-                  static_cast<long>(DIV_ROUND_UP(pAllocateInfo->allocationSize, 1024)));
-      VkMemoryPropertyFlags mem_property =
-         device->physical_device->memory.types[pAllocateInfo->memoryTypeIndex];
 
       result = _tu_init_memory(device, mem, mem_property, alloc_flags,
                                pAllocateInfo->allocationSize, alignment,
@@ -5171,6 +5200,25 @@ tu_GetMemoryFdPropertiesKHR(VkDevice _device,
    pMemoryFdProperties->memoryTypeBits =
       (1 << device->physical_device->memory.non_lazy_type_count) - 1;
    return VK_SUCCESS;
+}
+
+VKAPI_ATTR VkResult VKAPI_CALL
+tu_GetMemoryHostPointerPropertiesEXT(
+   VkDevice _device,
+   VkExternalMemoryHandleTypeFlagBits handleType,
+   const void *pHostPointer,
+   VkMemoryHostPointerPropertiesEXT *pMemoryHostPointerProperties)
+{
+   VK_FROM_HANDLE(tu_device, device, _device);
+
+   switch (handleType) {
+   case VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT:
+      pMemoryHostPointerProperties->memoryTypeBits =
+         (1 << device->physical_device->memory.non_lazy_type_count) - 1;
+      return VK_SUCCESS;
+   default:
+      return vk_error(device, VK_ERROR_INVALID_EXTERNAL_HANDLE);
+   }
 }
 
 VKAPI_ATTR void VKAPI_CALL
