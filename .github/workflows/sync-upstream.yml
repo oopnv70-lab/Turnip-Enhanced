@@ -19,23 +19,17 @@ jobs:
           git config user.email operit@users.noreply.github.com
           git remote add upstream https://github.com/LFRon/Turnip-Enhanced.git
           git fetch upstream main
-          UP=$(git rev-parse upstream/main)
-          echo "UPSTREAM=$UP"
-          # Mesa tree must be identical to upstream; keep only fork-specific
-          # top-level module/packaging files, which upstream does not ship.
+          echo UPSTREAM=$(git rev-parse upstream/main)
           git read-tree -u --reset upstream/main
-          git checkout -- . 2>/dev/null || true
-          # restore fork-owned files that upstream does not have
           git checkout main -- .github/workflows/build-turnip.yml
-          git checkout main -- README.md CHANGELOG-UPSTREAM.md 2>/dev/null || true
-          git checkout main -- module 2>/dev/null || true
-          git checkout main -- extras 2>/dev/null || true
-          git checkout main -- .github/workflows/sync-upstream.yml 2>/dev/null || true
+          git checkout main -- .github/workflows/sync-upstream.yml
+          git checkout main -- AGENTS.md
+          git checkout main -- README.md
+          git checkout main -- CHANGELOG-UPSTREAM.md
+          git checkout main -- module
+          git checkout main -- extras
           git add -A
-          git status --short | head -50
-          git commit -m "sync: make Mesa tree identical to upstream LFRon/Turnip-Enhanced" -m "The previous 3-way merge left ~41 files partially synced (old function
-names, missing subprojects/packagefiles), which broke the build.
-Replace the whole Mesa tree with upstream content and re-apply only the
-fork-owned packaging/module files." -m "Assisted-by: LLM" || echo NOTHING_TO_COMMIT
+          git status --short | head -60
+          git commit -m "sync: make Mesa tree identical to upstream LFRon/Turnip-Enhanced" || echo NOTHING_TO_COMMIT
           git push origin main || echo PUSH_FAILED
           echo SYNC_OK
