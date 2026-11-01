@@ -1,0 +1,25 @@
+name: sync-upstream
+on:
+  workflow_dispatch:
+permissions:
+  contents: write
+jobs:
+  merge:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          ref: main
+          fetch-depth: 0
+          token: ${{ secrets.GITHUB_TOKEN }}
+      - name: merge upstream
+        run: |
+          git config user.name Operit
+          git config user.email operit@users.noreply.github.com
+          git remote add upstream https://github.com/LFRon/Turnip-Enhanced.git
+          git fetch upstream main
+          git log --oneline -1 upstream/main
+          git merge-base HEAD upstream/main
+          git merge --no-edit upstream/main -m "sync: merge upstream LFRon/Turnip-Enhanced" || { echo MERGE_CONFLICT; git status --short | head -60; git merge --abort; exit 1; }
+          echo MERGE_OK
+          git push origin main
