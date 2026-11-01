@@ -4,7 +4,7 @@ on:
 permissions:
   contents: write
 jobs:
-  merge:
+  sync:
     runs-on: ubuntu-latest
     steps:
       - uses: actions/checkout@v4
@@ -12,24 +12,30 @@ jobs:
           ref: main
           fetch-depth: 0
           token: ${{ secrets.GITHUB_TOKEN }}
-      - name: merge upstream
+      - name: sync upstream tree exactly
         run: |
+          set -x
           git config user.name Operit
           git config user.email operit@users.noreply.github.com
           git remote add upstream https://github.com/LFRon/Turnip-Enhanced.git
           git fetch upstream main
-          git log --oneline -1 upstream/main
-          git merge --no-edit upstream/main -m sync-merge-upstream || true
-          echo CONFLICTS
-          git diff --name-only --diff-filter=U
-          for f in $(git diff --name-only --diff-filter=U); do
-            case $f in
-              docs/features.txt) git checkout --theirs $f ;;
-              *) git checkout --ours $f ;;
-            esac
-            git add $f
-            echo resolved $f
-          done
-          git commit --no-edit
-          git push origin main
-          echo MERGE_OK
+          UP=$(git rev-parse upstream/main)
+          echo "UPSTREAM=$UP"
+          # Mesa tree must be identical to upstream; keep only fork-specific
+          # top-level module/packaging files, which upstream does not ship.
+          git read-tree -u --reset upstream/main
+          git checkout -- . 2>/dev/null || true
+          # restore fork-owned files that upstream does not have
+          git checkout main -- .github/workflows/build-turnip.yml
+          git checkout main -- README.md CHANGELOG-UPSTREAM.md 2>/dev/null || true
+          git checkout main -- module 2>/dev/null || true
+          git checkout main -- extras 2>/dev/null || true
+          git checkout main -- .github/workflows/sync-upstream.yml 2>/dev/null || true
+          git add -A
+          git status --short | head -50
+          git commit -m "sync: make Mesa tree identical to upstream LFRon/Turnip-Enhanced" -m "The previous 3-way merge left ~41 files partially synced (old function
+names, missing subprojects/packagefiles), which broke the build.
+Replace the whole Mesa tree with upstream content and re-apply only the
+fork-owned packaging/module files." -m "Assisted-by: LLM" || echo NOTHING_TO_COMMIT
+          git push origin main || echo PUSH_FAILED
+          echo SYNC_OK
