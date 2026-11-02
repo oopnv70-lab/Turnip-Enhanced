@@ -17,6 +17,14 @@ on:
         description: 'platform-sdk-version（仅 Mesa 侧宏，默认 35）'
         required: false
         default: '35'
+      channel:
+        description: '发布通道：rc=预发布（每次覆盖同一 tag），release=正式版（tag 不允许覆盖）'
+        required: false
+        default: 'rc'
+        type: choice
+        options:
+          - rc
+          - release
   push:
     branches: [main]
     paths:
@@ -32,6 +40,8 @@ env:
   #            meta/platforms.json 上限是 35，写 36 会找不到编译器。
   SDKVER: ${{ github.event.inputs.platform_sdk || '35' }}
   NDK_API: '35'
+  # 发布通道。push 触发时恒为 rc，只有 workflow_dispatch 能选 release。
+  CHANNEL: ${{ github.event.inputs.channel || 'rc' }}
 jobs:
   build:
     runs-on: ubuntu-24.04
@@ -270,9 +280,18 @@ jobs:
           patchelf --set-soname libc++_turnip.so $OUT/pkg/system/vendor/lib64/libc++_turnip.so
           cp $OUT/pkg/system/vendor/lib64/libc++_turnip.so $OUT/pkg/system/lib64/libc++_turnip.so
           ls -lh $OUT/pkg/system/vendor/lib64/libc++_turnip.so $OUT/pkg/system/lib64/libc++_turnip.so
-
-          sed -i "s/^version=.*/version=${MESA_VER}-enhanced-rc/" $OUT/pkg/module.prop
-          sed -i "s/^versionCode=.*/versionCode=$(echo $MESA_VER | tr -cd '0-9')/" $OUT/pkg/module.prop
+          # 版本号。正式版与预发布版共用同一份 VERSION，靠后缀区分。
+          # RC 沿用原有的 versionCode（如 27.0.0-devel -> 2700），正式版 +1，
+          # 这样正式版比同版本 RC 新，而 RC 不会反过来覆盖正式版。
+          BASE_VC=$(echo $MESA_VER | tr -cd '0-9')
+          if [ "$CHANNEL" = "release" ]; then
+            sed -i "s/^version=.*/version=${MESA_VER}-enhanced/" $OUT/pkg/module.prop
+            sed -i "s/^versionCode=.*/versionCode=$((BASE_VC + 1))/" $OUT/pkg/module.prop
+          else
+            sed -i "s/^version=.*/version=${MESA_VER}-enhanced-rc/" $OUT/pkg/module.prop
+            sed -i "s/^versionCode=.*/versionCode=${BASE_VC}/" $OUT/pkg/module.prop
+          fi
+          grep -E '^(version|versionCode)=' $OUT/pkg/module.prop
 
           cd $OUT/pkg
           zip -r -9 ../turnip-enhanced.zip . -x '.git*' > /dev/null
@@ -283,25 +302,53 @@ jobs:
       - uses: actions/upload-artifact@v4
         if: always()
         with:
-          name: turnip-enhanced-${{ github.sha }}-rc-sdk${{ env.SDKVER }}-strict${{ env.ANDROID_STRICT }}
+          name: turnip-enhanced-${{ github.sha }}-${{ env.CHANNEL }}-sdk${{ env.SDKVER }}-strict${{ env.ANDROID_STRICT }}
           path: |
             out/turnip-enhanced.zip
           if-no-files-found: warn
 
-      - name: 发布预发布版（pre-release）
+      - name: 发布（pre-release 或正式版）
         if: success()
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
           set -e
           MESA_VER=$(cat VERSION)
-          TAG="v${MESA_VER}-rc"
-          # 同一 tag 的旧 release/tag 先删掉，保证每次构建都能重建 pre-release
-          gh release delete "$TAG" --yes --cleanup-tag 2>/dev/null || true
-          git push origin --delete "$TAG" 2>/dev/null || true
-          git tag -f "$TAG"
-          git push origin "$TAG" --force
-          cat > /tmp/release-notes.md <<NOTES
+
+          if [ "$CHANNEL" = "release" ]; then
+            # 正式版：已发布的 release 绝不覆盖。
+            # 只以 release 是否存在为判据，不以 tag 为判据——否则上一次构建
+            # 若在 tag 创建成功、release 创建失败，会永远卡在“tag 已存在”。
+            TAG="v${MESA_VER}-enhanced"
+            if gh release view "$TAG" >/dev/null 2>&1; then
+              echo "::error::release $TAG 已存在，拒绝覆盖已发布的正式版"
+              exit 1
+            fi
+            git tag -f "$TAG"
+            git push origin "$TAG" --force
+            cat > /tmp/release-notes.md <<NOTES
+          正式版 ${MESA_VER}。
+
+          提交：${{ github.sha }}
+          platform-sdk-version：${{ env.SDKVER }}
+
+          本版本替换系统 Vulkan 驱动为 Turnip。安装前请确认设备为
+          高通 Adreno GPU 且已安装 KernelSU 或 Magisk。
+
+          刷入后如需回退，卸载模块即可恢复系统原驱动。
+          NOTES
+            gh release create "$TAG" \
+              out/turnip-enhanced.zip \
+              --title "Turnip Enhanced ${MESA_VER}" \
+              --notes-file /tmp/release-notes.md
+          else
+            # 预发布版：同一 tag 反复重建，覆盖是预期行为。
+            TAG="v${MESA_VER}-rc"
+            gh release delete "$TAG" --yes --cleanup-tag 2>/dev/null || true
+            git push origin --delete "$TAG" 2>/dev/null || true
+            git tag -f "$TAG"
+            git push origin "$TAG" --force
+            cat > /tmp/release-notes.md <<NOTES
           预发布版（RC），由 workflow_dispatch 自动构建。
 
           提交：${{ github.sha }}
@@ -310,8 +357,9 @@ jobs:
 
           仅供测试，请勿用于生产环境。
           NOTES
-          gh release create "$TAG" \
-            out/turnip-enhanced.zip \
-            --title "Turnip Enhanced ${MESA_VER} RC" \
-            --notes-file /tmp/release-notes.md \
-            --prerelease
+            gh release create "$TAG" \
+              out/turnip-enhanced.zip \
+              --title "Turnip Enhanced ${MESA_VER} RC" \
+              --notes-file /tmp/release-notes.md \
+              --prerelease
+          fi
