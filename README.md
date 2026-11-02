@@ -42,7 +42,7 @@ Mesa 的 freedreno / Turnip Vulkan 驱动，打包为 KernelSU / Magisk 模块�
 | LFRon | 92 | 直接上游的修复，整体搬运，未做改动 |
 | 本项目 | 72 | 自己的提交，全部集中在建仓之后 |
 
-**继承来的提交保持原 SHA 不变**，说明是整体搬运而不是 rebase 重写。查某条提交是谁写的，看 `author` 字段即可；LFRon 的两个显示名 `LFRon` 和 `mozixun` 是同一人（同邮箱 `ronforever@outlook.com`）。
+**继承来的提交保持原 SHA 不变**，说明是整体搬运而不是 rebase 重写。查某条提交是谁写的，看 `author` 字段即可；LFRon 有两个显示名（`LFRon` 与 `mozixun`），是同一人。
 
 ---
 
@@ -67,9 +67,9 @@ Mesa 的 freedreno / Turnip Vulkan 驱动，打包为 KernelSU / Magisk 模块�
 
 | 身份 | 条数 |
 |---|---|
-| `operit <operit@users.noreply.github.com>` | 37 |
-| `oopnv70-lab <m19216411613@qq.com>` | 32 |
-| `oopnv70-lab <oopnv70-lab@users.noreply.github.com>` | 3 |
+| `operit` | 37 |
+| `oopnv70-lab` | 32 |
+| `oopnv70-lab`（noreply 变体） | 3 |
 
 按改动领域分布：
 
