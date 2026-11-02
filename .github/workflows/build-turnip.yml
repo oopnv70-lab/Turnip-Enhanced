@@ -2,16 +2,13 @@ name: build-turnip
 
 # Turnip-Enhanced: Mesa freedreno Vulkan -> KernelSU / Magisk module
 # 二改：Operit (oopnv70-lab)，基于 ilhan-athn7/freedreno_turnip-CI 的 turnip_builder.sh
-# 目标：在 stock Mesa main 上关闭 Android CTS 扩展白名单、补 Vulkan 1.4 feature xml，
-#       并开启驱动已实现但默认关闭的新扩展（maintenance10 / shader_fma 等）。
 #
 # 构建方式：就地构建。本仓库自身就是一份 Mesa 树（版本见根目录 VERSION），
 # workflow 拿 actions/checkout 检出的源码直接 meson setup，
 # 不再从 gitlab.freedesktop.org 下载 stock mesa。
 #
 # 相对上游 ilhan-athn7/freedreno_turnip-CI 的改动：
-#   1. android-strict 固定为 true（= Mesa 默认值，与上游一致），不得改动
-#   2. 源码来自本仓库，不下载外网 archive
+#   1. 源码来自本仓库，不下载外网 archive
 
 on:
   workflow_dispatch:
@@ -24,22 +21,11 @@ on:
     branches: [main]
     paths:
       - '.github/workflows/build-turnip.yml'
-      - 'module/**'
       - 'extras/**'
       - 'meson.build'
       - 'src/**'
 
 env:
-  # 关键：必须保持 android-strict=true（Mesa 默认值）。
-  # 历史教训：曾设为 false 试图「放开扩展白名单」，结果游戏 com.tencent.tmgp.dfm
-  # 启动即 SIGSEGV（pc=0，libvulkan.so GetPhysicalDeviceSurfaceFormatsKHR+3500）。
-  # 原因：ANDROID_STRICT 关闭后，VK_ANDROID_native_buffer /
-  # VK_ANDROID_external_memory_android_hardware_buffer 等 AHardwareBuffer 相关
-  # 扩展会被驱动声明为 supported，UE4 于是走 AHardwareBuffer 格式协商路径，
-  # 进而调用 GetPhysicalDeviceSurfaceFormatsKHR —— 而 Android 平台下
-  # tu_wsi.cc 不参与编译（TU_USE_WSI_PLATFORM 未定义），该函数槽位为 NULL，
-  # 间接调用直接跳到地址 0。上游 ilhan-athn7 的产物不传此参数（默认 true），
-  # 因此正常。不要再改这个值。
   ANDROID_STRICT: 'true'
   # SDKVER  -> -Dplatform-sdk-version，只写进 config.h 的 ANDROID_API_LEVEL 宏。
   # NDK_API -> NDK clang 前缀 aarch64-linux-androidNN-clang。官方 NDK 的
@@ -218,14 +204,14 @@ jobs:
           STRICT_OPT=$(python3 -c "import json;print(next((o['value'] for o in json.load(open('build-android-aarch64/meson-info/intro-buildoptions.json')) if o['name']=='android-strict'),''))")
           echo "meson 选项 android-strict = ${STRICT_OPT:-<未找到>}"
           if [ "$STRICT_OPT" != "True" ] && [ "$STRICT_OPT" != "true" ]; then
-            echo "::error::meson 选项 android-strict 不是 true！产物会导致 dfm 崩溃，终止构建"
+            echo "::error::meson 选项 android-strict 不是 true，终止构建"
             exit 1
           fi
           echo "OK：android-strict=true"
 
           echo "=== 校验 2/2：编译命令行必须带 -DANDROID_STRICT ==="
           if grep -q -- '-DANDROID_STRICT' build-android-aarch64/build.ninja; then
-            echo "OK：build.ninja 含 -DANDROID_STRICT，CTS 白名单生效"
+            echo "OK：build.ninja 含 -DANDROID_STRICT"
           else
             echo "::error::build.ninja 缺少 -DANDROID_STRICT！ANDROID_STRICT 未进编译参数，终止构建"
             exit 1
