@@ -1,0 +1,9 @@
+# FCL 驱动插件构建用 .gitignore
+# 构建产物与 CI 注入的库不进版本库
+app/build/
+build/
+.gradle/
+local.properties
+app/src/main/jniLibs/
+*.jks
+*.keystore
