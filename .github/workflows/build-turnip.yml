@@ -26,10 +26,11 @@ on:
           - rc
           - release
   push:
-    branches: [main]
+    branches: [main, fcl-plugin]
     paths:
       - '.github/workflows/build-turnip.yml'
       - 'extras/**'
+      - 'fcl-plugin/**'
       - 'meson.build'
       - 'src/**'
 
@@ -307,8 +308,119 @@ jobs:
             out/turnip-enhanced.zip
           if-no-files-found: warn
 
+      # ─────────────────────────────────────────────────────────────
+      # FCL 启动器驱动插件
+      #
+      # FCL 只接受以 APK 形式提供的第三方驱动（契约见 FCL-Team/FCLDriverPlugin）：
+      # manifest 里 fclPlugin/driver/driver_lib/driver_gpu 四个 metaData，
+      # 库由 FCL 从插件的 nativeLibraryDir 加载，linkerhook 拦截 libvulkan 的
+      # android_dlopen_ext 后按 driver_lib 取用。
+      #
+      # 关键点：这里直接复用上面编译出来、已经 patchelf 处理过的**同一个 .so**，
+      # 不再单独编译一次，所以插件里的驱动和模块里的驱动物理上是同一份文件，
+      # 不存在两个版本对不上的可能。
+      # ─────────────────────────────────────────────────────────────
+      - name: 准备 JDK 17（AGP 8.5 要求）
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: 准备 Android SDK
+        uses: android-actions/setup-android@v3
+
+      - name: 安装 compileSdk 34 与 build-tools
+        run: |
+          yes | sdkmanager --licenses > /dev/null 2>&1 || true
+          sdkmanager "platforms;android-34" "build-tools;34.0.0" > /dev/null
+          echo "=== SDK 组件 ==="
+          ls "$ANDROID_HOME/platforms" "$ANDROID_HOME/build-tools"
+
+      - name: 把驱动库注入插件工程
+        run: |
+          set -e
+          JNI=fcl-plugin/app/src/main/jniLibs/arm64-v8a
+          mkdir -p "$JNI"
+
+          # 主库：模块里叫 vulkan.turnip.so，插件里必须叫 libvulkan_freedreno.so
+          # （FCL 的 DriverPlugin.DEFAULT_DRIVER_LIB 就是这个值）。
+          # 上面的打包步骤已经把 soname 设成 vulkan.turnip.so，这里改成一致的名字，
+          # 避免 soname 与实际文件名不符导致 dlopen 后重定位失败。
+          cp out/pkg/system/vendor/lib64/hw/vulkan.turnip.so "$JNI/libvulkan_freedreno.so"
+          patchelf --set-soname libvulkan_freedreno.so "$JNI/libvulkan_freedreno.so"
+
+          # 依赖库：主库动态依赖它，不同时打包会直接加载失败。
+          cp out/pkg/system/vendor/lib64/libc++_turnip.so "$JNI/libc++_turnip.so"
+
+          echo "=== 注入结果 ==="
+          ls -lh "$JNI"
+          echo "=== 主库动态段 ==="
+          readelf -d "$JNI/libvulkan_freedreno.so" | grep -E 'NEEDED|SONAME'
+          echo "=== 依赖库动态段 ==="
+          readelf -d "$JNI/libc++_turnip.so" | grep -E 'NEEDED|SONAME'
+
+          # 硬校验：主库必须依赖我们刚放进去的那个库名，否则插件装上也加载不了
+          readelf -d "$JNI/libvulkan_freedreno.so" | grep -q 'libc++_turnip.so' \
+            || { echo "::error::主库未依赖 libc++_turnip.so"; exit 1; }
+
+      - name: 构建 FCL 驱动插件 APK
+        working-directory: fcl-plugin
+        env:
+          FCL_KEYSTORE_FILE: ${{ runner.temp }}/fcl.jks
+          FCL_KEYSTORE_PASSWORD: fclturnip
+          FCL_KEY_ALIAS: fcl
+          FCL_KEY_PASSWORD: fclturnip
+        run: |
+          set -e
+          # 现场生成签名用 keystore。固定口令无所谓，这个签名只用于自签分发。
+          [ -f "$FCL_KEYSTORE_FILE" ] || keytool -genkeypair \
+            -keystore "$FCL_KEYSTORE_FILE" \
+            -storetype JKS \
+            -storepass "$FCL_KEYSTORE_PASSWORD" \
+            -keypass "$FCL_KEY_PASSWORD" \
+            -alias "$FCL_KEY_ALIAS" \
+            -keyalg RSA -keysize 2048 -validity 10000 \
+            -dname "CN=Turnip Enhanced FCL Driver, O=oopnv70-lab, C=CN"
+
+          gradle --no-daemon --console=plain assembleRelease
+
+          echo "=== 产物 ==="
+          find app/build/outputs -name '*.apk' -exec ls -lh {} \;
+
+      - name: 校验插件 APK
+        run: |
+          set -e
+          APK=$(find fcl-plugin/app/build/outputs -name '*.apk' | head -1)
+          echo "APK=$APK"
+          BT=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
+
+          echo "=== APK 内 native 库 ==="
+          unzip -l "$APK" | grep -E '\.so$' || { echo "::error::APK 内没有任何 .so"; exit 1; }
+          for lib in libvulkan_freedreno.so libc++_turnip.so; do
+            unzip -l "$APK" | grep -q "$lib" || { echo "::error::APK 内缺少 $lib"; exit 1; }
+          done
+
+          echo "=== 包名 / 版本 ==="
+          "$BT/aapt2" dump badging "$APK" | grep -E "^package:|application-label:"
+
+          echo "=== metaData 必须四项齐全 ==="
+          "$BT/aapt2" dump xmltree "$APK" --file AndroidManifest.xml \
+            | grep -A1 -E 'fclPlugin|driver_lib|driver_gpu|"driver"' || true
+
+          echo "=== 签名 ==="
+          "$BT/apksigner" verify --verbose "$APK" | head -20
+
+      - uses: actions/upload-artifact@v4
+        if: always()
+        with:
+          name: fcl-driver-plugin-${{ github.sha }}-sdk${{ env.SDKVER }}
+          path: fcl-plugin/app/build/outputs/apk/release/*.apk
+          if-no-files-found: warn
+
+
       - name: 发布（pre-release 或正式版）
-        if: success()
+        # 分支上的构建只出 artifact，不碰 tag / release
+        if: success() && github.ref == 'refs/heads/main'
         env:
           GH_TOKEN: ${{ github.token }}
         run: |
@@ -339,6 +451,7 @@ jobs:
           NOTES
             gh release create "$TAG" \
               out/turnip-enhanced.zip \
+              $(ls fcl-plugin/app/build/outputs/apk/release/*.apk 2>/dev/null) \
               --title "Turnip Enhanced ${MESA_VER}" \
               --notes-file /tmp/release-notes.md
           else
@@ -359,6 +472,7 @@ jobs:
           NOTES
             gh release create "$TAG" \
               out/turnip-enhanced.zip \
+              $(ls fcl-plugin/app/build/outputs/apk/release/*.apk 2>/dev/null) \
               --title "Turnip Enhanced ${MESA_VER} RC" \
               --notes-file /tmp/release-notes.md \
               --prerelease
