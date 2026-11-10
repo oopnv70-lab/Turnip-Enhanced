@@ -1,0 +1,286 @@
+name: build-fcl-plugin
+
+# 独立的 FCL 驱动插件构建流程。
+#
+# 与 build-turnip.yml 完全解耦：本 workflow 自己编译 Turnip、自己打 APK，
+# 不改动、不依赖原有的 KSU 模块构建链路。
+#
+# 为什么第三方驱动必须是 APK：FCL 的驱动插件契约（FCL-Team/FCLDriverPlugin）
+# 要求 manifest 里声明 fclPlugin / driver / driver_lib / driver_gpu 四项，
+# 库由 FCL 从插件的 nativeLibraryDir 装载，linkerhook 拦截 libvulkan 的
+# android_dlopen_ext 后按 driver_lib 取用。没有别的注入方式。
+
+on:
+  workflow_dispatch:
+
+  push:
+    branches: [fcl-plugin]
+    paths:
+      - '.github/workflows/build-fcl-plugin.yml'
+      - 'fcl-plugin/**'
+
+env:
+  # 与 build-turnip.yml 保持一致的编译参数：插件里的驱动必须和模块里的同源同参，
+  # 否则同一份源码编出两种行为，排查问题时说不清。
+  ANDROID_STRICT: 'true'
+  SDKVER: '35'
+  NDK_API: '35'
+
+jobs:
+  build:
+    runs-on: ubuntu-24.04
+    timeout-minutes: 90
+
+    steps:
+      - name: 检出源码
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 1
+
+      # ─── 编译驱动（参数逐条对齐 build-turnip.yml）────────────────────
+
+      - name: 缓存构建依赖
+        uses: actions/cache@v4
+        with:
+          path: |
+            /var/cache/apt/archives
+            /opt/mesonenv
+          key: ubuntu24-deps-v1
+
+      - name: 安装构建依赖
+        run: |
+          sudo apt-get update -qq
+          sudo apt-get install -y -qq \
+            build-essential ccache clang llvm ninja-build pkg-config \
+            patchelf zip unzip curl git python3-venv make \
+            glslang-tools
+          if [ ! -x /opt/mesonenv/bin/meson ]; then
+            python3 -m venv /opt/mesonenv
+            /opt/mesonenv/bin/pip install -q --upgrade pip
+            /opt/mesonenv/bin/pip install -q 'meson>=1.4.0' mako pyyaml packaging
+          fi
+          echo "/opt/mesonenv/bin" >> $GITHUB_PATH
+
+      - name: ccache
+        uses: hendrikmuhs/ccache-action@v1.2
+        with:
+          key: turnip-${{ env.SDKVER }}-${{ env.ANDROID_STRICT }}
+          max-size: 2G
+
+      - name: 缓存 Android NDK r29
+        id: ndk-cache
+        uses: actions/cache@v4
+        with:
+          path: /opt/ndk/android-ndk-r29
+          key: ndk-r29-linux-v1
+
+      - name: 下载 Android NDK r29（仅缓存未命中时）
+        if: steps.ndk-cache.outputs.cache-hit != 'true'
+        run: |
+          NDK_ZIP=android-ndk-r29-linux.zip
+          curl -fL --retry 3 -o /tmp/$NDK_ZIP \
+            https://dl.google.com/android/repository/$NDK_ZIP
+          sudo mkdir -p /opt/ndk
+          sudo unzip -q /tmp/$NDK_ZIP -d /opt/ndk
+          rm -f /tmp/$NDK_ZIP
+
+      - name: 生成 cross / native file
+        run: |
+          set -e
+          echo "NDK=/opt/ndk/android-ndk-r29" >> $GITHUB_ENV
+          TC=/opt/ndk/android-ndk-r29/toolchains/llvm/prebuilt/linux-x86_64
+          mkdir -p .ci
+
+          cat > .ci/android-aarch64.txt <<XEOF
+          [binaries]
+          ar = '$TC/bin/llvm-ar'
+          c = ['ccache', '$TC/bin/aarch64-linux-android${NDK_API}-clang']
+          cpp = ['ccache', '$TC/bin/aarch64-linux-android${NDK_API}-clang++', '-fno-exceptions', '-fno-unwind-tables', '-fno-asynchronous-unwind-tables']
+          c_ld = '$TC/bin/ld.lld'
+          cpp_ld = '$TC/bin/ld.lld'
+          strip = '$TC/bin/aarch64-linux-android-strip'
+          pkg-config = ['env', 'PKG_CONFIG_LIBDIR=$TC/pkg-config', '/usr/bin/pkg-config']
+          [host_machine]
+          system = 'android'
+          cpu_family = 'aarch64'
+          cpu = 'armv8'
+          endian = 'little'
+          XEOF
+
+          # host 侧用系统 clang：NDK 的 clang 默认 target aarch64，编不了 x86_64 生成器
+          cat > .ci/native.txt <<XEOF
+          [binaries]
+          c = ['ccache', '/usr/bin/clang']
+          cpp = ['ccache', '/usr/bin/clang++']
+          ar = '/usr/bin/llvm-ar'
+          strip = '/usr/bin/llvm-strip'
+          c_ld = '/usr/bin/ld.lld'
+          cpp_ld = '/usr/bin/ld.lld'
+          [build_machine]
+          system = 'linux'
+          cpu_family = 'x86_64'
+          cpu = 'x86_64'
+          endian = 'little'
+          XEOF
+
+          ls "$TC/bin/aarch64-linux-android${NDK_API}-clang" || \
+            { echo "::error::NDK 无 API ${NDK_API} 的 clang wrapper"; exit 1; }
+
+      - name: meson setup
+        run: |
+          set -e
+          /opt/mesonenv/bin/meson setup build-android-aarch64 \
+            --cross-file .ci/android-aarch64.txt \
+            --native-file .ci/native.txt \
+            -Dbuildtype=release \
+            -Dplatforms=android \
+            -Dplatform-sdk-version="${SDKVER}" \
+            -Dandroid-stub=true \
+            -Dandroid-strict="${ANDROID_STRICT}" \
+            -Dvulkan-beta=true \
+            -Dgallium-drivers= \
+            -Dvulkan-drivers=freedreno \
+            -Dfreedreno-kmds=kgsl \
+            -Db_lto=true \
+            -Db_lto_mode=thin \
+            -Dallow-broken-lto=true \
+            -Dstrip=true \
+            -Degl=disabled
+
+      - name: 编译
+        run: |
+          set -e
+          ninja -C build-android-aarch64
+          ls -lh build-android-aarch64/src/freedreno/vulkan/libvulkan_freedreno.so
+
+      # ─── 打包 FCL 插件 APK ──────────────────────────────────────────
+
+      - name: 注入驱动库到插件工程
+        run: |
+          set -e
+          SO=build-android-aarch64/src/freedreno/vulkan/libvulkan_freedreno.so
+          TC=$NDK/toolchains/llvm/prebuilt/linux-x86_64
+          JNI=fcl-plugin/app/src/main/jniLibs/arm64-v8a
+          mkdir -p "$JNI"
+
+          # soname 与文件名一致，否则 dlopen 之后内部重定位会失败。
+          # 文件名 libvulkan_freedreno.so 是 FCL 的 DriverPlugin.DEFAULT_DRIVER_LIB，
+          # 也是 linkerhook 按 driver_lib 去 nativeLibraryDir 找的目标名。
+          patchelf --set-soname libvulkan_freedreno.so "$SO"
+
+          # 换掉 libc++_shared.so 依赖名。理由同 build-turnip.yml：
+          # sphal namespace 里 /odm/${LIB} 优先于 /vendor/${LIB}，而 /odm 下那份
+          # 是旧版 libc++，缺 __libcpp_verbose_abort。改成私有名才能命中随包提供的这份。
+          patchelf --replace-needed libc++_shared.so libc++_turnip.so "$SO"
+
+          cp "$SO" "$JNI/libvulkan_freedreno.so"
+
+          # 依赖库必须一并打包：主库动态依赖它，缺了插件连加载都过不去。
+          cp "$TC/sysroot/usr/lib/aarch64-linux-android/libc++_shared.so" \
+             "$JNI/libc++_turnip.so"
+          patchelf --set-soname libc++_turnip.so "$JNI/libc++_turnip.so"
+
+          echo "=== 注入结果 ==="
+          ls -lh "$JNI"
+          echo "=== 主库动态段 ==="
+          readelf -d "$JNI/libvulkan_freedreno.so" | grep -E 'NEEDED|SONAME'
+          echo "=== 依赖库动态段 ==="
+          readelf -d "$JNI/libc++_turnip.so" | grep -E 'NEEDED|SONAME'
+
+          readelf -d "$JNI/libvulkan_freedreno.so" | grep -q 'libc++_turnip.so' \
+            || { echo "::error::主库未依赖 libc++_turnip.so"; exit 1; }
+          echo "OK"
+
+      - name: 准备 JDK 17
+        uses: actions/setup-java@v4
+        with:
+          distribution: temurin
+          java-version: '17'
+
+      - name: 准备 Gradle 8.7
+        uses: gradle/actions/setup-gradle@v4
+        with:
+          gradle-version: '8.7'
+
+      - name: 确认 Android SDK 组件
+        run: |
+          set -e
+          # ubuntu-24.04 runner 自带 Android SDK，这里只用 sdkmanager 补缺失组件，
+          # 不引额外 setup 动作。
+          if [ -z "$ANDROID_HOME" ]; then
+            export ANDROID_HOME=/usr/local/lib/android/sdk
+            echo "ANDROID_HOME=$ANDROID_HOME" >> $GITHUB_ENV
+          fi
+          echo "ANDROID_HOME=$ANDROID_HOME"
+          ls "$ANDROID_HOME" || { echo "::error::找不到 Android SDK"; exit 1; }
+
+          SDKM="$ANDROID_HOME/cmdline-tools/latest/bin/sdkmanager"
+          [ -x "$SDKM" ] || SDKM=$(find "$ANDROID_HOME" -name sdkmanager -type f | head -1)
+          echo "sdkmanager=$SDKM"
+
+          NEED=""
+          [ -d "$ANDROID_HOME/platforms/android-34" ] || NEED="$NEED platforms;android-34"
+          [ -d "$ANDROID_HOME/build-tools/34.0.0" ] || NEED="$NEED build-tools;34.0.0"
+          if [ -n "$NEED" ]; then
+            yes | "$SDKM" --licenses > /dev/null 2>&1 || true
+            "$SDKM" $NEED
+          fi
+
+          echo "=== platforms ==="; ls "$ANDROID_HOME/platforms"
+          echo "=== build-tools ==="; ls "$ANDROID_HOME/build-tools"
+
+      - name: 构建插件 APK
+        working-directory: fcl-plugin
+        env:
+          FCL_KEYSTORE_FILE: ${{ runner.temp }}/fcl.jks
+          FCL_KEYSTORE_PASSWORD: fclturnip
+          FCL_KEY_ALIAS: fcl
+          FCL_KEY_PASSWORD: fclturnip
+        run: |
+          set -e
+          # 现场生成签名 keystore。固定口令无所谓，只用于自签分发。
+          keytool -genkeypair \
+            -keystore "$FCL_KEYSTORE_FILE" \
+            -storetype JKS \
+            -storepass "$FCL_KEYSTORE_PASSWORD" \
+            -keypass "$FCL_KEY_PASSWORD" \
+            -alias "$FCL_KEY_ALIAS" \
+            -keyalg RSA -keysize 2048 -validity 10000 \
+            -dname "CN=Turnip Enhanced FCL Driver, O=oopnv70-lab, C=CN"
+
+          gradle --no-daemon --console=plain assembleRelease
+
+          echo "=== 产物 ==="
+          find app/build/outputs -name '*.apk' -exec ls -lh {} \;
+
+      - name: 校验 APK
+        run: |
+          set -e
+          APK=$(find fcl-plugin/app/build/outputs -name '*.apk' | head -1)
+          echo "APK=$APK"
+          BT=$(ls -d "$ANDROID_HOME"/build-tools/* | sort -V | tail -1)
+          echo "build-tools=$BT"
+
+          echo "=== 包内 native 库 ==="
+          unzip -l "$APK" | grep -E '\.so$' || { echo "::error::APK 内没有 .so"; exit 1; }
+          for lib in libvulkan_freedreno.so libc++_turnip.so; do
+            unzip -l "$APK" | grep -q "$lib" || { echo "::error::缺 $lib"; exit 1; }
+          done
+
+          echo "=== 包名 / 版本 ==="
+          "$BT/aapt2" dump badging "$APK" | grep -E "^package:|application-label:"
+
+          echo "=== metaData（FCL 识别插件的依据，四项必须齐全）==="
+          "$BT/aapt2" dump xmltree "$APK" --file AndroidManifest.xml \
+            | grep -A1 -E 'fclPlugin|driver_lib|driver_gpu|"driver"'
+
+          echo "=== 签名 ==="
+          "$BT/apksigner" verify --verbose "$APK"
+
+      - name: 上传 artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: fcl-driver-plugin-${{ github.sha }}
+          path: fcl-plugin/app/build/outputs/apk/release/*.apk
+          if-no-files-found: warn
