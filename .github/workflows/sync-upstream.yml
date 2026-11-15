@@ -29,6 +29,10 @@ jobs:
           git checkout main -- CHANGELOG-UPSTREAM.md
           git checkout main -- module
           git checkout main -- extras
+          git checkout main -- VERSION
+          # fork 专有：禁用 ANDROID_STRICT 扩展白名单，放行全部已实现扩展。
+          # 该文件上游自 merge-base 起零改动，回填安全。
+          git checkout main -- src/vulkan/util/vk_extensions_gen.py
           git add -A
           echo "CHANGED_FILES=$(git diff --cached --name-only | wc -l)"
           git diff --cached --stat | tail -3
