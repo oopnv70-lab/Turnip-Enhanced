@@ -23,6 +23,7 @@
 #include "tools/radv_rmv.h"
 #include "tools/radv_spm.h"
 #include "tools/radv_sqtt.h"
+#include "util/macros.h"
 #include "util/u_debug.h"
 #include "radv_cs.h"
 #include "radv_device.h"
@@ -30,6 +31,7 @@
 #include "radv_formats.h"
 #include "radv_physical_device.h"
 #include "radv_shader.h"
+#include "vk_app_workarounds.h"
 #include "vk_common_entrypoints.h"
 #include "vk_pipeline_cache.h"
 #include "vk_util.h"
@@ -62,8 +64,11 @@ radv_GetMemoryHostPointerPropertiesEXT(VkDevice _device, VkExternalMemoryHandleT
    case VK_EXTERNAL_MEMORY_HANDLE_TYPE_HOST_ALLOCATION_BIT_EXT: {
       uint32_t memoryTypeBits = 0;
       for (int i = 0; i < pdev->memory_properties.memoryTypeCount; i++) {
-         if (pdev->memory_domains[i] == RADEON_DOMAIN_GTT && !(pdev->memory_flags[i] & RADEON_FLAG_GTT_WC)) {
-            memoryTypeBits = (1 << i);
+         uint32_t memoryType = 1u << i;
+
+         if ((device->memory_types_allowed & memoryType) && pdev->memory_domains[i] == RADEON_DOMAIN_GTT &&
+             !(pdev->memory_flags[i] & RADEON_FLAG_GTT_WC)) {
+            memoryTypeBits = memoryType;
             break;
          }
       }
@@ -771,9 +776,7 @@ init_app_workarounds_entrypoints(struct radv_device *device, struct dispatch_tab
    struct vk_device_entrypoint_table table = {0};
 
 #define SET_ENTRYPOINT(app_layer, entrypoint) table.entrypoint = app_layer##_##entrypoint;
-   if (!strcmp(pdev->drirc.debug.app_layer, "metroexodus")) {
-      SET_ENTRYPOINT(metro_exodus, GetSemaphoreCounterValue);
-   } else if (!strcmp(pdev->drirc.debug.app_layer, "rage2")) {
+   if (!strcmp(pdev->drirc.debug.app_layer, "rage2")) {
       SET_ENTRYPOINT(rage2, CmdBeginRenderPass);
    } else if (!strcmp(pdev->drirc.debug.app_layer, "quanticdream")) {
       SET_ENTRYPOINT(quantic_dream, UnmapMemory2);
@@ -1523,6 +1526,10 @@ radv_CreateDevice(VkPhysicalDevice physicalDevice, const VkDeviceCreateInfo *pCr
    device->vk.capture_trace = capture_trace;
    device->vk.check_status = radv_device_check_status;
 
+   device->memory_types_allowed = BITFIELD_MASK(pdev->memory_properties.memoryTypeCount);
+   if (!device->vk.enabled_features.deviceCoherentMemory)
+      device->memory_types_allowed &= ~pdev->memory_types_device_coherent;
+
    device->vk.command_buffer_ops = &radv_cmd_buffer_ops;
 
    result = radv_device_init_utrace(device);
@@ -1530,6 +1537,10 @@ radv_CreateDevice(VkPhysicalDevice physicalDevice, const VkDeviceCreateInfo *pCr
       goto fail;
 
    init_dispatch_tables(device, pdev);
+
+   result = vk_device_init_app_workarounds(&device->vk, pdev->drirc.debug.vk_app_layer);
+   if (result != VK_SUCCESS)
+      goto fail;
 
    /* Initialize everything required for compilation, first. */
 
@@ -1665,8 +1676,7 @@ radv_CreateDevice(VkPhysicalDevice physicalDevice, const VkDeviceCreateInfo *pCr
    if (result != VK_SUCCESS)
       goto fail;
 
-   device->pbb_allowed = pdev->info.gfx_level >= GFX9 && !RADV_DEBUG(instance, NOBINNING) &&
-                         !(pdev->info.gfx_level == GFX11 && pdev->drirc.debug.disable_binning_gfx11);
+   device->pbb_allowed = pdev->info.gfx_level >= GFX9 && !RADV_DEBUG(instance, NOBINNING);
 
    /* The maximum number of scratch waves. Scratch space isn't divided
     * evenly between CUs. The number is only a function of the number of CUs.
@@ -1824,8 +1834,7 @@ radv_GetImageMemoryRequirements2(VkDevice _device, const VkImageMemoryRequiremen
       alignment = image->alignment;
    }
 
-   pMemoryRequirements->memoryRequirements.memoryTypeBits =
-      ((1u << pdev->memory_properties.memoryTypeCount) - 1u) & ~pdev->memory_types_32bit;
+   pMemoryRequirements->memoryRequirements.memoryTypeBits = device->memory_types_allowed & ~pdev->memory_types_32bit;
 
    if (image->vk.create_flags & VK_IMAGE_CREATE_2_PROTECTED_BIT_KHR)
       pMemoryRequirements->memoryRequirements.memoryTypeBits &= pdev->memory_types_protected;
@@ -1954,9 +1963,9 @@ radv_compute_valid_memory_types_attempt(struct radv_physical_device *pdev, enum 
 }
 
 static uint32_t
-radv_compute_valid_memory_types(struct radv_physical_device *pdev, enum radeon_bo_domain domains,
-                                enum radeon_bo_flag flags)
+radv_compute_valid_memory_types(struct radv_device *device, enum radeon_bo_domain domains, enum radeon_bo_flag flags)
 {
+   struct radv_physical_device *pdev = radv_device_physical(device);
    enum radeon_bo_flag ignore_flags = ~(RADEON_FLAG_NO_CPU_ACCESS | RADEON_FLAG_GTT_WC);
    uint32_t bits = radv_compute_valid_memory_types_attempt(pdev, domains, flags, ignore_flags);
 
@@ -1971,16 +1980,13 @@ radv_compute_valid_memory_types(struct radv_physical_device *pdev, enum radeon_b
    }
 
    /* Avoid 32-bit memory types for shared memory. */
-   bits &= ~pdev->memory_types_32bit;
-
-   return bits;
+   return bits & device->memory_types_allowed & ~pdev->memory_types_32bit;
 }
 VKAPI_ATTR VkResult VKAPI_CALL
 radv_GetMemoryFdPropertiesKHR(VkDevice _device, VkExternalMemoryHandleTypeFlagBits handleType, int fd,
                               VkMemoryFdPropertiesKHR *pMemoryFdProperties)
 {
    VK_FROM_HANDLE(radv_device, device, _device);
-   struct radv_physical_device *pdev = radv_device_physical(device);
 
    switch (handleType) {
    case VK_EXTERNAL_MEMORY_HANDLE_TYPE_DMA_BUF_BIT_EXT: {
@@ -1989,7 +1995,7 @@ radv_GetMemoryFdPropertiesKHR(VkDevice _device, VkExternalMemoryHandleTypeFlagBi
       if (!device->ws->buffer_get_flags_from_fd(device->ws, fd, &domains, &flags))
          return vk_error(device, VK_ERROR_INVALID_EXTERNAL_HANDLE);
 
-      pMemoryFdProperties->memoryTypeBits = radv_compute_valid_memory_types(pdev, domains, flags);
+      pMemoryFdProperties->memoryTypeBits = radv_compute_valid_memory_types(device, domains, flags);
       return VK_SUCCESS;
    }
    default:

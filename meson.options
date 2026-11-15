@@ -650,6 +650,13 @@ option(
 )
 
 option(
+  'apitrace',
+  type : 'boolean',
+  value : false,
+  description : 'Build in apitrace GL call tracing, enabled at run time with MESA_APITRACE=1. Default: false'
+)
+
+option(
   'perfetto',
   type : 'boolean',
   value : false,
@@ -928,11 +935,4 @@ option(
   type : 'boolean',
   value : true,
   description : 'Build panfrost Rust components.'
-)
-
-option(
-  'panfrost-disassemble',
-  type : 'boolean',
-  value : true,
-  description : 'Build panfrost disassemblers. Explicitly setting this option to false will cause the panfrost stack to build without disassemblers. This should be left enabled for distro builds.'
 )

@@ -2154,7 +2154,7 @@ static unsigned si_is_vertex_format_supported(struct pipe_screen *screen, enum p
 
    if (sscreen->info.gfx_level >= GFX10) {
       const struct gfx10_format *fmt = &ac_get_gfx10_format_table(sscreen->info.gfx_level)[format];
-      unsigned first_image_only_format = sscreen->info.gfx_level >= GFX11 ? 64 : 128;
+      unsigned first_image_only_format = (sscreen->info.gfx_level >= GFX11 && sscreen->info.gfx_level < GFX13) ? 64 : 128;
 
       if (!fmt->img_format || fmt->img_format >= first_image_only_format)
          return 0;
@@ -2547,6 +2547,7 @@ static void si_set_framebuffer_state(struct pipe_context *ctx,
    sctx->framebuffer.any_dst_linear = false;
    sctx->framebuffer.CB_has_shader_readable_metadata = false;
    sctx->framebuffer.DB_has_shader_readable_metadata = false;
+   sctx->framebuffer.DB_meta_pipe_misaligned = false;
    sctx->framebuffer.all_DCC_pipe_aligned = true;
    sctx->framebuffer.has_dcc_msaa = false;
    sctx->framebuffer.min_bytes_per_pixel = 0;
@@ -2619,8 +2620,10 @@ static void si_set_framebuffer_state(struct pipe_context *ctx,
       si_init_depth_surface(sctx);
 
       if (sctx->gfx_level < GFX12 &&
-          vi_tc_compat_htile_enabled(zstex, state->zsbuf.level, PIPE_MASK_ZS))
+          vi_tc_compat_htile_enabled(zstex, state->zsbuf.level, PIPE_MASK_ZS)) {
          sctx->framebuffer.DB_has_shader_readable_metadata = true;
+         sctx->framebuffer.DB_meta_pipe_misaligned = zstex->htile_pipe_misaligned;
+      }
 
       /* Update the minimum but don't keep 0. */
       if (!sctx->framebuffer.min_bytes_per_pixel ||
@@ -3495,7 +3498,7 @@ static void si_set_min_samples(struct pipe_context *ctx, unsigned min_samples)
 
 /**
  * Build the sampler view descriptor for a buffer texture.
- * @param state 256-bit descriptor; only the high 128 bits are filled in
+ * @param state 256-bit descriptor
  */
 void si_make_buffer_descriptor(struct si_screen *screen, struct si_resource *buf,
                                enum pipe_format format, unsigned offset, unsigned num_elements,
@@ -3503,7 +3506,7 @@ void si_make_buffer_descriptor(struct si_screen *screen, struct si_resource *buf
 {
    const struct util_format_description *desc;
    unsigned stride;
-   unsigned num_records;
+   uint64_t num_records;
 
    desc = util_format_description(format);
    stride = desc->block.bits / 8;
@@ -3534,7 +3537,7 @@ void si_make_buffer_descriptor(struct si_screen *screen, struct si_resource *buf
     * - For VMEM and inst.IDXEN == 0 or STRIDE == 0, it's in byte units.
     * - For VMEM and inst.IDXEN == 1 and STRIDE != 0, it's in units of STRIDE.
     */
-   if (screen->info.gfx_level == GFX8)
+   if (screen->info.gfx_level == GFX8 || screen->info.gfx_level >= GFX13)
       num_records *= stride;
 
    const struct ac_buffer_state buffer_state = {
@@ -3553,6 +3556,8 @@ void si_make_buffer_descriptor(struct si_screen *screen, struct si_resource *buf
    };
 
    ac_build_buffer_descriptor(screen->info.gfx_level, &buffer_state, &state[0]);
+   if (screen->info.gfx_level >= GFX13)
+      ac_set_buf_desc_word4(screen->info.gfx_level, &buffer_state, &state[4]);
 }
 
 /**
@@ -4307,7 +4312,11 @@ static void *si_create_vertex_elements(struct pipe_context *ctx, unsigned count,
    unsigned num_vbos_in_user_sgprs = si_num_vbos_in_user_sgprs_inline(sscreen->info.gfx_level);
    unsigned alloc_count =
       count > num_vbos_in_user_sgprs ? count - num_vbos_in_user_sgprs : 0;
-   v->vb_desc_list_alloc_size = align(alloc_count * 16, SI_CPDMA_ALIGNMENT);
+   unsigned alloc_size = alloc_count * 16;
+   /* Append the size of format dwords (5th dword of descriptor) for GFX13. */
+   if (sscreen->info.gfx_level >= GFX13)
+      alloc_size += DIV_ROUND_UP(alloc_count, 4) * 16;
+   v->vb_desc_list_alloc_size = align(alloc_size, SI_CPDMA_ALIGNMENT);
 
    for (i = 0; i < count; ++i) {
       const struct util_format_description *desc;
@@ -4480,7 +4489,10 @@ static void *si_create_vertex_elements(struct pipe_context *ctx, unsigned count,
          .has_desc_resource_level = sscreen->info.compiler_info.has_desc_resource_level,
       };
 
-      ac_set_buf_desc_word3(sscreen->info.gfx_level, &buffer_state, &v->elem[i].rsrc_word3);
+      if (sscreen->info.gfx_level >= GFX13)
+         ac_set_buf_desc_word4(sscreen->info.gfx_level, &buffer_state, &v->elem[i].rsrc_word3);
+      else
+         ac_set_buf_desc_word3(sscreen->info.gfx_level, &buffer_state, &v->elem[i].rsrc_word3);
    }
 
    if (v->instance_divisor_is_fetched) {
@@ -4658,8 +4670,10 @@ si_create_vertex_state(struct pipe_screen *screen,
    }
 
    for (unsigned i = 0; i < num_elements; i++) {
+      unsigned desc_size = si_buffer_desc_size_in_dw(sscreen->info.gfx_level);
       si_set_vertex_buffer_descriptor(sscreen, &state->velems, &state->b.input.vbuffer, i,
-                                      &state->descriptors[i * 4]);
+                                      &state->descriptors[i * desc_size],
+                                      &state->descriptors[i * desc_size + 4]);
    }
 
    return &state->b;

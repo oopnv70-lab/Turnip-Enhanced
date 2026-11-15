@@ -60,7 +60,7 @@ nak_nir_workgroup_has_one_subgroup(const nir_shader *nir)
    case MESA_SHADER_GEOMETRY:
    case MESA_SHADER_FRAGMENT:
       UNREACHABLE("Shader stage does not have workgroups");
-      break;
+      return false;
 
    case MESA_SHADER_TESS_CTRL:
       /* Tessellation only ever has one subgroup per workgroup.  The Vulkan
@@ -91,6 +91,7 @@ nak_nir_workgroup_has_one_subgroup(const nir_shader *nir)
 
    default:
       UNREACHABLE("Unknown shader stage");
+      return false;
    }
 }
 
@@ -1719,7 +1720,9 @@ nak_postprocess_nir(nir_shader *nir,
    nak_optimize_nir(nir, nak);
 
    OPT(nir, nak_nir_lower_tex, nak);
-   OPT(nir, nir_lower_idiv, NULL);
+
+   struct nir_lower_idiv_options idiv_options = {};
+   OPT(nir, nir_lower_idiv, &idiv_options);
 
    nir_shader_gather_info(nir, nir_shader_get_entrypoint(nir));
 
@@ -1811,6 +1814,8 @@ nak_postprocess_nir(nir_shader *nir,
       OPT(nir, nak_nir_opt_offset_shift_nv, nak);
 
    OPT(nir, nir_lower_doubles, NULL, nak->nir_options.lower_doubles_options);
+   /* Create 64 bit imads first */
+   OPT(nir, nak_nir_opt_int64, nak);
    OPT(nir, nir_lower_int64);
 
    if (nak->sm >= 70)

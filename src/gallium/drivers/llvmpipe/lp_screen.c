@@ -272,6 +272,7 @@ llvmpipe_init_screen_caps(struct pipe_screen *screen)
    caps->vertex_color_clamped = true;
    caps->glsl_feature_level_compatibility =
    caps->glsl_feature_level = 460;
+   caps->fs_sample_variables = true;
    caps->compute = true;
    caps->user_vertex_buffers = true;
    caps->tgsi_texcoord = true;
@@ -888,12 +889,10 @@ update_cache_blake3_cpu(blake3_hasher *ctx)
 {
    const struct util_cpu_caps_t *cpu_caps = util_get_cpu_caps();
    /*
-    * Don't need the cpu cache affinity stuff. The rest
-    * is contained in first 5 dwords.
+    * Don't need the cpu cache affinity stuff, which starts at num_L3_caches.
     */
-   STATIC_ASSERT(offsetof(struct util_cpu_caps_t, num_L3_caches)
-                 == 5 * sizeof(uint32_t));
-   _mesa_blake3_update(ctx, cpu_caps, 5 * sizeof(uint32_t));
+   _mesa_blake3_update(ctx, cpu_caps,
+                       offsetof(struct util_cpu_caps_t, num_L3_caches));
 }
 
 

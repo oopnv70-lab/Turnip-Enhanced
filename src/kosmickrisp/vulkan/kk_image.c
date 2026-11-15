@@ -21,12 +21,53 @@
 #include "vk_format.h"
 #include "wsi_common_private.h"
 
+static bool
+vk_format_is_bc(VkFormat format)
+{
+   switch (format) {
+   case VK_FORMAT_BC1_RGB_SRGB_BLOCK:
+   case VK_FORMAT_BC1_RGB_UNORM_BLOCK:
+   case VK_FORMAT_BC1_RGBA_SRGB_BLOCK:
+   case VK_FORMAT_BC1_RGBA_UNORM_BLOCK:
+   case VK_FORMAT_BC2_SRGB_BLOCK:
+   case VK_FORMAT_BC2_UNORM_BLOCK:
+   case VK_FORMAT_BC3_UNORM_BLOCK:
+   case VK_FORMAT_BC3_SRGB_BLOCK:
+   case VK_FORMAT_BC4_UNORM_BLOCK:
+   case VK_FORMAT_BC4_SNORM_BLOCK:
+   case VK_FORMAT_BC5_UNORM_BLOCK:
+   case VK_FORMAT_BC5_SNORM_BLOCK:
+   case VK_FORMAT_BC6H_UFLOAT_BLOCK:
+   case VK_FORMAT_BC6H_SFLOAT_BLOCK:
+   case VK_FORMAT_BC7_UNORM_BLOCK:
+   case VK_FORMAT_BC7_SRGB_BLOCK:
+      return true;
+   default:
+      return false;
+   }
+}
+
+static bool
+format_is_32bit_float(enum pipe_format p_format)
+{
+   const struct util_format_description *desc =
+      util_format_description(p_format);
+   int c = util_format_get_first_non_void_channel(p_format);
+
+   return c >= 0 && desc->channel[c].type == UTIL_FORMAT_TYPE_FLOAT &&
+          desc->channel[c].size == 32;
+}
+
 static VkFormatFeatureFlags2
 kk_get_image_plane_format_features(struct kk_physical_device *pdev,
                                    VkFormat vk_format, VkImageTiling tiling,
                                    uint64_t drm_format_mod)
 {
    VkFormatFeatureFlags2 features = 0;
+
+   if (!pdev->info.supports_bc_texture_compression &&
+       vk_format_is_bc(vk_format))
+      return 0;
 
    /* Metal does not support linear tiling for compressed formats */
    if (tiling == VK_IMAGE_TILING_LINEAR && vk_format_is_compressed(vk_format))
@@ -44,11 +85,18 @@ kk_get_image_plane_format_features(struct kk_physical_device *pdev,
    if (va_format == NULL)
       return 0;
 
+   /* Some formats require a minimum GPU family, or may be texel buffer only */
+   if (pdev->info.gpu_apple_family < va_format->gpu_family ||
+       va_format->image_feats == 0)
+      return 0;
+
    // Textures can at least be sampled
    features |= VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_BIT;
    features |= VK_FORMAT_FEATURE_2_BLIT_SRC_BIT;
 
-   if (va_format->filter) {
+   /* Not all GPUs support linear filtering of 32bit float formats (A chips) */
+   if (va_format->filter && (pdev->info.supports_32_bit_float_filtering ||
+                             !format_is_32bit_float(p_format))) {
       features |= VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_FILTER_LINEAR_BIT;
       if (pdev->vk.supported_extensions.EXT_sampler_filter_minmax)
          features |= VK_FORMAT_FEATURE_2_SAMPLED_IMAGE_FILTER_MINMAX_BIT;

@@ -47,6 +47,7 @@ quirk_names = {
     "QCTDD08901551": "stsc_ss",
     "QCTDD09112208": "cmdbuf_start_cs",
     "QCTDD10204462": "flat_ei",
+    "QCTDD10497382": "rt_workaround",
     "QCTDD10789828": "no_a0_ep",
     "QCTDD11147232": "alias_mova",
     "QCTDD11183148": "alias_pred",
@@ -145,6 +146,29 @@ class GPUInfo(Struct):
         self.macrotile_mode = macrotile_mode
 
         s.gpu_infos.append(self)
+
+
+class A5xxGPUInfo(GPUInfo):
+    """The a5xx parts differ in how many SP cores they have, in the size
+       of their register file and how waves are allocated from it, and in
+       where their SoC interleaves memory."""
+    def __init__(self, num_sp_cores, highest_bank_bit, reg_size_vec4,
+                 wave_granularity):
+        super().__init__(
+            CHIP.A5XX,
+            gmem_align_w = 64,  gmem_align_h = 32,
+            tile_align_w = 64,  tile_align_h = 32,
+            tile_max_w   = 1024, # max_bitfield_val(7, 0, 5)
+            tile_max_h   = 1024, # bins of 2048 rows and up render wrong with hw binning
+            num_vsc_pipes = 16,
+            cs_shared_mem_size = 32 * 1024,
+            wave_granularity = wave_granularity,
+            fibers_per_sp = 64 * 16, # Lowest number that didn't fault on spillall fs-varying-array-mat4-col-row-rd.
+            threadsize_base = 32,
+            reg_size_vec4 = reg_size_vec4,
+            num_sp_cores = num_sp_cores,
+            highest_bank_bit = highest_bank_bit,
+        )
 
 
 class A6xxGPUInfo(GPUInfo):

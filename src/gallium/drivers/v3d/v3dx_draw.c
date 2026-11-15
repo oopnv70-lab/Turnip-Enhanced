@@ -1266,7 +1266,8 @@ v3d_draw_vbo(struct pipe_context *pctx, const struct pipe_draw_info *info,
                 v3d_emit_gl_shader_state(v3d, info);
         }
 
-        v3d->dirty = 0;
+        /* Keep the compute state dirty until the next dispatch. */
+        v3d->dirty &= V3D_DIRTY_UNCOMPILED_COMPUTE | V3D_DIRTY_COMPTEX;
 
         /* The Base Vertex/Base Instance packet sets those values to nonzero
          * for the next draw call only.
@@ -1433,7 +1434,7 @@ v3d_launch_grid(struct pipe_context *pctx, const struct pipe_grid_info *info)
 
         v3d_predraw_check_stage_inputs(pctx, MESA_SHADER_COMPUTE);
 
-        v3d_update_compiled_cs(v3d);
+        v3d_update_compiled_compute(v3d);
 
         if (!v3d->prog.compute->resource) {
                 mesa_loge_once("Compute shader failed to compile.  "

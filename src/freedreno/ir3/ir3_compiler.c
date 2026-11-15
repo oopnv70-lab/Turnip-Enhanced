@@ -332,7 +332,14 @@ ir3_compiler_create(struct fd_device *dev, const struct fd_dev_id *dev_id,
       if (compiler->gen == 5) {
          compiler->max_const_geom = 448;
          compiler->max_const_frag = 448;
-         compiler->max_const_compute = 448;
+
+         /* While there are 512 consts in the file, on the CS side the UAV
+          * descriptors land at both 192 and 448, and uploads to the const file
+          * wrap back to 0 at DST_OFF=256 (even with XORing in unknown bits to
+          * various CS control regs).  QC blob 512.415 never uploads past 192 in
+          * a test with a load from an increasing sized UBO.
+          */
+         compiler->max_const_compute = 192;
       }
 
       /* Note: this will have to change if/when we support tess+GS on
@@ -363,7 +370,7 @@ ir3_compiler_create(struct fd_device *dev, const struct fd_dev_id *dev_id,
       compiler->flat_bypass = true;
       compiler->levels_add_one = false;
       compiler->unminify_coords = false;
-      compiler->txf_ms_with_isaml = false;
+      compiler->txf_ms_with_isam = false;
       compiler->array_index_add_half = true;
       compiler->instr_align = 16;
       compiler->const_upload_unit = 4;
@@ -372,7 +379,7 @@ ir3_compiler_create(struct fd_device *dev, const struct fd_dev_id *dev_id,
       compiler->flat_bypass = false;
       compiler->levels_add_one = true;
       compiler->unminify_coords = true;
-      compiler->txf_ms_with_isaml = true;
+      compiler->txf_ms_with_isam = true;
       compiler->array_index_add_half = false;
       compiler->instr_align = 4;
       compiler->const_upload_unit = 8;
@@ -389,6 +396,7 @@ ir3_compiler_create(struct fd_device *dev, const struct fd_dev_id *dev_id,
 
    /* Set up nir shader compiler options, using device-specific overrides of our base settings. */
    compiler->nir_options = ir3_base_options;
+   compiler->nir_options.lower_fquantize2f16 = compiler->gen >= 8;
    compiler->nir_options.has_iadd3 = dev_info->props.has_sad;
    /* MGEN.B doesn't seem to produce useful results on FD307 */
    compiler->nir_options.has_bfm = compiler->gen >= 4;

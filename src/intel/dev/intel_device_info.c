@@ -195,6 +195,7 @@ static const struct intel_device_info intel_device_info_snb_gt1 = {
       .size = 32,
       .min_entries = {
          [MESA_SHADER_VERTEX]   = 24,
+         [MESA_SHADER_GEOMETRY] = 2,
       },
       .max_entries = {
          [MESA_SHADER_VERTEX]   = 256,
@@ -224,6 +225,7 @@ static const struct intel_device_info intel_device_info_snb_gt2 = {
       .size = 64,
       .min_entries = {
          [MESA_SHADER_VERTEX]   = 24,
+         [MESA_SHADER_GEOMETRY] = 2,
       },
       .max_entries = {
          [MESA_SHADER_VERTEX]   = 256,
@@ -260,7 +262,9 @@ static const struct intel_device_info intel_device_info_ivb_gt1 = {
    .urb = {
       .min_entries = {
          [MESA_SHADER_VERTEX]    = 32,
+         [MESA_SHADER_TESS_CTRL] = 1,
          [MESA_SHADER_TESS_EVAL] = 10,
+         [MESA_SHADER_GEOMETRY]  = 2,
       },
       .max_entries = {
          [MESA_SHADER_VERTEX]    = 512,
@@ -289,7 +293,9 @@ static const struct intel_device_info intel_device_info_ivb_gt2 = {
    .urb = {
       .min_entries = {
          [MESA_SHADER_VERTEX]    = 32,
+         [MESA_SHADER_TESS_CTRL] = 1,
          [MESA_SHADER_TESS_EVAL] = 10,
+         [MESA_SHADER_GEOMETRY]  = 2,
       },
       .max_entries = {
          [MESA_SHADER_VERTEX]    = 704,
@@ -318,7 +324,9 @@ static const struct intel_device_info intel_device_info_byt = {
    .urb = {
       .min_entries = {
          [MESA_SHADER_VERTEX]    = 32,
+         [MESA_SHADER_TESS_CTRL] = 1,
          [MESA_SHADER_TESS_EVAL] = 10,
+         [MESA_SHADER_GEOMETRY]  = 2,
       },
       .max_entries = {
          [MESA_SHADER_VERTEX]    = 512,
@@ -352,7 +360,9 @@ static const struct intel_device_info intel_device_info_hsw_gt1 = {
    .urb = {
       .min_entries = {
          [MESA_SHADER_VERTEX]    = 32,
+         [MESA_SHADER_TESS_CTRL] = 1,
          [MESA_SHADER_TESS_EVAL] = 10,
+         [MESA_SHADER_GEOMETRY]  = 2,
       },
       .max_entries = {
          [MESA_SHADER_VERTEX]    = 640,
@@ -380,7 +390,9 @@ static const struct intel_device_info intel_device_info_hsw_gt2 = {
    .urb = {
       .min_entries = {
          [MESA_SHADER_VERTEX]    = 64,
+         [MESA_SHADER_TESS_CTRL] = 1,
          [MESA_SHADER_TESS_EVAL] = 10,
+         [MESA_SHADER_GEOMETRY]  = 2,
       },
       .max_entries = {
          [MESA_SHADER_VERTEX]    = 1664,
@@ -408,7 +420,9 @@ static const struct intel_device_info intel_device_info_hsw_gt3 = {
    .urb = {
       .min_entries = {
          [MESA_SHADER_VERTEX]    = 64,
+         [MESA_SHADER_TESS_CTRL] = 1,
          [MESA_SHADER_TESS_EVAL] = 10,
+         [MESA_SHADER_GEOMETRY]  = 2,
       },
       .max_entries = {
          [MESA_SHADER_VERTEX]    = 1664,
@@ -520,7 +534,9 @@ static const struct intel_device_info intel_device_info_chv = {
    .urb = {
       .min_entries = {
          [MESA_SHADER_VERTEX]    = 34,
+         [MESA_SHADER_TESS_CTRL] = 1,
          [MESA_SHADER_TESS_EVAL] = 34,
+         [MESA_SHADER_GEOMETRY]  = 2,
       },
       .max_entries = {
          [MESA_SHADER_VERTEX]    = 640,
@@ -595,7 +611,9 @@ static const struct intel_device_info intel_device_info_chv = {
    .urb = {                                        \
       .min_entries = {                             \
          [MESA_SHADER_VERTEX]    = 34,             \
+         [MESA_SHADER_TESS_CTRL] = 1,              \
          [MESA_SHADER_TESS_EVAL] = 34,             \
+         [MESA_SHADER_GEOMETRY] =  2,              \
       },                                           \
       .max_entries = {                             \
          [MESA_SHADER_VERTEX]    = 704,            \
@@ -616,7 +634,9 @@ static const struct intel_device_info intel_device_info_chv = {
    .urb = {                                        \
       .min_entries = {                             \
          [MESA_SHADER_VERTEX]    = 34,             \
+         [MESA_SHADER_TESS_CTRL] = 1,              \
          [MESA_SHADER_TESS_EVAL] = 34,             \
+         [MESA_SHADER_GEOMETRY]  = 2,              \
       },                                           \
       .max_entries = {                             \
          [MESA_SHADER_VERTEX]    = 352,            \
@@ -1224,7 +1244,17 @@ static const struct intel_device_info intel_device_info_lnl = {
    .verx10 = 300
 
 #define XE3_URB_MIN_MAX_ENTRIES                                 \
-   XE2_URB_MIN_MAX_ENTRIES
+   XE2_URB_MIN_MAX_ENTRIES,                                     \
+   /* Use URB size for device config with 1 slice. */           \
+   .urb.size = 600,                                             \
+   .urb.max_entries = {                                         \
+      [MESA_SHADER_VERTEX]    = 5888, /* BSpec 47134 */         \
+      [MESA_SHADER_TESS_CTRL] = 1548, /* BSpec 47131 */         \
+      [MESA_SHADER_TESS_EVAL] = 4480, /* BSpec 47129 */         \
+      [MESA_SHADER_GEOMETRY]  = 1952, /* BSpec 47130 */         \
+      [MESA_SHADER_TASK]      = 1548, /* BSpec 56267 */         \
+      [MESA_SHADER_MESH]      = 1952, /* BSpec 56266 */         \
+   }
 
 #define XE3_PLACEHOLDER_THREADS_AND_URB                         \
    XEHP_PLACEHOLDER_THREADS_AND_URB,                            \
@@ -1258,11 +1288,31 @@ static const struct intel_device_info intel_device_info_nvl_u_h = {
    .has_local_mem = false,
 };
 
+#define XE3P_URB_MIN_MAX_ENTRIES  \
+   .urb = {                                                \
+      .size = 600, /* For intel_stub_gpu */                \
+      .min_entries = {                                     \
+         [MESA_SHADER_VERTEX]    = 128,                    \
+         [MESA_SHADER_TESS_CTRL] = 2,                      \
+         [MESA_SHADER_TESS_EVAL] = 128,                    \
+         [MESA_SHADER_GEOMETRY]  = 4,                      \
+         [MESA_SHADER_TASK]      = 2,                      \
+         [MESA_SHADER_MESH]      = 4,                      \
+      },                                                   \
+      .max_entries = {                                     \
+         [MESA_SHADER_VERTEX]    = 5888, /* BSpec 56268 */ \
+         [MESA_SHADER_TESS_CTRL] = 1548, /* BSpec 56265 */ \
+         [MESA_SHADER_TESS_EVAL] = 4480, /* BSpec 56263 */ \
+         [MESA_SHADER_GEOMETRY]  = 1952, /* BSpec 56264 */ \
+         [MESA_SHADER_TASK]      = 1548, /* BSpec 56267 */ \
+         [MESA_SHADER_MESH]      = 1952, /* BSpec 56266 */ \
+      }                                                    \
+   }
+
 #define XE3P_PLACEHOLDER_THREADS_AND_URB                        \
    XE3_PLACEHOLDER_THREADS_AND_URB,                             \
    .num_thread_per_eu = 8 /* BSpec 74198 */,                    \
-   .urb.min_entries[MESA_SHADER_TASK] = 2,                      \
-   .urb.min_entries[MESA_SHADER_MESH] = 2
+   XE3P_URB_MIN_MAX_ENTRIES
 
 #define XE3P_FEATURES                                           \
    XE3_FEATURES,                                                \
@@ -1270,8 +1320,23 @@ static const struct intel_device_info intel_device_info_nvl_u_h = {
    .verx10 = 350,                                               \
    .has_integer_dword_mul = true
 
+#define XE3P_PAT_ENTRIES                                        \
+   /* BSpec 71582 (r60903) */                                   \
+   .pat = {                                                     \
+      /* CPU: WB, GPU: PAT 1 => WB+transient, 1WAY */           \
+      .cached_coherent = PAT_ENTRY(19, WB),                     \
+      /* CPU: WC, GPU: PAT 6 => WB+display transient */         \
+      .scanout = PAT_ENTRY(6, WC),                              \
+      /* CPU: WC, GPU: PAT 0 => WB+transient */                 \
+      .writecombining = PAT_ENTRY(18, WC),                      \
+      /* CPU: WC, GPU: PAT 11 => XD, compressed */              \
+      .compressed_scanout = PAT_ENTRY(11, INVALID),             \
+      /* CPU: WC, GPU: PAT 9 => WB+compressed */                \
+      .compressed = PAT_ENTRY(9, INVALID)                       \
+   }
+
 #define XE3P_CONFIG(platform_suffix)                            \
-   XE3P_FEATURES, XE2_PAT_ENTRIES,                              \
+   XE3P_FEATURES, XE3P_PAT_ENTRIES,                             \
    XE3P_PLACEHOLDER_THREADS_AND_URB,                            \
    .platform = INTEL_PLATFORM_ ## platform_suffix
 

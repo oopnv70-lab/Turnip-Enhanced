@@ -361,6 +361,12 @@ struct v3d_key {
          */
         uint32_t sampler_is_32b;
 
+        /* Mask of RGB32 buffer texture samplers.  They are bound as R32 views
+         * with three times the texels; v3d_nir_lower_txf_buffer_rgb32 rewrites
+         * their fetches.
+         */
+        uint32_t sampler_buffer_rgb32;
+
         bool is_last_geometry_stage;
         bool robust_uniform_access;
         bool robust_storage_access;
@@ -574,6 +580,7 @@ struct v3d_interp_input {
    struct qreg vp;
    struct qreg C;
    unsigned mode; /* interpolation mode */
+   bool centroid;
 };
 
 struct v3d_ra_node_info {
@@ -1109,6 +1116,12 @@ const struct v3d_compiler *v3d_compiler_init(const struct v3d_device_info *devin
 void v3d_compiler_free(const struct v3d_compiler *compiler);
 void v3d_optimize_nir(struct v3d_compile *c, struct nir_shader *s);
 
+/* The QPU prefetches the instruction after the one it executes, so the
+ * buffer holding the shader code needs this much space after the last
+ * instruction, or the prefetch can fall on an unmapped page.
+ */
+#define V3D_QPU_PREFETCH_PAD sizeof(uint64_t)
+
 uint64_t *v3d_compile(const struct v3d_compiler *compiler,
                       struct v3d_key *key,
                       struct v3d_prog_data **prog_data,
@@ -1206,6 +1219,7 @@ bool v3d_nir_lower_line_smooth(nir_shader *shader);
 bool v3d_nir_lower_logic_ops(nir_shader *s, struct v3d_compile *c);
 bool v3d_nir_lower_scratch(nir_shader *s);
 bool v3d_nir_lower_txf_ms(nir_shader *s);
+bool v3d_nir_lower_txf_buffer_rgb32(nir_shader *s, uint32_t sampler_mask);
 bool v3d_nir_lower_image_load_store(nir_shader *s, struct v3d_compile *c);
 bool v3d_nir_lower_null_descriptors(nir_shader *s);
 bool v3d_nir_lower_global_2x32(nir_shader *s);

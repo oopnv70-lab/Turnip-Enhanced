@@ -130,7 +130,7 @@ panvk_device_init_poly_heap_inner(struct panvk_device *dev)
 
    VkResult result = panvk_priv_bo_create(
       dev, PANVK_POLY_HEAP_SIZE, flags, VK_SYSTEM_ALLOCATION_SCOPE_DEVICE,
-      &dev->poly_heap.buffer);
+      "Poly heap", &dev->poly_heap.buffer);
    if (result != VK_SUCCESS) {
       return result;
    }
@@ -554,6 +554,8 @@ panvk_per_arch(create_device)(struct panvk_physical_device *physical_device,
    device->csf.sb.count = csif_info->scoreboard_slot_count;
    device->csf.sb.all_mask = (uint16_t)BITFIELD_MASK(csif_info->scoreboard_slot_count);
 
+   static_assert(PANVK_SB_ITER_START < CS_MAX_SB_COUNT,
+                 "Insufficient SB count");
    assert(device->csf.sb.count > PANVK_SB_ITER_START);
    device->csf.sb.iter_count = device->csf.sb.count - PANVK_SB_ITER_START;
 
@@ -586,7 +588,7 @@ panvk_per_arch(create_device)(struct panvk_physical_device *physical_device,
    result = panvk_priv_bo_create(
       device, 128 * 1024 * 1024,
       PAN_KMOD_BO_FLAG_NO_MMAP | PAN_KMOD_BO_FLAG_ALLOC_ON_FAULT,
-      VK_SYSTEM_ALLOCATION_SCOPE_DEVICE, &device->tiler_heap);
+      VK_SYSTEM_ALLOCATION_SCOPE_DEVICE, "Tiler Heap", &device->tiler_heap);
    if (result != VK_SUCCESS)
       goto err_free_priv_bos;
 #endif
@@ -594,7 +596,8 @@ panvk_per_arch(create_device)(struct panvk_physical_device *physical_device,
    result = panvk_priv_bo_create(
       device, pan_sample_positions_buffer_size(),
       panvk_device_adjust_bo_flags(device, PAN_KMOD_BO_FLAG_WB_MMAP),
-      VK_SYSTEM_ALLOCATION_SCOPE_DEVICE, &device->sample_positions);
+      VK_SYSTEM_ALLOCATION_SCOPE_DEVICE, "Sample positions",
+      &device->sample_positions);
    if (result != VK_SUCCESS)
       goto err_free_priv_bos;
 
@@ -618,7 +621,7 @@ panvk_per_arch(create_device)(struct panvk_physical_device *physical_device,
 
    result = panvk_priv_bo_create(device, PAN_PRINTF_BUFFER_SIZE, 0,
                                  VK_SYSTEM_ALLOCATION_SCOPE_DEVICE,
-                                 &device->printf.bo);
+                                 "Printf Buffer", &device->printf.bo);
    if (result != VK_SUCCESS)
       goto err_free_priv_bos;
 

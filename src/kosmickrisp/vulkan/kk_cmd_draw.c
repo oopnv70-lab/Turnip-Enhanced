@@ -1460,7 +1460,7 @@ kk_flush_dynamic_state(struct kk_cmd_buffer *cmd)
 
    if ((IS_DIRTY(DS_DEPTH_BOUNDS_TEST_ENABLE) ||
         IS_DIRTY(DS_DEPTH_BOUNDS_TEST_BOUNDS)) &&
-       pdev->vk.supported_features.depthBounds) {
+       kk_gpu_supports_depth_bounds(&pdev->info)) {
       /* Metal does not expose a separate flag for enabling the depth bounds
        * test. Instead, it treats [0, 1] as disabled. */
       bool bounds_enable = dyn->ds.depth.bounds_test.enable;
@@ -1790,6 +1790,16 @@ kk_sanitize_index_range(struct kk_cmd_buffer *cmd, struct kk_addr_range range)
       range.addr = gfx->index.null_addr;
       range.range = sizeof(uint32_t);
    }
+
+   /* KK_WORKAROUND_12: macOS 26 requires addr + range to be 4 byte aligned due
+    * to a known bug where Metal drops the last index if addr + range is not 4
+    * byte aligned. The extra bytes will not be read. The issue is not present
+    * in macOS 27.
+    */
+   struct kk_physical_device *pdev =
+      kk_device_physical(kk_cmd_buffer_device(cmd));
+   if (!(pdev->settings.disabled_workarounds & BITFIELD64_BIT(12)))
+      range.range = align64(range.addr + range.range, 4u) - range.addr;
 
    return range;
 }
@@ -2199,6 +2209,8 @@ kk_launch_gs_prerast(struct kk_cmd_buffer *cmd,
                      const struct kk_draw_command *data,
                      struct kk_draw_data draw, bool restart)
 {
+   struct kk_physical_device *pdev =
+      kk_device_physical(kk_cmd_buffer_device(cmd));
    struct kk_graphics_state *gfx = &cmd->state.gfx;
    struct kk_shader *vs = cmd->state.shaders[MESA_SHADER_VERTEX];
    struct kk_shader *tes = cmd->state.shaders[MESA_SHADER_TESS_EVAL];
@@ -2254,6 +2266,10 @@ kk_launch_gs_prerast(struct kk_cmd_buffer *cmd,
    uint32_t pre_render_count = vs->pipeline.gfx.pre_render_count;
    struct mtl_size local_size = {KK_POLY_WG_SIZE, 1, 1};
    mtl_compute_encoder *enc = cs_get_compute(cmd);
+
+   /* KK_WORKAROUND_19 */
+   if (!(pdev->settings.disabled_workarounds & BITFIELD64_BIT(19)))
+      mtl_set_threadgroup_memory_length(enc, 16u, 0u);
 
    mtl_barrier_after_encoder_stages(enc, MTL_STAGE_DISPATCH,
                                     MTL_STAGE_DISPATCH);

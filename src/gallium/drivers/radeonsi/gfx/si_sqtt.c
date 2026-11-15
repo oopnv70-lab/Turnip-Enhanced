@@ -160,21 +160,22 @@ static void si_sqtt_start(struct si_context *sctx, struct radeon_cmdbuf *cs)
                           AC_BARRIER_PFP_SYNC_ME;
    sctx->emit_barrier(sctx, cs);
 
-   si_inhibit_clockgating(sctx, cs, true);
+   ac_emit_cp_inhibit_clockgating(&sctx->gfx_cs.current, sctx->gfx_level, true);
 
    /* Enable SQG events that collects thread trace data. */
    si_emit_spi_config_cntl(sctx, cs, true);
 
    if (sctx->sqtt.spm.bo) {
       ac_emit_spm_reset(&cs->current);
-      si_pc_emit_shaders(cs, ac_sqtt_get_shader_mask(&sctx->screen->info));
+      ac_pc_emit_shaders(sctx->screen->info.gfx_level, &cs->current,
+                         ac_sqtt_get_shader_mask(&sctx->screen->info));
       si_emit_spm_setup(sctx, &sctx->sqtt.spm, cs);
    }
 
    si_emit_sqtt_start(sctx, cs, ip_type);
 
    if (sctx->sqtt.spm.bo)
-      ac_emit_spm_start(&cs->current, AMD_IP_GFX, &sctx->screen->info);
+      ac_emit_spm_start(&cs->current, ip_type, &sctx->screen->info);
 }
 
 static void si_sqtt_stop(struct si_context *sctx, struct radeon_cmdbuf *cs)
@@ -210,7 +211,7 @@ static void si_sqtt_stop(struct si_context *sctx, struct radeon_cmdbuf *cs)
    si_cp_dma_wait_for_idle(sctx, cs);
 
    if (sctx->sqtt.spm.bo)
-      ac_emit_spm_stop(&cs->current, AMD_IP_GFX, &sctx->screen->info);
+      ac_emit_spm_stop(&cs->current, ip_type, &sctx->screen->info);
 
    /* Make sure to wait-for-idle before stopping SQTT. */
    sctx->barrier_flags |= AC_BARRIER_SYNC_PS | AC_BARRIER_SYNC_CS |
@@ -227,7 +228,7 @@ static void si_sqtt_stop(struct si_context *sctx, struct radeon_cmdbuf *cs)
    /* Restore previous state by disabling SQG events. */
    si_emit_spi_config_cntl(sctx, cs, false);
 
-   si_inhibit_clockgating(sctx, cs, false);
+   ac_emit_cp_inhibit_clockgating(&sctx->gfx_cs.current, sctx->gfx_level, false);
 }
 
 static void si_sqtt_init_cs(struct si_context *sctx)
@@ -335,6 +336,27 @@ static bool si_get_sqtt_trace(struct si_context *sctx,
    return true;
 }
 
+static void si_sqtt_sample_clocks(struct si_context *sctx)
+{
+   /* TODO: Proper clock calibration */
+   uint64_t cpu_timestamp = os_time_get_nano();
+   uint64_t gpu_timestamp = sctx->ws->query_value(sctx->ws, RADEON_TIMESTAMP);
+   ac_sqtt_add_clock_calibration(sctx->sqtt.data, cpu_timestamp, gpu_timestamp);
+
+   uint64_t shader_clock_freq, memory_clock_freq;
+
+   /* The SMU metrics can return a stale snapshot on the first read after a while, refresh them with
+    * a dummy read and wait for the kernel metrics cache to expire before sampling.
+    */
+   sctx->ws->query_value(sctx->ws, RADEON_CURRENT_SCLK);
+   sctx->ws->query_value(sctx->ws, RADEON_CURRENT_MCLK);
+   os_time_sleep(5000); /* 5ms */
+
+   shader_clock_freq = sctx->ws->query_value(sctx->ws, RADEON_CURRENT_SCLK);
+   memory_clock_freq = sctx->ws->query_value(sctx->ws, RADEON_CURRENT_MCLK);
+   ac_sqtt_set_gpu_trace_clocks(sctx->sqtt.data, shader_clock_freq, memory_clock_freq);
+}
+
 bool si_init_sqtt(struct si_context *sctx)
 {
    static bool warn_once = true;
@@ -417,15 +439,7 @@ bool si_init_sqtt(struct si_context *sctx)
                           ((uint64_t)sctx->screen->info.pci.func << 32)   |
                           ((uint64_t)sctx->screen->info.pci_id);
 
-   /* TODO: Proper clock calibration */
-   uint64_t cpu_timestamp = os_time_get_nano();
-   uint64_t gpu_timestamp = sctx->ws->query_value(sctx->ws, RADEON_TIMESTAMP);   
-   ac_sqtt_add_clock_calibration(sctx->sqtt.data, cpu_timestamp, gpu_timestamp);
-
-   uint64_t shader_clock_freq, memory_clock_freq;
-   shader_clock_freq = sctx->ws->query_value(sctx->ws, RADEON_CURRENT_SCLK);
-   memory_clock_freq = sctx->ws->query_value(sctx->ws, RADEON_CURRENT_MCLK);
-   ac_sqtt_set_gpu_trace_clocks(sctx->sqtt.data, shader_clock_freq, memory_clock_freq); 
+   si_sqtt_sample_clocks(sctx);
 
    return true;
 }

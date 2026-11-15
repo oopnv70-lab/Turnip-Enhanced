@@ -31,8 +31,12 @@ needs_preenc_pitch_wa(struct radeon_info *info)
       return !check_vcn_fw_version(info, 9, 24, 40);
    else if (info->vcn_ip_version >= VCN_3_0_0)
       return !check_vcn_fw_version(info, 4, 33, 26);
+   else if (info->vcn_ip_version >= VCN_2_0_0)
+      return !check_vcn_fw_version(info, 8, 24, 22);
+   else if (info->vcn_ip_version >= VCN_1_0_0)
+      return !check_vcn_fw_version(info, 3, 15, 12);
    else
-      return true;
+      UNREACHABLE("VCN only workaround");
 }
 
 static bool
@@ -129,6 +133,12 @@ write_memory_supported(struct radeon_info *info)
          return AC_VIDEO_WRITE_MEMORY_SUPPORT_PCIE_ATOMICS;
    }
    return AC_VIDEO_WRITE_MEMORY_SUPPORT_NONE;
+}
+
+static bool
+have_efc_range_bug(struct radeon_info *info)
+{
+   return info->vcn_ip_version >= VCN_5_0_0 && !check_vcn_fw_version(info, 9, 13, 38);
 }
 
 static void
@@ -425,6 +435,7 @@ vcn_enc_caps(struct radeon_info *info)
    cap->max_temporal_layers = 4;
    cap->quality_levels = info->vcn_ip_version >= VCN_4_0_0 ? 4 : 3;
    cap->efc = info->vcn_ip_version >= VCN_2_0_0 && info->vcn_ip_version != VCN_2_2_0;
+   cap->efc_range_bug = have_efc_range_bug(info);
    cap->preenc_pitch_wa = needs_preenc_pitch_wa(info);
    cap->rc.cbr = true;
    cap->rc.vbr = true;
@@ -468,6 +479,7 @@ vcn_enc_caps(struct radeon_info *info)
    cap->max_temporal_layers = 4;
    cap->quality_levels = info->vcn_ip_version >= VCN_4_0_0 ? 4 : 3;
    cap->efc = info->vcn_ip_version >= VCN_2_0_0 && info->vcn_ip_version != VCN_2_2_0;
+   cap->efc_range_bug = have_efc_range_bug(info);
    cap->preenc_pitch_wa = needs_preenc_pitch_wa(info);
    cap->rc.cbr = true;
    cap->rc.vbr = true;
@@ -522,6 +534,7 @@ vcn_enc_caps(struct radeon_info *info)
    cap->max_temporal_layers = 4;
    cap->quality_levels = info->vcn_ip_version >= VCN_4_0_0 ? 4 : 3;
    cap->efc = info->vcn_ip_version >= VCN_2_0_0 && info->vcn_ip_version != VCN_2_2_0;
+   cap->efc_range_bug = have_efc_range_bug(info);
    cap->preenc_pitch_wa = needs_preenc_pitch_wa(info);
    cap->rc.cbr = true;
    cap->rc.vbr = true;

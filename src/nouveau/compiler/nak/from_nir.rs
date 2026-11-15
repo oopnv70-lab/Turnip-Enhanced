@@ -15,6 +15,7 @@ use compiler::bindings::*;
 use compiler::cfg::CFGBuilder;
 use compiler::nir::*;
 use compiler::nir_instr_printer::NirInstrPrinter;
+use mesa_util::format::pipe_format::*;
 use rustc_hash::{FxBuildHasher, FxHashMap, FxHashSet};
 use std::cmp::max;
 use std::ops::Index;
@@ -74,12 +75,20 @@ fn init_info_from_nir(
             }),
             MESA_SHADER_FRAGMENT => {
                 let info_fs = unsafe { &nir.info.__bindgen_anon_1.fs };
+                let (z_min_bounded, z_max_bounded) =
+                    match info_fs.depth_layout() {
+                        FRAG_DEPTH_LAYOUT_GREATER => (true, false),
+                        FRAG_DEPTH_LAYOUT_LESS => (false, true),
+                        _ => (false, false),
+                    };
                 ShaderStageInfo::Fragment(FragmentShaderInfo {
                     uses_kill: false,
                     reads_interlock_ticket: false,
                     post_depth_coverage: info_fs.post_depth_coverage(),
                     early_fragment_tests: info_fs.early_fragment_tests(),
                     uses_sample_shading: info_fs.uses_sample_shading(),
+                    z_min_bounded,
+                    z_max_bounded,
                 })
             }
             MESA_SHADER_GEOMETRY => {
@@ -1209,6 +1218,8 @@ impl<'a> ShaderFromNir<'a> {
                         srcs: [srcs(0), srcs(1)],
                         min: (alu.op == nir_op_fmin).into(),
                         ftz: self.float_ctl.fp32.ftz,
+                        nan: false,
+                        xorsign: false,
                     });
                 } else if alu.def.bit_size() == 16 {
                     dst = b.alloc_ssa_vec(RegFile::GPR, 1);
@@ -1220,12 +1231,27 @@ impl<'a> ShaderFromNir<'a> {
                         ],
                         min: (alu.op == nir_op_fmin).into(),
                         ftz: self.float_ctl.fp16.ftz,
+                        nan: false,
+                        xorsign: false,
                     });
                 } else {
                     panic!("Unsupported float type: f{}", alu.def.bit_size());
                 }
                 dst
             }
+            nir_op_fclamp_nv => match alu.def.bit_size() {
+                32 => {
+                    b.fclamp(srcs(0), srcs(1), self.float_ctl.fp32.ftz).into()
+                }
+                16 => b
+                    .hclamp2(
+                        restrict_f16v2_src(srcs(0)),
+                        restrict_f16v2_src(srcs(1)),
+                        self.float_ctl.fp16.ftz,
+                    )
+                    .into(),
+                bit_size => panic!("Unsupported float type: f{bit_size}"),
+            },
             nir_op_fmul | nir_op_fmul_rtz => {
                 let ftype = FloatType::from_bits(alu.def.bit_size().into());
                 let dst;
@@ -1571,6 +1597,16 @@ impl<'a> ShaderFromNir<'a> {
             nir_op_imul_2x32_64 | nir_op_umul_2x32_64 => {
                 let signed = alu.op == nir_op_imul_2x32_64;
                 b.imul_2x32_64(srcs(0), srcs(1), signed)
+            }
+            nir_op_umad_2x32_64 => {
+                assert!(self.sm.sm() >= 70);
+                let dst = b.alloc_ssa_vec(RegFile::GPR, 2);
+                b.push_op(OpIMad64 {
+                    dst: dst.clone().into(),
+                    srcs: [srcs(0), srcs(1), srcs(2)],
+                    signed: false,
+                });
+                dst.into()
             }
             nir_op_imul_high | nir_op_umul_high => {
                 let signed = alu.op == nir_op_imul_high;

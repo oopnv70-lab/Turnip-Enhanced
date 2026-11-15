@@ -87,6 +87,8 @@
 #include "vk_synchronization.h"
 #include "vk_util.h"
 
+#include "pdsc/programs/pdsc_compute.h"
+
 /* Structure used to pass data into pvr_compute_generate_control_stream()
  * function.
  */
@@ -294,6 +296,9 @@ static VkResult pvr_cmd_buffer_create(struct pvr_device *device,
    list_inithead(&cmd_buffer->deferred_clears);
    list_inithead(&cmd_buffer->sub_cmds);
    list_inithead(&cmd_buffer->bo_list);
+
+   cmd_buffer->state.cond_render_buffer_addr = 0;
+   cmd_buffer->state.cond_render_invert = true;
 
    *pCommandBuffer = pvr_cmd_buffer_to_handle(cmd_buffer);
 
@@ -569,6 +574,7 @@ static VkResult pvr_sub_cmd_gfx_per_job_fragment_programs_create_and_upload(
    const uint32_t emit_count,
    const uint32_t *pbe_cs_words,
    const unsigned *tile_buffer_ids,
+   unsigned long *layer_size,
    unsigned pixel_output_width,
    struct pvr_pds_upload *const pds_upload_out)
 {
@@ -595,6 +601,9 @@ static VkResult pvr_sub_cmd_gfx_per_job_fragment_programs_create_and_upload(
 
    bool has_tile_buffers = false;
    for (unsigned u = 0; u < emit_count; ++u) {
+      props.rta_element_stride[u] =
+         layer_size[u] / ROGUE_PBESTATE_STATE_WORD0_ADDRESS_LOW_ALIGNMENT;
+
       unsigned tile_buffer_id = tile_buffer_ids[u];
       if (tile_buffer_id == ~0)
          continue;
@@ -1422,7 +1431,7 @@ pvr_sub_cmd_gfx_align_ds_subtiles(struct pvr_cmd_buffer *const cmd_buffer,
       .pNext = NULL,
       .bufferOffset = 0,
       .bufferRowLength = rounded_size.width,
-      .bufferImageHeight = 0,
+      .bufferImageHeight = rounded_size.height,
       .imageSubresource = {
          .aspectMask = VK_IMAGE_ASPECT_DEPTH_BIT | VK_IMAGE_ASPECT_STENCIL_BIT,
          .mipLevel = ds->iview->vk.base_mip_level,
@@ -1452,6 +1461,7 @@ pvr_sub_cmd_gfx_align_ds_subtiles(struct pvr_cmd_buffer *const cmd_buffer,
       result = pvr_copy_image_to_buffer_region_format(cmd_buffer,
                                                       ds_image,
                                                       buffer->dev_addr,
+                                                      ds_image->alignment,
                                                       &region,
                                                       copy_format,
                                                       copy_format);
@@ -1485,6 +1495,7 @@ pvr_sub_cmd_gfx_align_ds_subtiles(struct pvr_cmd_buffer *const cmd_buffer,
 
       result = pvr_copy_buffer_to_image_region_format(cmd_buffer,
                                                       buffer->dev_addr,
+                                                      ds_image->alignment,
                                                       ds_image,
                                                       &region,
                                                       copy_format,
@@ -1509,6 +1520,7 @@ pvr_sub_cmd_gfx_align_ds_subtiles(struct pvr_cmd_buffer *const cmd_buffer,
    ds->addr = buffer->dev_addr;
    ds->base_array_layer = 0;
    ds->physical_extent = rounded_size;
+   ds->layer_size = buffer_layer_size;
 
    gfx_sub_cmd->wait_on_previous_transfer = true;
 
@@ -1523,6 +1535,8 @@ struct pvr_emit_state {
                          [ROGUE_NUM_PBESTATE_REG_WORDS];
 
    unsigned tile_buffer_ids[PVR_MAX_COLOR_ATTACHMENTS];
+
+   unsigned long layer_size[PVR_MAX_COLOR_ATTACHMENTS];
 
    uint32_t emit_count;
 };
@@ -1566,6 +1580,16 @@ pvr_setup_emit_state(const struct pvr_device_info *dev_info,
 
          if (mrt_resource->type != resource_type)
             continue;
+
+         const struct pvr_image *image = pvr_image_view_get_image(iview);
+
+         if (PVR_HAS_FEATURE(dev_info, gs_rta_support) &&
+             rstate->layers > 1 &&
+             image->memlayout != PVR_MEMLAYOUT_3DTWIDDLED) {
+            const struct pvr_image_plane *plane = pvr_single_plane_const(image);
+
+            emit_state->layer_size[emit_state->emit_count] = plane->layer_size;
+         }
 
          if (surface->need_resolve) {
             const struct pvr_image_view *resolve_src =
@@ -1705,6 +1729,7 @@ static VkResult pvr_sub_cmd_gfx_job_init(const struct pvr_device_info *dev_info,
             emit_state.emit_count,
             emit_state.pbe_cs_words[0],
             emit_state.tile_buffer_ids,
+            emit_state.layer_size,
             pixel_output_width,
             &pds_pixel_event_program);
          if (result != VK_SUCCESS)
@@ -2349,16 +2374,22 @@ pvr_csb_gfx_build_view_index_ctrl_stream(struct pvr_device *const device,
                                          struct pvr_bo **bo,
                                          uint32_t *stride)
 {
+   unsigned temp_size =
+      pdsc_program_temps_used(device->pdsc_precomp_programs.set_view_index);
+   unsigned data_size = DIV_ROUND_UP(
+      pdsc_program_data_size(device->pdsc_precomp_programs.set_view_index),
+      ROGUE_VDMCTRL_PDS_STATE0_PDS_DATA_SIZE_UNIT_SIZE);
+   uint64_t code_addr =
+      device->pdsc_precomp_programs.set_view_index_code.pvr_bo->dev_addr.addr;
    struct list_head bo_list;
    struct pvr_csb csb;
    VkResult result;
 
    pvr_csb_init(device, PVR_CMD_STREAM_TYPE_GRAPHICS, &csb);
 
-   for (uint32_t i = 0; i < PVR_MAX_MULTIVIEW; ++i) {
-      struct pvr_pds_view_index_init_program *program =
-         &device->view_index_init_info[i];
-
+   for (unsigned u = 0;
+        u < ARRAY_SIZE(device->pdsc_precomp_programs.set_view_index_data);
+        ++u) {
       pvr_csb_set_relocation_mark(&csb);
 
       pvr_csb_emit (&csb, VDMCTRL_PDS_STATE0, state_update0) {
@@ -2367,23 +2398,20 @@ pvr_csb_gfx_build_view_index_ctrl_stream(struct pvr_device *const device,
          state_update0.usc_target = ROGUE_VDMCTRL_USC_TARGET_ALL;
          state_update0.usc_common_size = 0;
          state_update0.usc_unified_size = 0;
-         state_update0.pds_temp_size = program->temps_used;
-         state_update0.pds_data_size = DIV_ROUND_UP(
-            PVR_DW_TO_BYTES(device->view_index_init_programs[i].data_size),
-            ROGUE_VDMCTRL_PDS_STATE0_PDS_DATA_SIZE_UNIT_SIZE);
+         state_update0.pds_temp_size = temp_size;
+         state_update0.pds_data_size = data_size;
       }
 
       pvr_csb_emit (&csb, VDMCTRL_PDS_STATE1, state_update1) {
          state_update1.pds_data_addr =
-            device->view_index_init_programs[i].pvr_bo->dev_addr;
+            device->pdsc_precomp_programs.set_view_index_data[u]
+               .pvr_bo->dev_addr;
          state_update1.sd_type = ROGUE_VDMCTRL_SD_TYPE_PDS;
          state_update1.sd_next_type = ROGUE_VDMCTRL_SD_TYPE_USC;
       }
 
       pvr_csb_emit (&csb, VDMCTRL_PDS_STATE2, state_update2) {
-         state_update2.pds_code_addr.addr =
-            device->view_index_init_programs[i].pvr_bo->dev_addr.addr +
-            PVR_DW_TO_BYTES(device->view_index_init_programs[i].data_size);
+         state_update2.pds_code_addr.addr = code_addr;
       }
 
       pvr_csb_clear_relocation_mark(&csb);
@@ -4231,39 +4259,20 @@ void PVR_PER_ARCH(CmdBeginRenderPass2)(
                           &cmd_buffer->state.current_sub_cmd->gfx);
 }
 
-static inline uint32_t
-pvr_get_ds_component_bits(const VkFormat vk_format,
-                          const VkImageAspectFlags ds_aspect)
-{
-   uint32_t component;
-
-   if (ds_aspect == VK_IMAGE_ASPECT_STENCIL_BIT) {
-      assert(vk_format_has_stencil(vk_format));
-      component = 0;
-   } else {
-      assert(ds_aspect == VK_IMAGE_ASPECT_DEPTH_BIT);
-      assert(vk_format_has_depth(vk_format));
-      component = 1;
-   }
-
-   return vk_format_get_component_bits(vk_format,
-                                       UTIL_FORMAT_COLORSPACE_ZS,
-                                       component);
-}
-
 static inline bool
-pvr_can_pbe_resolve_ds_attachment(const struct pvr_device_info *dev_info,
-                                  VkFormat vk_format,
-                                  uint32_t sample_count,
-                                  VkResolveModeFlagBits resolve_mode)
+pvr_can_pbe_resolve_attachment(const struct pvr_device_info *dev_info,
+                               VkFormat vk_format,
+                               VkResolveModeFlagBits resolve_mode)
 {
+   /* On cores without gs_rta_support, PBE resolves might depend on writes
+    * that occur within the deferred RTA clears that happen after the PBE has
+    * written. Since the driver doesn't know at CmdBeginRendering whether
+    * RTA clears are needed, PBE resolves can't be used.
+    */
    if (!PVR_HAS_FEATURE(dev_info, gs_rta_support))
       return false;
 
    if (resolve_mode != VK_RESOLVE_MODE_AVERAGE_BIT)
-      return false;
-
-   if (pvr_get_ds_component_bits(vk_format, VK_IMAGE_ASPECT_STENCIL_BIT))
       return false;
 
    return pvr_arch_format_is_pbe_downscalable(dev_info, vk_format);
@@ -4368,10 +4377,9 @@ static VkResult pvr_dynamic_rendering_output_attachments_setup(
       attachment->stencil_resolve_mode = VK_RESOLVE_MODE_NONE;
       attachment->need_eot = true;
       /* TODO: verify logic for is_pbe_downscalable */
-      attachment->is_pbe_downscalable = pvr_can_pbe_resolve_ds_attachment(
+      attachment->is_pbe_downscalable = pvr_can_pbe_resolve_attachment(
          &cmd_buffer->device->pdevice->dev_info,
          iview->vk.view_format,
-         image->vk.samples,
          attachment_info->resolveMode);
 
       dr_info->color_attachments[i].index_color = cur_attach_idx;
@@ -4579,7 +4587,8 @@ static VkResult pvr_dynamic_rendering_output_attachments_setup(
          surface->need_resolve = true;
          surface->attachment_idx = attachment->resolve_target;
 
-         if (attachment->store_op == VK_ATTACHMENT_STORE_OP_DONT_CARE &&
+         if ((attachment->store_op == VK_ATTACHMENT_STORE_OP_DONT_CARE ||
+              attachment->store_op == VK_ATTACHMENT_STORE_OP_NONE) &&
              attachment->is_pbe_downscalable) {
             surface->resolve_type = PVR_RESOLVE_TYPE_PBE;
             pbe_emits++;
@@ -6270,6 +6279,19 @@ static VkResult pvr_setup_descriptor_mappings(
          break;
       }
 
+      case PVR_PDS_CONST_MAP_ENTRY_TYPE_DOUTU_ADDRESS: {
+         const struct pvr_const_map_entry_doutu_address *const doutu_addr =
+            (struct pvr_const_map_entry_doutu_address *)entries;
+
+         PVR_WRITE(qword_buffer,
+                   doutu_addr->doutu_control,
+                   doutu_addr->const_offset,
+                   pds_info->data_size_in_dwords);
+
+         entries += sizeof(*doutu_addr);
+         break;
+      }
+
       default:
          UNREACHABLE("Unsupported map entry type.");
       }
@@ -6503,76 +6525,109 @@ static void pvr_compute_update_kernel(
    const uint32_t global_base_group[static const PVR_WORKGROUP_DIMENSIONS],
    const uint32_t global_workgroup_size[static const PVR_WORKGROUP_DIMENSIONS])
 {
-   const struct pvr_physical_device *pdevice = cmd_buffer->device->pdevice;
+   const struct pvr_device *device = cmd_buffer->device;
+   const struct pvr_physical_device *pdevice = device->pdevice;
    struct pvr_cmd_buffer_state *state = &cmd_buffer->state;
    const struct pvr_device_runtime_info *dev_runtime_info =
       &pdevice->dev_runtime_info;
    struct pvr_csb *csb = &sub_cmd->control_stream;
    const struct pvr_compute_pipeline *pipeline = state->compute_pipeline;
    const pco_data *const cs_data = &pipeline->cs_data;
-   const struct pvr_pds_info *program_info = &pipeline->pds_cs_program_info;
-   bool uses_wg_id = pipeline->base_workgroup_data_patching_offset != ~0u;
-   bool uses_num_wgs = pipeline->num_workgroups_data_patching_offset != ~0u;
-   bool base_group_set = !!global_base_group[0] || !!global_base_group[1] ||
-                         !!global_base_group[2];
-   uint32_t pds_data_offset = pipeline->pds_cs_program.data_offset;
    const unsigned max_coeffs = dev_runtime_info->cdm_max_local_mem_size_regs;
 
-   /* Does the PDS data segment need patching, or can the default be used? */
-   if ((uses_wg_id && base_group_set) || uses_num_wgs) {
-      struct pvr_pds_upload pds_data_upload;
-      uint32_t *pds_data;
+   pdsc_program *compute_shader = device->pdsc_precomp_programs.compute_shader;
+   const struct pvr_pds_upload *compute_shader_code =
+      &device->pdsc_precomp_programs.compute_shader_code;
 
-      /* Upload and patch PDS data segment. */
+   /* Upload and patch PDS data segment. */
+   struct pvr_pds_upload pds_data_upload;
+   VkResult result =
       pvr_cmd_buffer_upload_pds_data(cmd_buffer,
-                                     pipeline->pds_cs_data_section,
-                                     program_info->data_size_in_dwords,
+                                     pdsc_program_data(compute_shader),
+                                     pdsc_program_data_size(compute_shader) /
+                                        sizeof(uint32_t),
                                      16,
                                      &pds_data_upload);
-      pds_data_offset = pds_data_upload.data_offset;
-      pds_data = pvr_bo_suballoc_get_map_addr(pds_data_upload.pvr_bo);
-
-      if (uses_wg_id && base_group_set) {
-         unsigned offset = pipeline->base_workgroup_data_patching_offset;
-         for (unsigned u = 0; u < PVR_WORKGROUP_DIMENSIONS; ++u) {
-            pds_data[offset + u] = global_base_group[u];
-         }
-      }
-
-      if (uses_num_wgs) {
-         if (indirect_addr.addr) {
-            unsigned offset =
-               pipeline->num_workgroups_indirect_src_patching_offset;
-
-            uint64_t *pds_data64 =
-               pvr_bo_suballoc_get_map_addr(pds_data_upload.pvr_bo);
-            pds_data64[offset / 2] = indirect_addr.addr;
-
-            offset = pipeline->num_workgroups_indirect_src_dma_patching_offset;
-
-            pds_data[offset] |=
-               3 << PVR_ROGUE_PDSINST_DOUT_FIELDS_DOUTD_SRC1_BSIZE_SHIFT;
-         }
-
-         unsigned offset = pipeline->num_workgroups_data_patching_offset;
-         for (unsigned u = 0; u < PVR_WORKGROUP_DIMENSIONS; ++u) {
-            pds_data[offset + u] = global_workgroup_size[u];
-         }
-      }
+   if (result != VK_SUCCESS) {
+      vk_command_buffer_set_error(&cmd_buffer->vk, result);
+      return;
    }
+
+   uint32_t *pds_data = pvr_bo_suballoc_get_map_addr(pds_data_upload.pvr_bo);
+   struct pvr_suballoc_bo *shader_bo = pipeline->shader_state.shader_bo;
+   const pco_range *sys_vals = cs_data->common.sys_vals;
+
+   pvr_dev_addr_t shader_addr =
+      PVR_DEV_ADDR_OFFSET(shader_bo->dev_addr, cs_data->common.entry_offset);
+
+   unsigned coeff_update_temps = 0u;
+   pvr_dev_addr_t coeff_update_addr = { 0 };
+   if (cs_data->common.uses.preamble) {
+      coeff_update_temps = cs_data->common.preamble_temps;
+
+      coeff_update_addr =
+         PVR_DEV_ADDR_OFFSET(shader_bo->dev_addr,
+                             cs_data->common.preamble_offset);
+   }
+
+   struct pdsc_compute_arguments args = {
+      .global_base_group[0] = global_base_group[0],
+      .global_base_group[1] = global_base_group[1],
+      .global_base_group[2] = global_base_group[2],
+      .zero_addr = device->null_state.zero_bo->vma->dev_addr.addr,
+      .zero_start = cs_data->cs.shmem.start,
+      .zero_count = (cs_data->cs.zero_shmem && !cs_data->cs.global_shmem)
+                       ? cs_data->cs.shmem.count
+                       : 0,
+      .num_wgs_start = sys_vals[SYSTEM_VALUE_NUM_WORKGROUPS].start,
+      .num_wgs_count = sys_vals[SYSTEM_VALUE_NUM_WORKGROUPS].count,
+      .wgid_start = sys_vals[SYSTEM_VALUE_WORKGROUP_ID].start,
+      .wgid_count = sys_vals[SYSTEM_VALUE_WORKGROUP_ID].count,
+      .cs_lid_start = sys_vals[SYSTEM_VALUE_LOCAL_INVOCATION_INDEX].start,
+      .cs_lid_count = sys_vals[SYSTEM_VALUE_LOCAL_INVOCATION_INDEX].count,
+      .cond_render_addr = state->cond_render_buffer_addr,
+      .cond_render_invert = state->cond_render_invert,
+      .shader_temps = cs_data->common.temps,
+      .shader_addr = shader_addr.addr,
+      .coeff_update_shader_temps = coeff_update_temps,
+      .coeff_update_shader_addr = coeff_update_addr.addr,
+   };
+
+   if (indirect_addr.addr) {
+      args.num_wgs_addr = indirect_addr.addr;
+   } else {
+      /* TODO: only upload if requested. */
+      struct pvr_suballoc_bo *num_wgs_bo;
+
+      result =
+         pvr_arch_cmd_buffer_upload_general(cmd_buffer,
+                                            global_workgroup_size,
+                                            sizeof(*global_workgroup_size) *
+                                               PVR_WORKGROUP_DIMENSIONS,
+                                            &num_wgs_bo);
+
+      if (result != VK_SUCCESS) {
+         vk_command_buffer_set_error(&cmd_buffer->vk, result);
+         return;
+      }
+
+      args.num_wgs_addr = num_wgs_bo->dev_addr.addr;
+   }
+
+   pdsc_patch_compute_shader(compute_shader, &args, pds_data);
 
    struct pvr_compute_kernel_info info = {
       .indirect_buffer_addr = indirect_addr,
       .usc_target = ROGUE_CDMCTRL_USC_TARGET_ANY,
       .pds_temp_size =
-         DIV_ROUND_UP(program_info->temps_required << 2U,
+         DIV_ROUND_UP(pdsc_program_temps_used(compute_shader) << 2U,
                       ROGUE_CDMCTRL_KERNEL0_PDS_TEMP_SIZE_UNIT_SIZE),
 
       .pds_data_size =
-         DIV_ROUND_UP(PVR_DW_TO_BYTES(program_info->data_size_in_dwords),
+         DIV_ROUND_UP(pdsc_program_data_size(compute_shader),
                       ROGUE_CDMCTRL_KERNEL0_PDS_DATA_SIZE_UNIT_SIZE),
-      .pds_data_offset = pds_data_offset,
-      .pds_code_offset = pipeline->pds_cs_program.code_offset,
+      .pds_data_offset = pds_data_upload.data_offset,
+      .pds_code_offset = compute_shader_code->code_offset,
 
       .sd_type = ROGUE_CDMCTRL_SD_TYPE_NONE,
 
@@ -8686,6 +8741,10 @@ static VkResult pvr_validate_draw_state(struct pvr_cmd_buffer *cmd_buffer)
 
    pvr_arch_cmd_buffer_start_sub_cmd(cmd_buffer, PVR_SUB_CMD_TYPE_GRAPHICS);
 
+   result = pvr_arch_validate_xfb_state(cmd_buffer);
+   if (result != VK_SUCCESS)
+      return result;
+
    sub_cmd = &state->current_sub_cmd->gfx;
    sub_cmd->empty_cmd = false;
 
@@ -9415,6 +9474,12 @@ pvr_update_indirect_draw_byte_count_ext(struct pvr_cmd_buffer *cmd_buffer,
    pdsc_program **draw_program;
    VkResult result;
 
+   const pvr_dev_addr_t counter_addr =
+      PVR_DEV_ADDR_OFFSET(counter_buffer->dev_addr, counter_buffer_offset);
+
+   /* PDS LD needs 16-byte alignment; select the dword in the program. */
+   const uint32_t dword_select = (counter_addr.addr & 0xF) / sizeof(uint32_t);
+
    struct pvr_pds_xfb_draw_program_input input = {
       .first_instance = first_instance,
       .instance_count = instance_count,
@@ -9422,8 +9487,7 @@ pvr_update_indirect_draw_byte_count_ext(struct pvr_cmd_buffer *cmd_buffer,
       .vertex_stride = vertex_stride,
       .data = {
          .counter_buffer_addr =
-            PVR_DEV_ADDR_OFFSET(counter_buffer->dev_addr,
-                                counter_buffer_offset),
+            PVR_DEV_ADDR(counter_addr.addr & ~UINT64_C(0xF)),
          .output_count_buffer_addr =
             xfb_shader_state->indirect_byte_count->dev_addr,
       },
@@ -9443,7 +9507,7 @@ pvr_update_indirect_draw_byte_count_ext(struct pvr_cmd_buffer *cmd_buffer,
       .dest = pdsc_load_ref(*draw_program,
                             PVR_XFB_VERTEX_COUNT_REF_ID_COUNTER_BUFFER_LD_DEST),
       .cmode = PDSC_CMODE_LD_CACHED,
-      .count8 = 1, /* the 64-bit byte counter */
+      .count8 = 2, /* 16 aligned bytes containing the 32-bit counter */
       .srcadd = input.data.counter_buffer_addr.addr,
    };
 
@@ -9462,7 +9526,7 @@ pvr_update_indirect_draw_byte_count_ext(struct pvr_cmd_buffer *cmd_buffer,
 
    pdsc_patch patches[] = {
       { .patch_id = PVR_XFB_VERTEX_COUNT_PATCH_ID_NEGATIVE_COUNTER_OFFSET,
-        .value = input.counter_offset },
+        .value = (uint64_t)(-(int64_t)input.counter_offset) },
       /* Reciprocal for magic-number multiply division in the pdsc program.
        * GPU computes: vertex_count = hi32(byte_count * recip).
        */
@@ -9480,6 +9544,10 @@ pvr_update_indirect_draw_byte_count_ext(struct pvr_cmd_buffer *cmd_buffer,
       { .patch_id = PVR_XFB_VERTEX_COUNT_PATCH_ID_OUTPUT_COUNT_BUFFER_ST_SRC0,
         .value =
            pdsc_st32_src0_pack(*draw_program, &output_count_buffer_st_src0) },
+      { .patch_id = PVR_XFB_VERTEX_COUNT_PATCH_ID_COUNTER_DWORD_SELECT,
+        .value = dword_select },
+      { .patch_id = PVR_XFB_VERTEX_COUNT_PATCH_ID_DIVIDE_ENABLE,
+        .value = input.vertex_stride > 1 },
    };
 
    assert(ARRAY_SIZE(patches) < pdsc_program_data_size(*draw_program));
@@ -10609,4 +10677,32 @@ void PVR_PER_ARCH(GetRenderingAreaGranularity)(
 {
    VK_FROM_HANDLE(pvr_device, device, _device);
    pvr_get_render_area_granularity(device->pdevice, pGranularity);
+}
+
+void pvr_CmdBeginConditionalRenderingEXT(
+   VkCommandBuffer commandBuffer,
+   const VkConditionalRenderingBeginInfoEXT *pConditionalRenderingBegin)
+{
+   VK_FROM_HANDLE(pvr_cmd_buffer, cmd_buffer, commandBuffer);
+   struct pvr_cmd_buffer_state *state = &cmd_buffer->state;
+
+   vk_foreach_struct_const (sType, ext, pConditionalRenderingBegin->pNext) {
+      vk_debug_ignored_stype(sType);
+   }
+
+   VK_FROM_HANDLE(pvr_buffer, buffer, pConditionalRenderingBegin->buffer);
+   state->cond_render_buffer_addr =
+      buffer->dev_addr.addr + pConditionalRenderingBegin->offset;
+
+   state->cond_render_invert = pConditionalRenderingBegin->flags &
+                               VK_CONDITIONAL_RENDERING_INVERTED_BIT_EXT;
+}
+
+void pvr_CmdEndConditionalRenderingEXT(VkCommandBuffer commandBuffer)
+{
+   VK_FROM_HANDLE(pvr_cmd_buffer, cmd_buffer, commandBuffer);
+   struct pvr_cmd_buffer_state *state = &cmd_buffer->state;
+
+   state->cond_render_buffer_addr = 0;
+   state->cond_render_invert = true;
 }

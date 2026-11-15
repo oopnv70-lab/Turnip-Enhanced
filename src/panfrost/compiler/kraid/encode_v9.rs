@@ -11,8 +11,8 @@ use crate::isa::*;
 use crate::ops::{self, *};
 use crate::swizzle::*;
 
-use compiler::{as_slice::AsArray, enum_as_u8::EnumAsU8, index_of};
-use mesa_util::bitview::*;
+use compiler::{as_slice::AsArray, index_of};
+use mesa_util::{bitview::*, enum_as_u8::EnumAsU8};
 use paste::paste;
 use rustc_hash::FxHashMap;
 
@@ -1799,6 +1799,7 @@ impl V9Instr for OpICmpMulti {
             src_map! {
                 src0: srcs[0],
                 src1: srcs[1],
+                src2: accum,
             },
         )
     }
@@ -4030,16 +4031,17 @@ pub fn v9_op_src_supports_swizzle(
         return false;
     };
 
+    let src_type = op.src_type(src);
+    let Some(asw) = AsmSwizzleWiden::from_swizzle(src_type, swizzle) else {
+        return false;
+    };
+
     let Some(src_info) = info.src_info(op.src_idx(src)) else {
         // Claim all swizzles are supported for sources we don't have.  They'll
         // never be used so it doesn't matter what the swizzle is.
         return true;
     };
 
-    let src_type = op.src_type(src);
-    let Some(asw) = AsmSwizzleWiden::from_swizzle(src_type, swizzle) else {
-        return false;
-    };
     src_info.allowed_swizzles.contains(asw.into())
 }
 

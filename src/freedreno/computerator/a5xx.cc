@@ -21,6 +21,7 @@ struct a5xx_backend {
 
    const struct fd_dev_id *dev_id;
    const struct fd_dev_info *info;
+   uint32_t hbb;
 
    unsigned seqno;
    struct fd_bo *control_mem;
@@ -82,10 +83,56 @@ a5xx_disassemble(struct kernel *kernel, struct ir3_disasm_options *options)
    ir3_asm_disassemble(to_ir3_kernel(kernel), options);
 }
 
+static uint32_t
+sp_dbg_eco_cntl(uint32_t gpu_id)
+{
+   switch (gpu_id) {
+   case 510:
+   case 530:
+      return 0x40000800;
+   default:
+      return 0x00000800;
+   }
+}
+
+/* Workaround bits the kernel sets in hw_init, which the restore rewrites */
+static bool
+rb_dp2_clock_gating_disabled(uint32_t gpu_id)
+{
+   switch (gpu_id) {
+   case 505:
+   case 506:
+   case 508:
+   case 509:
+   case 512:
+      return true;
+   default:
+      return false;
+   }
+}
+
+static bool
+lm_load_kill_disabled(uint32_t gpu_id)
+{
+   switch (gpu_id) {
+   case 505:
+   case 506:
+   case 508:
+   case 509:
+   case 512:
+   case 540:
+      return true;
+   default:
+      return false;
+   }
+}
+
 /* The compute-relevant subset of fd5_emit_restore(). */
 static void
 cs_restore_emit(struct fd_ringbuffer *ring, struct a5xx_backend *a5xx_backend)
 {
+   uint32_t gpu_id = fd_dev_gpu_id(a5xx_backend->dev_id);
+
    OUT_PKT7(ring, CP_SET_RENDER_MODE, 5);
    OUT_RING(ring, CP_SET_RENDER_MODE_0_MODE(BYPASS));
    OUT_RING(ring, 0x00000000); /* ADDR_LO */
@@ -106,10 +153,11 @@ cs_restore_emit(struct fd_ringbuffer *ring, struct a5xx_backend *a5xx_backend)
    OUT_RING(ring, 0x000fffff);
 
    OUT_PKT4(ring, REG_A5XX_RB_MODE_CNTL, 1);
-   OUT_RING(ring, 0x00000044);
+   OUT_RING(ring, 0x00000040 | A5XX_RB_MODE_CNTL_HIGHESTBANKBIT(a5xx_backend->hbb));
 
    OUT_PKT4(ring, REG_A5XX_RB_DBG_ECO_CNTL, 1);
-   OUT_RING(ring, 0x00100000);
+   OUT_RING(ring, 0x00100000 |
+            COND(rb_dp2_clock_gating_disabled(gpu_id), BIT(9)));
 
    OUT_PKT4(ring, REG_A5XX_PC_MODE_CNTL, 1);
    OUT_RING(ring, 0x0000001f);
@@ -117,26 +165,25 @@ cs_restore_emit(struct fd_ringbuffer *ring, struct a5xx_backend *a5xx_backend)
    OUT_PKT4(ring, REG_A5XX_SP_MODE_CNTL, 1);
    OUT_RING(ring, 0x0000001e);
 
-   if (fd_dev_gpu_id(a5xx_backend->dev_id) == 540) {
-      OUT_PKT4(ring, REG_A5XX_SP_DBG_ECO_CNTL, 1);
-      OUT_RING(ring, 0x00000800);
+   OUT_PKT4(ring, REG_A5XX_SP_DBG_ECO_CNTL, 1);
+   OUT_RING(ring, sp_dbg_eco_cntl(gpu_id));
 
+   if (gpu_id == 540) {
       OUT_PKT4(ring, REG_A5XX_HLSQ_DBG_ECO_CNTL, 1);
       OUT_RING(ring, 0x00000000);
-   } else {
-      OUT_PKT4(ring, REG_A5XX_SP_DBG_ECO_CNTL, 1);
-      OUT_RING(ring, 0x40000800);
    }
 
    OUT_PKT4(ring, REG_A5XX_TPL1_MODE_CNTL, 1);
-   OUT_RING(ring, 0x00000544);
+   OUT_RING(ring, 0x00000444 | A5XX_TPL1_MODE_CNTL_HIGHESTBANKBIT(a5xx_backend->hbb));
 
    OUT_PKT4(ring, REG_A5XX_HLSQ_TIMEOUT_THRESHOLD_0, 2);
    OUT_RING(ring, 0x00000080); /* HLSQ_TIMEOUT_THRESHOLD_0 */
    OUT_RING(ring, 0x00000000); /* HLSQ_TIMEOUT_THRESHOLD_1 */
 
    OUT_PKT4(ring, REG_A5XX_VPC_DBG_ECO_CNTL, 1);
-   OUT_RING(ring, 0x00000400);
+   OUT_RING(ring, A5XX_VPC_DBG_ECO_CNTL_ALLFLATOPTDIS |
+            /* referenced as LMLOADKILLDIS in msm-4.4/kgsl */
+            COND(lm_load_kill_disabled(gpu_id), BIT(23)));
 
    OUT_PKT4(ring, REG_A5XX_HLSQ_MODE_CNTL, 1);
    OUT_RING(ring, 0x00000001);
@@ -229,7 +276,7 @@ cs_program_emit(struct fd_ringbuffer *ring, struct kernel *kernel)
                      A5XX_HLSQ_CS_CNTL_0_UNK0(INVALID_REG) |
                      A5XX_HLSQ_CS_CNTL_0_UNK1(INVALID_REG) |
                      A5XX_HLSQ_CS_CNTL_0_LOCALIDREGID(local_invocation_id));
-   OUT_RING(ring, 0x1); /* HLSQ_CS_CNTL_1 */
+   OUT_RING(ring, A5XX_HLSQ_CS_CNTL_1_WORKITEMRASTORDER(WORKITEMRASTORDER_LINEAR));
 
    if (instrlen > 0) {
       /* preload the shader into the instruction cache: */
@@ -533,6 +580,13 @@ a5xx_init(struct fd_device *dev, const struct fd_dev_id *dev_id)
 
    a5xx_backend->dev_id = dev_id;
    a5xx_backend->info = fd_dev_info_raw(dev_id);
+
+   uint64_t hbb = 0;
+   struct fd_pipe *pipe = fd_pipe_new(dev, FD_PIPE_3D);
+   if (fd_pipe_get_param(pipe, FD_HIGHEST_BANK_BIT, &hbb) || !hbb)
+      hbb = a5xx_backend->info->highest_bank_bit;
+   fd_pipe_del(pipe);
+   a5xx_backend->hbb = hbb - 13;
 
    a5xx_backend->control_mem = fd_bo_new(dev, 0x1000, 0, "control");
 

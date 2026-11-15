@@ -10,8 +10,6 @@ fraction = 6
 piglit_folder = "/piglit"
 profile = "cl"
 process_isolation = true
-  [piglit.env]
-  RUSTICL_ENABLE = "msm"
 
 # force-gmem testing of GL_EXT_YUV_target sampling/rendering
 [[piglit]]

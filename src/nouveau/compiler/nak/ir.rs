@@ -2,6 +2,7 @@
 // SPDX-License-Identifier: MIT
 
 extern crate mesa_util;
+extern crate mesa_util_proc;
 extern crate nak_ir_proc;
 
 use mesa_util::bitview::{
@@ -20,9 +21,10 @@ pub use crate::ssa_value::*;
 use compiler::as_slice::*;
 use compiler::cfg::CFG;
 use compiler::dataflow::ForwardDataflow;
-use compiler::enum_as_u8::EnumAsU8;
 use compiler::smallvec::SmallVec;
 use compiler::vec_pair::VecPair;
+use mesa_util::enum_as_u8::EnumAsU8;
+use mesa_util_proc::EnumAsU8;
 use nak_ir_proc::*;
 use std::cmp::{max, min};
 use std::fmt;
@@ -596,6 +598,10 @@ impl SrcRef {
         }
     }
 
+    pub fn is_immediate(&self) -> bool {
+        matches!(self, SrcRef::Imm32(_))
+    }
+
     pub fn is_carry(&self) -> bool {
         match self {
             SrcRef::SSA(ssa) => ssa.file() == RegFile::Carry,
@@ -1148,6 +1154,10 @@ impl Src {
         self.src_ref.is_predicate()
     }
 
+    pub fn is_immediate(&self) -> bool {
+        self.src_ref.is_immediate()
+    }
+
     pub fn is_zero(&self) -> bool {
         match self.src_ref {
             SrcRef::Zero | SrcRef::Imm32(0) => match self.src_mod {
@@ -1460,7 +1470,7 @@ fn fmt_dst_slice(f: &mut fmt::Formatter<'_>, dsts: &[Dst]) -> fmt::Result {
 }
 
 #[allow(dead_code)]
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, Debug)]
 pub enum FoldData {
     Pred(bool),
     Carry(bool),
@@ -2840,7 +2850,7 @@ impl DisplayOp for OpFFma {
 impl_display_for_op!(OpFFma);
 
 #[repr(C)]
-#[derive(SrcsAsSlice, DstsAsSlice)]
+#[derive(Clone, SrcsAsSlice, DstsAsSlice)]
 pub struct OpFMnMx {
     #[dst_type(F32)]
     pub dst: Dst,
@@ -2852,19 +2862,65 @@ pub struct OpFMnMx {
     pub min: Src,
 
     pub ftz: bool,
+    pub nan: bool,
+    pub xorsign: bool,
 }
 
 impl DisplayOp for OpFMnMx {
     fn fmt_op(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let ftz = if self.ftz { ".ftz" } else { "" };
+        let nan = if self.nan { ".nan" } else { "" };
+        let xorsign = if self.xorsign { ".xorsign" } else { "" };
         write!(
             f,
-            "fmnmx{ftz} {} {} {}",
+            "fmnmx{ftz}{nan}{xorsign} {} {} {}",
             self.srcs[0], self.srcs[1], self.min
         )
     }
 }
 impl_display_for_op!(OpFMnMx);
+
+impl Foldable for OpFMnMx {
+    fn fold(&self, _sm: &ShaderModelInfo, f: &mut OpFoldData<'_>) {
+        let a = f.get_f32_src(self, &self.srcs[0]);
+        let b = f.get_f32_src(self, &self.srcs[1]);
+        let min = f.get_pred_src(self, &self.min);
+
+        let op = if min { PartialOrd::lt } else { PartialOrd::gt };
+
+        // Canonical NaN results are represented by None are not impacted by
+        // xorsigns behavior.
+        let res = if a == 0.0 && b == 0.0 {
+            if min && a.is_sign_negative() || !min && a.is_sign_positive() {
+                Some(a)
+            } else {
+                Some(b)
+            }
+        } else if !a.is_nan() && !b.is_nan() {
+            Some(if op(&a, &b) { a } else { b })
+        } else if (a.is_nan() && b.is_nan()) || self.nan {
+            None
+        } else if a.is_nan() {
+            Some(b)
+        } else {
+            Some(a)
+        };
+
+        let res = if let Some(mut res) = res {
+            if self.xorsign {
+                let sign =
+                    (a.to_bits() & 0x80000000) ^ (b.to_bits() & 0x80000000);
+                res = f32::from_bits((res.to_bits() & 0x7fff_ffff) | sign);
+            }
+
+            res
+        } else {
+            f32::from_bits(0x7fff_ffff)
+        };
+
+        f.set_f32_dst(self, &self.dst, res);
+    }
+}
 
 #[repr(C)]
 #[derive(SrcsAsSlice, DstsAsSlice)]
@@ -3623,14 +3679,18 @@ pub struct OpHMnMx2 {
     pub min: Src,
 
     pub ftz: bool,
+    pub nan: bool,
+    pub xorsign: bool,
 }
 
 impl DisplayOp for OpHMnMx2 {
     fn fmt_op(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         let ftz = if self.ftz { ".ftz" } else { "" };
+        let nan = if self.nan { ".nan" } else { "" };
+        let xorsign = if self.xorsign { ".xorsign" } else { "" };
         write!(
             f,
-            "hmnmx2{ftz} {} {} {}",
+            "hmnmx2{ftz}{nan}{xorsign} {} {} {}",
             self.srcs[0], self.srcs[1], self.min
         )
     }
@@ -7662,7 +7722,7 @@ impl_display_for_op!(OpSrcBar);
 mod phi {
     #[allow(unused_imports)]
     use crate::ir::{OpPhiDsts, OpPhiSrcs};
-    use compiler::bitset::IntoBitIndex;
+    use mesa_util::bitset::IntoBitIndex;
     use std::fmt;
 
     /// A phi node
@@ -9127,6 +9187,32 @@ impl Instr {
             | Op::Annotate(_) => false,
         }
     }
+
+    /// Returns true if the operations output depends on any pre modified
+    /// input.
+    ///
+    /// This indicates that e.g. merging a modifier with a constant source
+    /// could change the result of this instruction.
+    pub fn result_depends_on_pre_mod_srcs(&self) -> bool {
+        match &self.op {
+            // modifier overflowing the source is returned as an overflow
+            // through the carry/predicate out.
+            Op::IAdd2(op) => !op.carry_out.is_none(),
+            Op::IAdd2X(op) => !op.carry_out.is_none(),
+            Op::IAdd3(op) => {
+                !op.overflow[0].is_none() || !op.overflow[1].is_none()
+            }
+            Op::IAdd3X(op) => {
+                !op.overflow[0].is_none() || !op.overflow[1].is_none()
+            }
+            Op::Lea(op) => !op.overflow.is_none(),
+            Op::LeaX(op) => !op.overflow.is_none(),
+            // .xorsign takes the sign bit of the unmodified sources
+            Op::FMnMx(op) => op.xorsign,
+            Op::HMnMx2(op) => op.xorsign,
+            _ => false,
+        }
+    }
 }
 
 impl fmt::Display for Instr {
@@ -9380,6 +9466,8 @@ pub struct FragmentShaderInfo {
     pub post_depth_coverage: bool,
     pub early_fragment_tests: bool,
     pub uses_sample_shading: bool,
+    pub z_min_bounded: bool,
+    pub z_max_bounded: bool,
 }
 
 #[derive(Debug)]

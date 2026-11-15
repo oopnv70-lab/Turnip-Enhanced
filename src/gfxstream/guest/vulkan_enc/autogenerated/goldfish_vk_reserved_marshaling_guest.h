@@ -47,6 +47,56 @@
 namespace gfxstream {
 namespace vk {
 
+inline void writeStreamBytes(uint8_t** ptr, const void* buffer, size_t size) {
+    memcpy(*ptr, buffer, size);
+    *ptr += size;
+}
+
+template <typename T>
+inline void writeStreamVal(uint8_t** ptr, const T& val) {
+    memcpy(*ptr, &val, sizeof(T));
+    *ptr += sizeof(T);
+}
+
+inline void putByteWithStreamPtr(uint8_t** ptr, uint8_t val) {
+    **ptr = val;
+    *ptr += sizeof(uint8_t);
+}
+
+inline void putBe16WithStreamPtr(uint8_t** ptr, uint16_t val) {
+    memcpy(*ptr, &val, sizeof(uint16_t));
+    gfxstream::aemu::Stream::toBe16(*ptr);
+    *ptr += sizeof(uint16_t);
+}
+
+inline void putBe32WithStreamPtr(uint8_t** ptr, uint32_t val) {
+    memcpy(*ptr, &val, sizeof(uint32_t));
+    gfxstream::aemu::Stream::toBe32(*ptr);
+    *ptr += sizeof(uint32_t);
+}
+
+inline void putBe64WithStreamPtr(uint8_t** ptr, uint64_t val) {
+    memcpy(*ptr, &val, sizeof(uint64_t));
+    gfxstream::aemu::Stream::toBe64(*ptr);
+    *ptr += sizeof(uint64_t);
+}
+
+inline void putStringWithStreamPtr(uint8_t** ptr, const char* str) {
+    uint32_t l = str ? strlen(str) : 0;
+    putBe32WithStreamPtr(ptr, l);
+    writeStreamBytes(ptr, str, l);
+}
+
+inline void putStringArrayWithStreamPtr(uint8_t** ptr, const char* const* strings, uint32_t count) {
+    putBe32WithStreamPtr(ptr, count);
+    for (uint32_t i = 0; i < count; ++i) {
+        uint32_t l = strings ? strlen(strings[i]) : 0;
+        putBe32WithStreamPtr(ptr, l);
+        if (l) {
+            writeStreamBytes(ptr, strings[i], l);
+        }
+    }
+}
 #ifdef VK_BASE_VERSION_1_0
 void reservedmarshal_VkExtent2D(VulkanStreamGuest* vkStream, VkStructureType rootType,
                                 const VkExtent2D* forMarshaling, uint8_t** ptr);
@@ -1861,6 +1911,12 @@ DEFINE_ALIAS_FUNCTION(reservedmarshal_VkPhysicalDeviceShaderIntegerDotProductPro
                       reservedmarshal_VkPhysicalDeviceShaderIntegerDotProductPropertiesKHR)
 
 #endif
+#ifdef VK_KHR_pipeline_library
+void reservedmarshal_VkPipelineLibraryCreateInfoKHR(
+    VulkanStreamGuest* vkStream, VkStructureType rootType,
+    const VkPipelineLibraryCreateInfoKHR* forMarshaling, uint8_t** ptr);
+
+#endif
 #ifdef VK_KHR_synchronization2
 DEFINE_ALIAS_FUNCTION(reservedmarshal_VkMemoryBarrier2, reservedmarshal_VkMemoryBarrier2KHR)
 
@@ -2336,6 +2392,40 @@ void reservedmarshal_VkPhysicalDeviceExtendedDynamicStateFeaturesEXT(
     const VkPhysicalDeviceExtendedDynamicStateFeaturesEXT* forMarshaling, uint8_t** ptr);
 
 #endif
+#ifdef VK_EXT_host_image_copy
+DEFINE_ALIAS_FUNCTION(reservedmarshal_VkPhysicalDeviceHostImageCopyFeatures,
+                      reservedmarshal_VkPhysicalDeviceHostImageCopyFeaturesEXT)
+
+DEFINE_ALIAS_FUNCTION(reservedmarshal_VkPhysicalDeviceHostImageCopyProperties,
+                      reservedmarshal_VkPhysicalDeviceHostImageCopyPropertiesEXT)
+
+DEFINE_ALIAS_FUNCTION(reservedmarshal_VkMemoryToImageCopy, reservedmarshal_VkMemoryToImageCopyEXT)
+
+DEFINE_ALIAS_FUNCTION(reservedmarshal_VkImageToMemoryCopy, reservedmarshal_VkImageToMemoryCopyEXT)
+
+DEFINE_ALIAS_FUNCTION(reservedmarshal_VkCopyMemoryToImageInfo,
+                      reservedmarshal_VkCopyMemoryToImageInfoEXT)
+
+DEFINE_ALIAS_FUNCTION(reservedmarshal_VkCopyImageToMemoryInfo,
+                      reservedmarshal_VkCopyImageToMemoryInfoEXT)
+
+DEFINE_ALIAS_FUNCTION(reservedmarshal_VkCopyImageToImageInfo,
+                      reservedmarshal_VkCopyImageToImageInfoEXT)
+
+DEFINE_ALIAS_FUNCTION(reservedmarshal_VkHostImageLayoutTransitionInfo,
+                      reservedmarshal_VkHostImageLayoutTransitionInfoEXT)
+
+DEFINE_ALIAS_FUNCTION(reservedmarshal_VkSubresourceHostMemcpySize,
+                      reservedmarshal_VkSubresourceHostMemcpySizeEXT)
+
+DEFINE_ALIAS_FUNCTION(reservedmarshal_VkHostImageCopyDevicePerformanceQuery,
+                      reservedmarshal_VkHostImageCopyDevicePerformanceQueryEXT)
+
+DEFINE_ALIAS_FUNCTION(reservedmarshal_VkSubresourceLayout2, reservedmarshal_VkSubresourceLayout2EXT)
+
+DEFINE_ALIAS_FUNCTION(reservedmarshal_VkImageSubresource2, reservedmarshal_VkImageSubresource2EXT)
+
+#endif
 #ifdef VK_EXT_shader_demote_to_helper_invocation
 DEFINE_ALIAS_FUNCTION(reservedmarshal_VkPhysicalDeviceShaderDemoteToHelperInvocationFeatures,
                       reservedmarshal_VkPhysicalDeviceShaderDemoteToHelperInvocationFeaturesEXT)
@@ -2445,10 +2535,6 @@ void reservedmarshal_VkImageCompressionControlEXT(VulkanStreamGuest* vkStream,
                                                   const VkImageCompressionControlEXT* forMarshaling,
                                                   uint8_t** ptr);
 
-DEFINE_ALIAS_FUNCTION(reservedmarshal_VkSubresourceLayout2, reservedmarshal_VkSubresourceLayout2EXT)
-
-DEFINE_ALIAS_FUNCTION(reservedmarshal_VkImageSubresource2, reservedmarshal_VkImageSubresource2EXT)
-
 void reservedmarshal_VkImageCompressionPropertiesEXT(
     VulkanStreamGuest* vkStream, VkStructureType rootType,
     const VkImageCompressionPropertiesEXT* forMarshaling, uint8_t** ptr);
@@ -2529,6 +2615,11 @@ void reservedmarshal_VkGuestCapabilitiesGOOGLE(VulkanStreamGuest* vkStream,
                                                VkStructureType rootType,
                                                const VkGuestCapabilitiesGOOGLE* forMarshaling,
                                                uint8_t** ptr);
+
+void reservedmarshal_VkHostPointerResolveGOOGLE(VulkanStreamGuest* vkStream,
+                                                VkStructureType rootType,
+                                                const VkHostPointerResolveGOOGLE* forMarshaling,
+                                                uint8_t** ptr);
 
 void reservedmarshal_VkDebugMetadataGOOGLE(VulkanStreamGuest* vkStream, VkStructureType rootType,
                                            const VkDebugMetadataGOOGLE* forMarshaling,

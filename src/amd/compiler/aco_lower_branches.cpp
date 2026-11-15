@@ -150,7 +150,10 @@ bool
 instr_uses_reg(aco_ptr<Instruction>& instr, PhysReg reg, uint32_t size)
 {
    auto intersects = [=](auto src) -> bool
-   { return src.physReg() + src.size() > reg && reg + size > src.physReg(); };
+   {
+      return src.physReg() != sgpr_null && src.physReg() + src.size() > reg &&
+             reg + size > src.physReg();
+   };
 
    return std::any_of(instr->definitions.begin(), instr->definitions.end(),
                       [=](Definition def) { return intersects(def); }) ||
@@ -284,10 +287,7 @@ void
 eliminate_useless_exec_writes_in_block(branch_ctx& ctx, Block& block)
 {
    bool exec_write_used = false;
-   if (block.kind & block_kind_end_with_regs) {
-      /* Last block of a program with succeed shader part should respect final exec write. */
-      exec_write_used = true;
-   } else if (!block.linear_succs.empty()) {
+   if (!block.linear_succs.empty()) {
       /* Check if the successor needs the outgoing exec mask from the current block. */
       exec_write_used = ctx.blocks_incoming_exec_used[block.linear_succs[0]];
    }

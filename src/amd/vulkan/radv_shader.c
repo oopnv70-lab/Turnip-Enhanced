@@ -811,7 +811,10 @@ radv_shader_spirv_to_nir(const struct radv_compiler_info *compiler_info, struct 
 
       NIR_PASS(_, nir, nir_opt_scalar_array_vars_to_vec, nir_var_function_temp | nir_var_mem_shared);
 
-      NIR_PASS(_, nir, nir_opt_memcpy);
+      bool memcpy_progress = false;
+      NIR_PASS(memcpy_progress, nir, nir_opt_memcpy);
+      if (memcpy_progress)
+         NIR_PASS(_, nir, nir_split_var_copies);
       NIR_PASS(_, nir, nir_opt_deref);
    }
 
@@ -1085,7 +1088,7 @@ radv_lower_ngg(const struct radv_compiler_info *compiler_info, struct radv_shade
 
       options.has_gen_prim_query = info->ms.has_query;
       options.has_ms_gs_invocations_query = info->ms.has_query;
-      options.multiview = gfx_state->has_multiview_view_index;
+      options.multiview = ngg_stage->key.multiview;
 
       bool scratch_ring = false;
       NIR_PASS(_, nir, ac_nir_lower_ngg_mesh, &options, &scratch_ring);
@@ -3713,7 +3716,14 @@ radv_shader_dump_asm(const struct radv_compiler_info *compiler_info, struct radv
          sep = " + ";
       }
 
-      fprintf(stderr, "\ndisasm:\n%s\n", dbg.disasm_string);
+      fprintf(stderr, "\ndisasm:\n");
+      uint32_t code_size = 0;
+      if (dbg.debug_info_count > 0) {
+         struct radv_shader_binary_legacy *bin = (struct radv_shader_binary_legacy *)binary;
+         code_size = bin->code_size;
+      }
+      radv_print_shader_disasm(&dbg, code_size, NULL, 0, 0x00000000, stderr);
+      fprintf(stderr, "\n");
 
       radv_free_binary_debug_info(&dbg);
    }
@@ -3764,7 +3774,9 @@ radv_create_trap_handler_shader(struct radv_device *device)
    if (dump_shader) {
       struct radv_shader_binary_debug_info dbg = radv_parse_binary_debug_info(&device->compiler_info, shader->binary);
       fprintf(stderr, "Trap handler");
-      fprintf(stderr, "\ndisasm:\n%s\n", dbg.disasm_string);
+      fprintf(stderr, "\ndisasm:\n");
+      radv_print_shader_disasm(&dbg, shader->code_size, NULL, 0, 0x00000000, stderr);
+      fprintf(stderr, "\n");
       radv_free_binary_debug_info(&dbg);
    }
 
@@ -3840,7 +3852,9 @@ radv_compile_rt_prolog(struct radv_device *device, struct radv_shader_stage *sta
    if (dump_shader) {
       struct radv_shader_binary_debug_info dbg = radv_parse_binary_debug_info(&device->compiler_info, binary);
       fprintf(stderr, "Raytracing prolog");
-      fprintf(stderr, "\ndisasm:\n%s\n", dbg.disasm_string);
+      fprintf(stderr, "\ndisasm:\n");
+      radv_print_shader_disasm(&dbg, prolog->code_size, NULL, 0, 0x00000000, stderr);
+      fprintf(stderr, "\n");
       simple_mtx_unlock(compiler_info->debug.shader_dump_mtx);
       radv_free_binary_debug_info(&dbg);
    }

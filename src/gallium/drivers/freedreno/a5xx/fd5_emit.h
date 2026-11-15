@@ -51,6 +51,36 @@ struct fd5_emit {
    unsigned streamout_mask;
 };
 
+static inline uint32_t
+fd5_ccu_cntl_gmem(const struct fd_screen *screen)
+{
+   unsigned cores = screen->info->num_sp_cores;
+   enum a5xx_ccu_cache_size size;
+
+   switch (screen->gpu_id) {
+   case 505:
+   case 506:
+   case 510:
+      size = CCU_CACHE_SIZE_FULL;
+      break;
+   default:
+      size = CCU_CACHE_SIZE_QUARTER;
+      break;
+   }
+
+   return A5XX_RB_CCU_CNTL_DEPTH_CACHE_SIZE(size) |
+          A5XX_RB_CCU_CNTL_DEPTH_OFFSET(1024 - 16 * cores) |
+          A5XX_RB_CCU_CNTL_COLOR_CACHE_SIZE(size) |
+          A5XX_RB_CCU_CNTL_COLOR_OFFSET(1024 - 8 * cores);
+}
+
+/* Bypass mode gives each SP core 32 units of the colour cache. */
+static inline uint32_t
+fd5_ccu_cntl_bypass(const struct fd_screen *screen)
+{
+   return A5XX_RB_CCU_CNTL_COLOR_OFFSET(32 * screen->info->num_sp_cores);
+}
+
 static inline enum a5xx_color_fmt
 fd5_emit_format(struct pipe_surface *surf)
 {
@@ -141,7 +171,8 @@ fd5_emit_blit(struct fd_batch *batch, struct fd_ringbuffer *ring)
 }
 
 static inline void
-fd5_emit_render_cntl(struct fd_context *ctx, bool blit, bool binning) assert_dt
+fd5_emit_render_cntl(struct fd_context *ctx, bool blit, bool binning,
+                     bool fb_read) assert_dt
 {
    struct fd_ringbuffer *ring =
       binning ? ctx->batch->binning : ctx->batch->draw;
@@ -165,6 +196,7 @@ fd5_emit_render_cntl(struct fd_context *ctx, bool blit, bool binning) assert_dt
    OUT_PKT4(ring, REG_A5XX_GRAS_SC_CNTL, 1);
    OUT_RING(ring, 0x00000008 | /* GRAS_SC_CNTL */
                      COND(binning, A5XX_GRAS_SC_CNTL_BINNING_PASS) |
+                     COND(fb_read, A5XX_GRAS_SC_CNTL_FLUSH_PER_OVERLAP) |
                      COND(samples_passed, A5XX_GRAS_SC_CNTL_SAMPLES_PASSED));
 }
 

@@ -436,7 +436,7 @@ tu6_emit_flushes(struct tu_cmd_buffer *cmd_buffer,
       tu_cs_emit_pkt7(cs, CP_CCHE_INVALIDATE, 0);
    }
    if (CHIP == A7XX && (flushes & TU_CMD_FLAG_RTU_INVALIDATE) &&
-       cmd_buffer->device->physical_device->info->props.has_rt_workaround)
+       FD_QUIRK(cmd_buffer->device->physical_device->info, QCTDD10497382_rt_workaround))
       tu_emit_rt_workaround<CHIP>(cmd_buffer, cs);
    if (flushes & TU_CMD_FLAG_WAIT_MEM_WRITES)
       tu_cs_emit_pkt7(cs, CP_WAIT_MEM_WRITES, 0);
@@ -4407,7 +4407,7 @@ tu_create_cmd_buffer(struct vk_command_pool *pool,
       }
    }
 
-   tu_cs_init(&cmd_buffer->cs, device, TU_CS_MODE_GROW, 4096, "cmd cs");
+   tu_cs_init_ib1(&cmd_buffer->cs, device, TU_CS_MODE_GROW, 4096, "cmd cs");
    tu_cs_init(&cmd_buffer->draw_cs, device, TU_CS_MODE_GROW, 4096, "draw cs");
    tu_cs_init(&cmd_buffer->tile_store_cs, device, TU_CS_MODE_GROW, 2048, "tile store cs");
    tu_cs_init(&cmd_buffer->draw_epilogue_cs, device, TU_CS_MODE_GROW, 4096, "draw epilogue cs");
@@ -4983,6 +4983,15 @@ tu6_emit_descriptor_sets(struct tu_cmd_buffer *cmd,
  * batch together multiple tu_CmdBindDescriptorSets() calls.  ANGLE and zink
  * will often emit multiple bind calls in a draw.
  */
+/* Ray tracing stages all map onto the compute pipeline state. */
+static const VkShaderStageFlags tu_rt_shader_stages =
+   VK_SHADER_STAGE_RAYGEN_BIT_KHR |
+   VK_SHADER_STAGE_ANY_HIT_BIT_KHR |
+   VK_SHADER_STAGE_CLOSEST_HIT_BIT_KHR |
+   VK_SHADER_STAGE_MISS_BIT_KHR |
+   VK_SHADER_STAGE_INTERSECTION_BIT_KHR |
+   VK_SHADER_STAGE_CALLABLE_BIT_KHR;
+
 static void
 tu_dirty_desc_sets(struct tu_cmd_buffer *cmd,
                    VkPipelineBindPoint pipelineBindPoint)
@@ -5025,7 +5034,8 @@ tu_bind_descriptor_sets(struct tu_cmd_buffer *cmd,
       descriptors_state->set_iova[idx] = set ?
          (set->va | BINDLESS_DESCRIPTOR_64B) : 0;
 
-      if (cmd->device->physical_device->compiler_options.enable_ssbo_emulation)
+      /* Compute consts are emitted on every dispatch. */
+      if (bind_point == VK_PIPELINE_BIND_POINT_GRAPHICS && cmd->state.program.uses_bindless_base_addrs)
          cmd->state.dirty |= TU_CMD_DIRTY_SHADER_CONSTS;
 
       if (!set)
@@ -5095,8 +5105,8 @@ tu_bind_descriptor_sets(struct tu_cmd_buffer *cmd,
                         va += offset;
 
                         if (cmd->device->physical_device->compiler_options.enable_ssbo_emulation) {
-                           dst_desc[11] = va;
-                           dst_desc[12] = va >> 32;
+                           dst_desc[FDL6_EMULATED_SSBO_ADDR_DWORD] = va;
+                           dst_desc[FDL6_EMULATED_SSBO_ADDR_DWORD + 1] = va >> 32;
                         }
 
                         unsigned new_offset = (va & 0x3f) >> offset_shift;
@@ -5154,7 +5164,8 @@ tu_CmdBindDescriptorSets2KHR(
 {
    VK_FROM_HANDLE(tu_cmd_buffer, cmd, commandBuffer);
 
-   if (pBindDescriptorSetsInfo->stageFlags & VK_SHADER_STAGE_COMPUTE_BIT) {
+   if (pBindDescriptorSetsInfo->stageFlags &
+       (VK_SHADER_STAGE_COMPUTE_BIT | tu_rt_shader_stages)) {
       tu_bind_descriptor_sets<CHIP>(cmd, pBindDescriptorSetsInfo,
                                     VK_PIPELINE_BIND_POINT_COMPUTE);
    }
@@ -5201,7 +5212,8 @@ tu_set_descriptor_buffer_offsets(
           info->pOffsets[i]) |
          BINDLESS_DESCRIPTOR_64B;
 
-      if (cmd->device->physical_device->compiler_options.enable_ssbo_emulation ||
+      /* Compute consts are emitted on every dispatch. */
+      if ((bind_point == VK_PIPELINE_BIND_POINT_GRAPHICS && cmd->state.program.uses_bindless_base_addrs) ||
           set_layout->has_inline_uniforms)
          cmd->state.dirty |= TU_CMD_DIRTY_SHADER_CONSTS;
    }
@@ -5217,7 +5229,7 @@ tu_CmdSetDescriptorBufferOffsets2EXT(
    VK_FROM_HANDLE(tu_cmd_buffer, cmd, commandBuffer);
 
    if (pSetDescriptorBufferOffsetsInfo->stageFlags &
-       VK_SHADER_STAGE_COMPUTE_BIT) {
+       (VK_SHADER_STAGE_COMPUTE_BIT | tu_rt_shader_stages)) {
       tu_set_descriptor_buffer_offsets(cmd, pSetDescriptorBufferOffsetsInfo,
                                        VK_PIPELINE_BIND_POINT_COMPUTE);
    }
@@ -5261,7 +5273,7 @@ tu_CmdBindDescriptorBufferEmbeddedSamplers2EXT(
    VK_FROM_HANDLE(tu_cmd_buffer, cmd, commandBuffer);
 
    if (pBindDescriptorBufferEmbeddedSamplersInfo->stageFlags &
-       VK_SHADER_STAGE_COMPUTE_BIT) {
+       (VK_SHADER_STAGE_COMPUTE_BIT | tu_rt_shader_stages)) {
       tu_bind_descriptor_buffer_embedded_samplers(
          cmd, pBindDescriptorBufferEmbeddedSamplersInfo,
          VK_PIPELINE_BIND_POINT_COMPUTE);
@@ -5348,7 +5360,8 @@ tu_CmdPushDescriptorSet2KHR(
 {
    VK_FROM_HANDLE(tu_cmd_buffer, cmd, commandBuffer);
 
-   if (pPushDescriptorSetInfo->stageFlags & VK_SHADER_STAGE_COMPUTE_BIT) {
+   if (pPushDescriptorSetInfo->stageFlags &
+       (VK_SHADER_STAGE_COMPUTE_BIT | tu_rt_shader_stages)) {
       tu_push_descriptor_set<CHIP>(cmd, pPushDescriptorSetInfo,
                                    VK_PIPELINE_BIND_POINT_COMPUTE);
    }
@@ -5486,6 +5499,9 @@ tu_CmdBeginTransformFeedbackEXT(VkCommandBuffer commandBuffer,
                      { .cnt = 1, .wait_cache_flush = true });
 
       if (offset) {
+         /* Without a WFI, CP_REG_RMW may read a stale value. */
+         tu_cs_emit_wfi(cs);
+
          cs->rmw(VPC_SO_BUFFER_OFFSET(CHIP, idx), {
             .src1_add = true,
             .src0 = 0xffffffff,
@@ -5595,7 +5611,12 @@ tu_EndCommandBuffer(VkCommandBuffer commandBuffer)
    if (cmd_buffer->state.pass) {
       tu_clean_all_pending(&cmd_buffer->state.renderpass_cache);
       tu_emit_cache_flush_renderpass<CHIP>(cmd_buffer);
-   } else {
+   }
+
+   /* A suspended chain is rendered after cs, so in order to not lose the flushes - do them here. */
+   if (!cmd_buffer->state.pass ||
+       cmd_buffer->state.suspend_resume == SR_IN_CHAIN ||
+       cmd_buffer->state.suspend_resume == SR_IN_CHAIN_AFTER_PRE_CHAIN) {
       tu_clean_all_pending(&cmd_buffer->state.cache);
       cmd_buffer->state.cache.flush_bits |=
          TU_CMD_FLAG_CCU_CLEAN_COLOR |
@@ -5747,12 +5768,16 @@ tu_CmdBindPipeline(VkCommandBuffer commandBuffer,
    VK_FROM_HANDLE(tu_cmd_buffer, cmd, commandBuffer);
    VK_FROM_HANDLE(tu_pipeline, pipeline, _pipeline);
 
-   if (pipelineBindPoint == VK_PIPELINE_BIND_POINT_COMPUTE) {
+   cmd->state.rt = NULL;
+
+   if (pipelineBindPoint == VK_PIPELINE_BIND_POINT_COMPUTE ||
+       pipelineBindPoint == VK_PIPELINE_BIND_POINT_RAY_TRACING_KHR) {
       cmd->state.shaders[MESA_SHADER_COMPUTE] =
          pipeline->shaders[MESA_SHADER_COMPUTE];
       tu_cs_emit_state_ib(&cmd->cs,
                           pipeline->shaders[MESA_SHADER_COMPUTE]->state);
       cmd->state.compute_load_state = pipeline->load_state;
+      cmd->state.rt = pipeline->rt;
       return;
    }
 
@@ -8837,7 +8862,7 @@ tu6_draw_common(struct tu_cmd_buffer *cmd,
          cmd->vk.dynamic_graphics_state.ia.primitive_restart_index));
    }
 
-   if (cmd->device->physical_device->info->props.has_rt_workaround &&
+   if (FD_QUIRK(cmd->device->physical_device->info, QCTDD10497382_rt_workaround) &&
        cmd->state.program.uses_ray_intersection) {
       tu_set_render_mode<CHIP>(cs, { .shader_uses_rt = true });
    }
@@ -9333,6 +9358,16 @@ template <chip CHIP>
 static void
 tu6_emit_empty_vs_params(struct tu_cmd_buffer *cmd)
 {
+   if (cmd->state.sw_multiview && vs_params_offset(cmd)) {
+      /* We still have to upload the view index of the current replay. Skip the
+       * VFD registers though: CP_DRAW_INDIRECT_MULTI sources VFD_INDEX_OFFSET
+       * and VFD_INSTANCE_START_OFFSET from the indirect buffer, and a draw
+       * state writing them would clobber those values.
+       */
+      tu6_emit_vs_params(cmd, NULL, 0, 0, 0, 0, /* indirect = */ true);
+      return;
+   }
+
    if (cmd->state.last_vs_params.empty)
       return;
 
@@ -10285,11 +10320,15 @@ tu_dispatch(struct tu_cmd_buffer *cmd,
 
          cs->scratch_write(tu_scratch(tu_dispatch.scratch0), ~0);
 
-         /* CP_REG_RMW and CP_REG_TO_SCRATCH implicitly do a CP_WAIT_FOR_IDLE
-          * *and* CP_WAIT_FOR_ME, which is a full pipeline stall that we don't
-          * want, so manually wait for the CP_MEM_TO_REG write to land and
-          * then skip waiting below with SKIP_WAIT_FOR_ME.
+         /* CP_REG_RMW and CP_REG_TO_SCRATCH implicitly do a CP_WAIT_FOR_ME
+          * and on A750 CP_WAIT_FOR_IDLE (which is a full pipeline stall) that
+          * we don't want, so manually wait for the CP_MEM_TO_REG write to land
+          * and then skip waiting below with SKIP_WAIT_FOR_ME.
+          *
+          * On A8XX, the RMWs may still read a stale SP_CS_NDRANGE_1 without a WFI.
           */
+         if (CHIP >= A8XX)
+            tu_cs_emit_wfi(cs);
          tu_cs_emit_pkt7(cs, CP_WAIT_FOR_ME, 0);
 
          /* scratch0 = ((scratch0 & CS_NDRANGE_1) + -1
@@ -10386,7 +10425,7 @@ tu_dispatch(struct tu_cmd_buffer *cmd,
       }
    }
 
-   if (cmd->device->physical_device->info->props.has_rt_workaround &&
+   if (FD_QUIRK(cmd->device->physical_device->info, QCTDD10497382_rt_workaround) &&
        shader->variant->info.uses_ray_intersection) {
       tu_set_render_mode<CHIP>(cs, { .shader_uses_rt = true });
    }
@@ -10492,6 +10531,65 @@ tu_CmdDispatchIndirect(VkCommandBuffer commandBuffer,
    tu_dispatch<CHIP>(cmd_buffer, &info);
 }
 TU_GENX(tu_CmdDispatchIndirect);
+
+void
+tu_dispatch_rt_trace(VkCommandBuffer commandBuffer,
+                     uint32_t x, uint32_t y, uint32_t z)
+{
+   VK_FROM_HANDLE(tu_cmd_buffer, cmd_buffer, commandBuffer);
+   struct tu_dispatch_info info = {};
+
+   /* The shader runs one invocation per ray and a persistent strided loop,
+    * so the host only has to provide enough workgroups to cover the launch.
+    * Cap the grid at the hardware's per-dimension limit; the shader loops if
+    * the cap is hit.
+    */
+   uint64_t total_rays = (uint64_t)x * y * z;
+   uint64_t groups =
+      (total_rays + TU_RT_WORKGROUP_SIZE - 1) / TU_RT_WORKGROUP_SIZE;
+   info.blocks[0] = (uint32_t)MIN2(groups, 65535u);
+   info.blocks[1] = 1;
+   info.blocks[2] = 1;
+   TU_CALLX(cmd_buffer->device, tu_dispatch)(cmd_buffer, &info);
+}
+
+void
+tu_dispatch_rt_trace_indirect(VkCommandBuffer commandBuffer,
+                              VkDeviceAddress indirect_addr)
+{
+   VK_FROM_HANDLE(tu_cmd_buffer, cmd_buffer, commandBuffer);
+   struct tu_dispatch_info info = {};
+
+   /* Use a fixed persistent grid and let the shader read the real launch
+    * dimensions from the indirect command.  This avoids a GPU-side divide
+    * of the 3D launch size and works for both VkTraceRaysIndirectCommandKHR
+    * and VkTraceRaysIndirectCommand2KHR.
+    */
+   (void)indirect_addr;
+   info.blocks[0] = TU_RT_INDIRECT_GROUPS;
+   info.blocks[1] = 1;
+   info.blocks[2] = 1;
+   TU_CALLX(cmd_buffer->device, tu_dispatch)(cmd_buffer, &info);
+}
+
+
+void
+tu_dispatch_rt_trace_indirect2(VkCommandBuffer commandBuffer,
+                               VkDeviceAddress indirect_addr)
+{
+   VK_FROM_HANDLE(tu_cmd_buffer, cmd_buffer, commandBuffer);
+   struct tu_dispatch_info info = {};
+
+   /* The shader reads width/height/depth directly from the 8-byte-aligned
+    * indirect2 command, so the old CP_MEM_TO_MEM staging copy and its
+    * pipeline stall are no longer needed.
+    */
+   (void)indirect_addr;
+   info.blocks[0] = TU_RT_INDIRECT_GROUPS;
+   info.blocks[1] = 1;
+   info.blocks[2] = 1;
+   TU_CALLX(cmd_buffer->device, tu_dispatch)(cmd_buffer, &info);
+}
 
 void
 tu_dispatch_unaligned(VkCommandBuffer commandBuffer,

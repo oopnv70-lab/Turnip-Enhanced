@@ -3,6 +3,7 @@
  * SPDX-License-Identifier: MIT
  */
 
+#include <atomic>
 #include <errno.h>
 #include <string.h>
 
@@ -22,6 +23,7 @@
 
 uint32_t gSeqno = 0;
 uint32_t gNoRenderControlEnc = 0;
+static std::atomic<uint32_t> gAliveInstanceCount{0};
 
 static gfxstream::vk::VkEncoder* getVulkanEncoder(GfxStreamConnectionManager* mgr) {
     if (!gNoRenderControlEnc) {
@@ -69,6 +71,15 @@ static const char* const kGuestEmulatedInstanceExtensions[] = {
 #if defined(GFXSTREAM_VK_X11)
     VK_KHR_XCB_SURFACE_EXTENSION_NAME,
     VK_KHR_XLIB_SURFACE_EXTENSION_NAME,
+#endif
+#if defined(GFXSTREAM_VK_DISPLAY)
+    VK_KHR_DISPLAY_EXTENSION_NAME,
+    VK_KHR_GET_DISPLAY_PROPERTIES_2_EXTENSION_NAME,
+    VK_EXT_DIRECT_MODE_DISPLAY_EXTENSION_NAME,
+    VK_EXT_DISPLAY_SURFACE_COUNTER_EXTENSION_NAME,
+#if defined(LINUX_GUEST_BUILD)
+    VK_EXT_ACQUIRE_DRM_DISPLAY_EXTENSION_NAME,
+#endif
 #endif
 #if defined(GFXSTREAM_VK_METAL)
     VK_EXT_METAL_SURFACE_EXTENSION_NAME,
@@ -134,6 +145,9 @@ static std::vector<const char*> filteredInstanceExtensionNames(uint32_t count,
 // Always provided by guest driver only; never encoded/decoded to/from host
 static const char* const kGuestEmulatedDeviceExtensions[] = {
     VK_KHR_SWAPCHAIN_EXTENSION_NAME,
+#if !DETECT_OS_ANDROID
+    VK_KHR_SWAPCHAIN_MUTABLE_FORMAT_EXTENSION_NAME,
+#endif
     VK_KHR_EXTERNAL_MEMORY_FD_EXTENSION_NAME,
     VK_EXT_EXTERNAL_MEMORY_DMA_BUF_EXTENSION_NAME,
 };
@@ -350,9 +364,15 @@ VkResult gfxstream_vk_CreateInstance(const VkInstanceCreateInfo* pCreateInfo,
         VkGuestCapabilitiesGOOGLE guestCapabilities = {
             .sType = VK_STRUCTURE_TYPE_GUEST_CAPABILITIES_GOOGLE,
             .pNext = localCreateInfo.pNext,
-            // The guest can support inline uniform block descriptors after
-            // https://gitlab.freedesktop.org/mesa/mesa/-/merge_requests/45069.
-            .capabilities = VK_GUEST_CAPABILITY_BATCHED_INLINE_UNIFORM_BLOCK_BIT_GOOGLE,
+            .capabilities =
+                // The guest can support inline uniform block descriptors after
+                // https://gitlab.freedesktop.org/mesa/mesa/-/merge_requests/45069.
+                VK_GUEST_CAPABILITY_BATCHED_INLINE_UNIFORM_BLOCK_BIT_GOOGLE |
+                // The guest can support host image copies after
+                // https://gitlab.freedesktop.org/mesa/mesa/-/merge_requests/46092
+                // where `VkHostPointerResolveGOOGLE` contains the memory contents
+                // instead of just a guest pointer.
+                VK_GUEST_CAPABILITY_HOST_POINTER_RESOLVE_BIT_GOOGLE,
         };
         if (gfxstream::vk::ResourceTracker::get()->supportsGuestCapabilities()) {
             localCreateInfo.pNext = &guestCapabilities;
@@ -403,6 +423,7 @@ VkResult gfxstream_vk_CreateInstance(const VkInstanceCreateInfo* pCreateInfo,
     instance->base.physical_devices.enumerate = gfxstream_vk_enumerate_devices;
     instance->base.physical_devices.destroy = gfxstream_vk_destroy_physical_device;
 
+    gAliveInstanceCount.fetch_add(1, std::memory_order_relaxed);
     return VK_SUCCESS;
 }
 
@@ -422,9 +443,11 @@ void gfxstream_vk_DestroyInstance(VkInstance _instance, const VkAllocationCallba
     // To make End2EndTests happy, since now the host connection is statically linked to
     // libvulkan_ranchu.so [separate HostConnections now].
 #if defined(END2END_TESTS)
-    GfxStreamConnectionManager::resetThreadLocalInstance();
-    VirtGpuDevice::resetInstance();
-    gSeqno = 0;
+    if (gAliveInstanceCount.fetch_sub(1, std::memory_order_acq_rel) == 1) {
+        GfxStreamConnectionManager::resetThreadLocalInstance();
+        VirtGpuDevice::resetInstance();
+        gSeqno = 0;
+    }
 #endif
 }
 
@@ -607,6 +630,21 @@ static void adjust_entrypoints_by_api_version(struct gfxstream_vk_device* gfxstr
             gfxstream_device->base.dispatch_table.CmdSetLineStippleEXT =
                 gfxstream_vk_device_entrypoints.CmdSetLineStippleEXT;
         }
+
+        if (gfxstream_device->base.enabled_extensions.EXT_host_image_copy) {
+            gfxstream_device->base.dispatch_table.CopyMemoryToImageEXT =
+                gfxstream_vk_device_entrypoints.CopyMemoryToImageEXT;
+            gfxstream_device->base.dispatch_table.CopyImageToMemoryEXT =
+                gfxstream_vk_device_entrypoints.CopyImageToMemoryEXT;
+            gfxstream_device->base.dispatch_table.CopyImageToImageEXT =
+                gfxstream_vk_device_entrypoints.CopyImageToImageEXT;
+            gfxstream_device->base.dispatch_table.TransitionImageLayoutEXT =
+                gfxstream_vk_device_entrypoints.TransitionImageLayoutEXT;
+            if (!gfxstream_device->base.enabled_extensions.KHR_maintenance5) {
+                gfxstream_device->base.dispatch_table.GetImageSubresourceLayout2EXT =
+                    gfxstream_vk_device_entrypoints.GetImageSubresourceLayout2EXT;
+            }
+        }
     }
 }
 
@@ -631,6 +669,17 @@ VkResult gfxstream_vk_CreateDevice(VkPhysicalDevice physicalDevice,
                        PHYSICAL_DEVICE_SWAPCHAIN_MAINTENANCE_1_FEATURES_EXT);
     if (mutableSwapchainMaintenance1Features) {
         mutableSwapchainMaintenance1Features->swapchainMaintenance1 = VK_FALSE;
+    }
+
+    if (!gfxstream::vk::ResourceTracker::get()->supportsGuestCapabilities()) {
+        const VkPhysicalDeviceHostImageCopyFeatures* hostImageCopyFeatures =
+            vk_find_struct_const(pCreateInfo, PHYSICAL_DEVICE_HOST_IMAGE_COPY_FEATURES);
+        const VkPhysicalDeviceVulkan14Features* vulkan14Features =
+            vk_find_struct_const(pCreateInfo, PHYSICAL_DEVICE_VULKAN_1_4_FEATURES);
+        if ((hostImageCopyFeatures && hostImageCopyFeatures->hostImageCopy) ||
+            (vulkan14Features && vulkan14Features->hostImageCopy)) {
+            return vk_error(gfxstream_physicalDevice, VK_ERROR_FEATURE_NOT_PRESENT);
+        }
     }
 
     const VkAllocationCallbacks* pMesaAllocator =

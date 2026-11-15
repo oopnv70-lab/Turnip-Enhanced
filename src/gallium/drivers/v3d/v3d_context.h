@@ -77,7 +77,7 @@ void v3d_job_add_bo(struct v3d_job *job, struct v3d_bo *bo);
 #define V3D_DIRTY_FLAT_SHADE_FLAGS    (1ull << 20)
 #define V3D_DIRTY_PRIM_MODE           (1ull << 21)
 
-#define V3D_DIRTY_UNCOMPILED_CS       (1ull << 23)
+#define V3D_DIRTY_UNCOMPILED_COMPUTE  (1ull << 23)
 #define V3D_DIRTY_UNCOMPILED_VS       (1ull << 24)
 #define V3D_DIRTY_UNCOMPILED_GS       (1ull << 25)
 #define V3D_DIRTY_UNCOMPILED_FS       (1ull << 26)
@@ -117,8 +117,8 @@ enum v3d_sampler_state_variant {
         V3D_SAMPLER_STATE_F16_BGRA_UNORM,
         V3D_SAMPLER_STATE_F16_BGRA_SNORM,
         V3D_SAMPLER_STATE_F16_A,
-        V3D_SAMPLER_STATE_F16_A_SNORM,
         V3D_SAMPLER_STATE_F16_A_UNORM,
+        V3D_SAMPLER_STATE_F16_A_SNORM,
         V3D_SAMPLER_STATE_F16_LA,
         V3D_SAMPLER_STATE_F16_LA_UNORM,
         V3D_SAMPLER_STATE_F16_LA_SNORM,
@@ -128,6 +128,10 @@ enum v3d_sampler_state_variant {
         V3D_SAMPLER_STATE_32_A,
         V3D_SAMPLER_STATE_32_A_UNORM,
         V3D_SAMPLER_STATE_32_A_SNORM,
+        V3D_SAMPLER_STATE_32_LA,
+        V3D_SAMPLER_STATE_32_LA_UNORM,
+        V3D_SAMPLER_STATE_32_LA_SNORM,
+        V3D_SAMPLER_STATE_32_DEPTH_UNORM,
         V3D_SAMPLER_STATE_1010102U,
         V3D_SAMPLER_STATE_16U,
         V3D_SAMPLER_STATE_16I,
@@ -817,6 +821,9 @@ v3d_transform_feedback_enabled(struct v3d_context *v3d)
 }
 
 void v3d_set_shader_uniform_dirty_flags(struct v3d_compiled_shader *shader);
+void v3d_upload_shader_code(struct v3d_context *v3d,
+                            struct v3d_compiled_shader *shader,
+                            const uint64_t *qpu_insts, uint32_t qpu_size);
 struct v3d_cl_reloc v3d_write_uniforms(struct v3d_context *v3d,
                                        struct v3d_job *job,
                                        struct v3d_compiled_shader *shader,
@@ -846,11 +853,25 @@ void v3d_flush_jobs_reading_resource(struct v3d_context *v3d,
                                      enum v3d_flush_cond flush_cond,
                                      bool is_compute_pipeline);
 void v3d_update_compiled_shaders(struct v3d_context *v3d, enum mesa_prim prim_mode);
-void v3d_update_compiled_cs(struct v3d_context *v3d);
+void v3d_update_compiled_compute(struct v3d_context *v3d);
 
 bool v3d_rt_format_is_emulated(enum pipe_format f);
 bool v3d_rt_format_supported(const struct v3d_device_info *devinfo,
                              enum pipe_format f);
+/* RGB32 buffer textures (GL_OES_texture_buffer and
+ * ARB_texture_buffer_object_rgb32) have no TMU format of their own.  They are
+ * sampled through a 32-bit single-channel view of the same memory, and the
+ * compiler turns each fetch into three scalar fetches; see
+ * v3d_nir_lower_txf_buffer_rgb32.c.
+ */
+static inline bool
+v3d_format_is_rgb32(enum pipe_format f)
+{
+        return f == PIPE_FORMAT_R32G32B32_FLOAT ||
+               f == PIPE_FORMAT_R32G32B32_UINT ||
+               f == PIPE_FORMAT_R32G32B32_SINT;
+}
+
 bool v3d_tex_format_supported(const struct v3d_device_info *devinfo,
                               enum pipe_format f);
 

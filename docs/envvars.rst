@@ -336,6 +336,46 @@ Core Mesa environment variables
 
    see :ref:`SPIR-V Shader Replacement <spirv_replacement>`
 
+.. envvar:: MESA_APITRACE
+
+   if set to 1, records the GL, GLES, EGL, GLX, and WGL calls of the
+   process in an apitrace trace. Needs a build with ``-Dapitrace=true``. The
+   decision is made per process, so a forked child decides again, and
+   Android zygote processes are never traced.
+
+.. envvar:: MESA_GL_TRACE_FILE
+
+   the file :envvar:`MESA_APITRACE` writes to. If it names an existing
+   directory, each process writes ``<process>.<pid>.trace`` there. If it
+   is unset, apitrace picks a name from the process name. If the file
+   can't be opened, an error is logged and the process runs untraced.
+
+.. envvar:: MESA_APITRACE_FLUSH_MS
+
+   flushes the trace to the file at most this often, in milliseconds,
+   and at every swap. 0 flushes only when the buffer fills or the
+   process exits. The default is 100 on Android and 0 elsewhere.
+
+.. envvar:: MESA_APITRACE_SIGNALS
+
+   if set to 0, apitrace installs no signal handlers, or exception
+   handler on Windows, so the trace isn't flushed when the process
+   crashes. The default is 1.
+
+.. envvar:: MESA_APITRACE_IMAGE_DEDUP
+
+   if set to 0, records the contents of an EGLImage at every bind to
+   ``GL_TEXTURE_EXTERNAL_OES``, even when they didn't change since the
+   last bind. The default is 1.
+
+.. envvar:: MESA_APITRACE_PRESENT
+
+   if set to 0, doesn't record presents for processes that never swap.
+   By default, until the first real swap, a blit of the largest shared
+   texture to the window and an ``eglSwapBuffers`` or ``wglSwapBuffers``
+   are recorded each time the process stops drawing to the framebuffer
+   holding it, so replays show what was drawn.
+
 .. envvar:: MESA_VK_VERSION_OVERRIDE
 
    changes the Vulkan physical device version as returned in
@@ -1315,7 +1355,7 @@ Teflon environment variables
 .. envvar:: TEFLON_TEST_DATA
 
    Points to a directory containing models (``.tflite`` files) to be executed by
-   `test_teflon`. Usually, this is set to ``src/gallium/targets/teflon/tests``.
+   `test_teflon`. Usually, this is set to ``$BUILD/src/gallium/targets/teflon/tests``.
 
 .. envvar:: TEFLON_TEST_DELEGATE
 
@@ -1864,10 +1904,6 @@ RadeonSI driver environment variables
 
    Clamp div by zero (x / 0 becomes FLT_MAX instead of NaN) (might fix rendering corruptions)
 
-.. envvar:: radeonsi_zerovram
-
-   Clear all allocated memory to 0 before usage (might fix rendering corruptions)
-
 .. envvar:: AMD_DEBUG
 
    a comma-separated list of named flags, which do various things:
@@ -2239,32 +2275,6 @@ PowerVR driver environment variables
    A comma-separated list of debug options. Use ``PVR_DEBUG=help`` to
    print a list of available options.
 
-.. envvar:: ROGUE_DEBUG
-
-   a comma-separated list of named flags for the Rogue compiler,
-   which do various things:
-
-   ``nir``
-      Print the input NIR to stdout.
-   ``nir_passes``
-      Print the output of each NIR pass to stdout.
-   ``ir``
-      Print the input Rogue IR to stdout.
-   ``ir_passes``
-      Print the output of each Rogue IR pass to stdout.
-   ``ir_details``
-      Includes additional details when printing Rogue IR.
-   ``vld_skip``
-      Skips the compiler validation step.
-   ``vld_nonfatal``
-      Prints all the validation errors instead of stopping after the first.
-
-.. envvar:: ROGUE_COLOR
-
-   if set to ``auto`` Rogue IR will be colorized if stdout is not a pipe.
-   Color is forced off if set to ``off``/``0`` or on if set to ``on``/``1``.
-   Defaults to ``auto``.
-
 .. envvar:: PCO_DEBUG
 
    A comma-separated list of named flags for the PCO compiler,
@@ -2297,11 +2307,14 @@ PowerVR driver environment variables
    ``no_dma_cache``
       Disable DMA cache.
 
+   ``preamble``
+      Enable preamble shader.
+
 .. envvar:: PCO_SKIP_PASSES
 
    A comma-separated list of passes to skip.
 
-.. envvar:: PCO_PRINT
+.. envvar:: PCO_DEBUG_PRINT
 
    A comma-separated list of named flags for the PCO compiler,
    which control debug printing options:

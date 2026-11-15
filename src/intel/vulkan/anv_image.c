@@ -1741,7 +1741,7 @@ alloc_private_binding(struct anv_device *device,
    enum anv_bo_alloc_flags alloc_flags = 0;
    uint64_t explicit_address = 0;
    if (create_info->flags & VK_IMAGE_CREATE_2_DESCRIPTOR_BUFFER_CAPTURE_REPLAY_BIT_EXT) {
-      alloc_flags |= ANV_BO_ALLOC_CLIENT_VISIBLE_ADDRESS;
+      alloc_flags |= ANV_BO_ALLOC_CAPTURE_REPLAY;
 
       const VkOpaqueCaptureDescriptorDataCreateInfoEXT *opaque_buffer_info =
          vk_find_struct_const(create_info->pNext,
@@ -1800,7 +1800,7 @@ anv_image_init_sparse_bindings(struct anv_image *image,
    enum anv_bo_alloc_flags alloc_flags = 0;
    const struct anv_image_opaque_capture_data *explicit_addresses = NULL;
    if (image->vk.create_flags & VK_IMAGE_CREATE_2_DESCRIPTOR_BUFFER_CAPTURE_REPLAY_BIT_EXT) {
-      alloc_flags |= ANV_BO_ALLOC_CLIENT_VISIBLE_ADDRESS;
+      alloc_flags |= ANV_BO_ALLOC_CAPTURE_REPLAY;
 
       const VkOpaqueCaptureDescriptorDataCreateInfoEXT *opaque_buffer_info =
          vk_find_struct_const(create_info->vk_info->pNext,
@@ -2541,7 +2541,7 @@ resolve_ahb_image(struct anv_device *device,
                   struct anv_image *image,
                   struct anv_device_memory *mem)
 {
-#if DETECT_OS_ANDROID && ANDROID_API_LEVEL >= 26
+#if defined(VK_USE_PLATFORM_ANDROID_KHR) && ANDROID_API_LEVEL >= 26
    assert(mem->vk.ahardware_buffer);
    VkResult result;
 
@@ -2596,7 +2596,7 @@ resolve_anb_image(struct anv_device *device,
                   struct anv_image *image,
                   const VkNativeBufferANDROID *gralloc_info)
 {
-#if DETECT_OS_ANDROID && ANDROID_API_LEVEL >= 29
+#if defined(VK_USE_PLATFORM_ANDROID_KHR) && ANDROID_API_LEVEL >= 29
    VkResult result;
 
    /* Query DRM modifier. */

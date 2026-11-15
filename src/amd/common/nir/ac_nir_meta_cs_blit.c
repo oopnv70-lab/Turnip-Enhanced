@@ -18,9 +18,14 @@
  *    a microtile or partially covers a 256B block (memory channel interleave), performance suffers.
  *    It has also been observed that image stores with DCC decrease performance even further
  *    on older generations if a wave doesn't cover a whole 256B block.
+ * 3. image_sample_lz with nearest_filtering has 2x lower throughput than image_load. (with
+ *    the exception of chips with has_point_sample_accel)
  *
  * To eliminate those limitations:
  * - All loads and stores must be in a VMEM clause.
+ * - image_load is used for non-scaled blits and scaled point-sampled blits instead of
+ *   image_sample_lz, and clamp_to_edge is emulated by the shader. Only scaled blits with linear
+ *   filtering use image_sample_lz.
  * - The workgroup size is always 64 running as wave64.
  * - Waves usually store one or multiple 256B blocks. Individual lanes can store more than 1 pixel
  *   in certain configurations.
@@ -56,6 +61,10 @@
  * MSAA copies copy FMASK together with color samples and they copy only the color samples
  * referenced by FMASK.
  *
+ * Scaled blits are also supported. The caller is expected to bind the source image as a combined
+ * image+sampler with unnormalized coordinates and clamp-to-edge. Scaled MSAA copies and resolves
+ * are unsupported.
+ *
  * This also supports 96-bit (RGB32) formats as follows:
  * - Only 96-bit -> 96-bit clears and copies are supported.
  * - Only 2D non-layer non-mip, only linear layouts, max 64K x 64K.
@@ -70,13 +79,71 @@
  *   since that would use the memory system inefficiently.
  * - If clearing, each invocation shuffles dwords of the clear value to get the corresponding
  *   4-byte, 8-byte, or 16-byte clear value that the invocation needs.
+ * - Scaled blits are unsupported for 96-bit formats.
+ *
+ * Shader variant statistics for GFX12 (full single-process/thread VKCTS run, November/03/2026):
+ * - The shader key currently uses 49 bits at the time of writing this, however, many fields and
+ *   values are mutually exclusive or constrain each other (e.g. log_lane_width + log_lane_height +
+ *   log_lane_depth <= 3 for GFX12), so 2^49 is not the number of possible shader variants.
+ * - Memory stats:
+ *    - All unique shader variants (all VK devices): 2255
+ *    - Max CPU memory usage per VK device: 6 MB (malloc'd memory)
+ *    - Max GPU memory usage per VK device: 1.5 MB (shader binaries)
+ * - Shader key stats for unique variants:
+ *   (Note: Some fields are not relevant for GFX12, VK, or are not exercised by CTS.)
+ *   - wg_dim:                      1: 29%; 2: 49%; 3: 23%
+ *   - has_start_xyz:               16%
+ *   - format_is_96bit:             0.27%
+ *   - addr_math_64bit:             always zero
+ *   - 2^log_lane_width x 2^log_lane_height x 2^log_lane_depth:
+ *     - 1 × 1 × 1:  32.68%
+ *     - 1 × 2 × 1:  18.40%
+ *     - 2 × 2 × 1:  14.41%
+ *     - 2 × 1 × 1:  8.78%
+ *     - 2 × 4 × 1:  7.41%
+ *     - 4 × 1 × 1:  5.10%
+ *     - 8 × 1 × 1:  3.86%
+ *     - 1 × 4 × 1:  3.33%
+ *     - 2 × 2 × 2:  2.53%
+ *     - 1 × 2 × 2:  2.48%
+ *     - 1 × 1 × 2:  1.02%
+ *   - is_clear:                    28%
+ *   - src_is_sampler:              20%
+ *   - src_is_1d:                   3.4%
+ *   - dst_is_1d:                   6.9%
+ *   - src_is_msaa:                 17%
+ *   - dst_is_msaa:                 8.6%
+ *   - src_has_z:                   22%
+ *   - dst_has_z:                   37%
+ *   - src_has_non_identity_fmask:  always zero
+ *   - dst_store_fmask:             always zero
+ *   - copy_physical_samples:       always zero
+ *   - dst_is_rgb5:                 13%
+ *   - a16:                         99%
+ *   - d16:                         52%
+ *   - force_f2f16_rtz:             34%
+ *   - log_samples:                 0: 78%; 1: 9.3%; 2: 7.8%; 3: 4.4%
+ *   - clear_sample0_only:          always zero
+ *   - resolve_mode:                0: 94%; 1: 2.6%; 2: 0.62%; 3: 0.93%; 4: 0%; 5: 0%; 6: 0.53%; 7: 0.89%
+ *   - num_scaled_coords:           0: 57%; 1: 1.9%; 2: 35%; 3: 6.4%
+ *   - x_clamp_to_edge:             always zero
+ *   - y_clamp_to_edge:             always zero
+ *   - z_clamp_to_edge:             always zero
+ *   - flip_x:                      0.35%
+ *   - flip_y:                      0.35%
+ *   - flip_z:                      0.089%
+ *   - sint_to_uint:                always zero
+ *   - uint_to_sint:                always zero
+ *   - dst_is_srgb:                 8.4%
+ *   - use_integer_one:             1.3%
+ *   - last_src_channel:            0: 57%; 1: 19%; 2: 8.1%; 3: 16%
+ *   - last_dst_channel:            0: 26%; 1: 24%; 2: 11%; 3: 39%
  */
 
 #include "ac_nir_meta.h"
 #include "ac_nir_helpers.h"
 #include "ac_surface.h"
 #include "nir_format_convert.h"
-#include "compiler/aco_interface.h"
 #include "util/format_srgb.h"
 #include "util/u_pack_color.h"
 
@@ -95,26 +162,30 @@ convert_linear_to_srgb(nir_builder *b, nir_def *input)
 }
 
 static nir_def *
-apply_blit_output_modifiers(nir_builder *b, nir_def *color,
-                            const ac_cs_blit_key *key)
+apply_blit_output_modifiers(nir_builder *b, nir_def *color, const ac_cs_blit_key *key,
+                            const struct radeon_info *info)
 {
-   unsigned bit_size = color->bit_size;
-   nir_def *zero = nir_imm_intN_t(b, 0, bit_size);
-
    if (key->sint_to_uint)
-      color = nir_imax(b, color, zero);
+      color = nir_imax(b, color, nir_imm_intN_t(b, 0, color->bit_size));
 
    if (key->uint_to_sint) {
       color = nir_umin(b, color,
-                       nir_imm_intN_t(b, bit_size == 16 ? INT16_MAX : INT32_MAX,
-                                      bit_size));
+                       nir_imm_intN_t(b, color->bit_size == 16 ? INT16_MAX : INT32_MAX,
+                                      color->bit_size));
+   }
+
+   /* This should be done before the conversion to sRGB. */
+   if (key->force_f2f16_rtz) {
+      assert(!key->is_clear && color->bit_size == 32);
+      color = nir_f2f16_rtz(b, color);
+
+      /* On HW without full FP16 ALU, convert immediately back to FP32. */
+      if (info->gfx_level <= GFX7)
+         color = nir_f2f32(b, color);
    }
 
    if (key->dst_is_srgb)
       color = convert_linear_to_srgb(b, color);
-
-   nir_def *one = key->use_integer_one ? nir_imm_intN_t(b, 1, bit_size) :
-                                             nir_imm_floatN_t(b, 1, bit_size);
 
    if (key->is_clear) {
       if (key->last_dst_channel < 3)
@@ -127,8 +198,12 @@ apply_blit_output_modifiers(nir_builder *b, nir_def *color,
       if (key->last_src_channel < key->last_dst_channel) {
          color = nir_pad_vector(b, color, key->last_dst_channel + 1);
 
-         for (unsigned chan = key->last_src_channel + 1; chan <= key->last_dst_channel; chan++)
+         for (unsigned chan = key->last_src_channel + 1; chan <= key->last_dst_channel; chan++) {
+            nir_def *zero = nir_imm_intN_t(b, 0, color->bit_size);
+            nir_def *one = key->use_integer_one ? nir_imm_intN_t(b, 1, color->bit_size) :
+                                                  nir_imm_floatN_t(b, 1, color->bit_size);
             color = nir_vector_insert_imm(b, color, chan == 3 ? one : zero, chan);
+         }
       }
 
       /* Discard channels not present in dst. The hardware fills unstored channels with 0. */
@@ -139,12 +214,15 @@ apply_blit_output_modifiers(nir_builder *b, nir_def *color,
        * Determined by trial and error.
        */
       if (key->dst_is_rgb5)
-         color = nir_fadd(b, color, nir_imm_floatN_t(b, -1.0/4096, bit_size));
+         color = nir_fadd(b, color, nir_imm_floatN_t(b, -1.0/4096, color->bit_size));
    }
 
    /* Discard channels not present in dst. The hardware fills unstored channels with 0. */
    if (key->last_dst_channel < 3)
       color = nir_trim_vector(b, color, key->last_dst_channel + 1);
+
+   if (key->force_f2f16_rtz && !key->d16 && color->bit_size == 16)
+      color = nir_f2f32(b, color);
 
    return color;
 }
@@ -187,7 +265,7 @@ get_num_user_data_terms(const ac_cs_blit_key *key)
          num++;
 
       if (!key->is_clear) {
-         num++;
+         num += 1 + key->num_scaled_coords;
       } else {
          if (key->d16)
             num += DIV_ROUND_UP(key->last_dst_channel + 1, 2);
@@ -204,13 +282,16 @@ tex(nir_builder *b, const ac_cs_blit_key *key, nir_deref_instr *deref, nir_texop
     nir_def *coord, unsigned num_coords)
 {
    bool fmask = op == nir_texop_fragment_mask_fetch_amd || op == nir_texop_samples_identical;
+   bool txl = op == nir_texop_txl;
 
    nir_def *result =
       nir_build_tex(b, op,
                     .coord = nir_trim_vector(b, coord, num_coords - key->src_is_msaa),
                     .ms_index = key->src_is_msaa && !fmask ?
                                    nir_channel(b, coord, num_coords - 1) : NULL,
+                    .lod = txl ? nir_imm_int(b, 0) : NULL,
                     .texture_deref = deref,
+                    .sampler_deref = txl ? deref : NULL,
                     .dim = deref->type->sampler_dimensionality,
                     .is_array = deref->type->sampler_array);
    return fmask ? result : nir_trim_vector(b, result, key->last_src_channel + 1);
@@ -255,6 +336,72 @@ print_shader_key_field(FILE *f, const char *name, unsigned value)
 
 DEBUG_GET_ONCE_OPTION(log_keys, "AMD_CS_BLIT_LOG_KEYS_FILE", false)
 
+static nir_def *
+flip_coords(nir_builder *b, nir_def *src_xyz, const ac_cs_blit_key *key)
+{
+   const bool flip[3] = {key->flip_x, key->flip_y, key->flip_z};
+   const unsigned lane_dim[3] = {
+      1 << key->log_lane_width,
+      1 << key->log_lane_height,
+      1 << key->log_lane_depth
+   };
+
+   for (unsigned i = 0; i < 3; i++) {
+      if (flip[i]) {
+         /* A normal blit loads from (box.x + tid.x) where tid.x = 0..(width - 1).
+          *
+          * A flipped blit sets box.x = width, so we should make tid.x negative to load from
+          * (width - 1)..0.
+          *
+          * Therefore do: x = -x - 1, which becomes (width - 1) to 0 after we add box.x = width.
+          */
+         nir_def *comp = nir_channel(b, src_xyz, i);
+         comp = nir_iadd_imm(b, nir_ineg(b, comp), -(int)lane_dim[i]);
+         src_xyz = nir_vector_insert_imm(b, src_xyz, comp, i);
+      }
+   }
+
+   return src_xyz;
+}
+
+static void
+clamp_to_edge(nir_builder *b, nir_def **coord_src, nir_def **src_resinfo,
+              nir_deref_instr *img_src_deref, const ac_cs_blit_key *key)
+{
+   const bool clamp_to_edge[3] = {key->x_clamp_to_edge, key->y_clamp_to_edge, key->z_clamp_to_edge};
+
+   for (unsigned chan = 0; chan < 3; chan++) {
+      if (clamp_to_edge[chan]) {
+         assert(!key->src_is_1d || chan == 0);
+
+         if (!*src_resinfo) {
+            /* Always use the 32-bit return type because the image dimensions can be
+             * > INT16_MAX even if the blit box fits within sint16. The txs builder
+             * always sets the type to nir_type_int32.
+             */
+            if (key->src_is_sampler) {
+               *src_resinfo = nir_txs(b, .texture_deref = img_src_deref,
+                                     .dim = img_src_deref->type->sampler_dimensionality,
+                                     .is_array = img_src_deref->type->sampler_array);
+            } else {
+               *src_resinfo = nir_image_deref_size(b, 4, 32, &img_src_deref->def,
+                                                  nir_imm_int(b, 0));
+            }
+
+            if (key->a16) {
+               *src_resinfo = nir_umin_imm(b, *src_resinfo, INT16_MAX);
+               *src_resinfo = nir_i2i16(b, *src_resinfo);
+            }
+         }
+
+         nir_def *tmp = nir_channel(b, *coord_src, chan);
+         tmp = nir_imax_imm(b, tmp, 0);
+         tmp = nir_imin(b, tmp, nir_iadd_imm(b, nir_channel(b, *src_resinfo, chan), -1));
+         *coord_src = nir_vector_insert_imm(b, *coord_src, tmp, chan);
+      }
+   }
+}
+
 /* The compute blit shader.
  *
  * Implementation details:
@@ -290,7 +437,6 @@ ac_create_blit_cs(const ac_cs_blit_options *options, const ac_cs_blit_key *key)
          fprintf(f, "Internal shader: compute_blit\n");
 
 #define PRINT(field) print_shader_key_field(f, "key." #field, key->field)
-      PRINT(use_aco);
       PRINT(wg_dim);
       PRINT(has_start_xyz);
       PRINT(format_is_96bit);
@@ -312,12 +458,17 @@ ac_create_blit_cs(const ac_cs_blit_options *options, const ac_cs_blit_key *key)
       PRINT(dst_is_rgb5);
       PRINT(a16);
       PRINT(d16);
+      PRINT(force_f2f16_rtz);
       PRINT(log_samples);
-      PRINT(sample0_only);
+      PRINT(clear_sample0_only);
+      PRINT(resolve_mode);
+      PRINT(num_scaled_coords);
       PRINT(x_clamp_to_edge);
       PRINT(y_clamp_to_edge);
+      PRINT(z_clamp_to_edge);
       PRINT(flip_x);
       PRINT(flip_y);
+      PRINT(flip_z);
       PRINT(sint_to_uint);
       PRINT(uint_to_sint);
       PRINT(dst_is_srgb);
@@ -342,17 +493,18 @@ ac_create_blit_cs(const ac_cs_blit_options *options, const ac_cs_blit_key *key)
    _mesa_blake3_update(&blake3, key, sizeof(*key));
    _mesa_blake3_final(&blake3, b.shader->info.source_blake3);
 
-   b.shader->info.use_aco_amd = options->use_aco ||
-                                (key->use_aco && aco_is_gpu_supported(options->info));
+   b.shader->info.use_aco_amd = options->use_aco;
 
    assert(!key->is_clear || (!key->src_is_sampler && !key->src_is_1d && !key->src_is_msaa &&
                              !key->src_has_z && !key->src_has_non_identity_fmask));
+   assert(!key->num_scaled_coords || (!key->flip_x && !key->flip_y && !key->flip_z));
    const bool has_src_sampler = key->src_is_sampler;
    const bool has_src_image = !key->is_clear && !key->src_is_sampler;
    const bool has_dst_fmask = key->dst_store_fmask;
 
    /* The workgroup size varies depending on the tiling layout and blit dimensions. */
    b.shader->info.workgroup_size_variable = true;
+   b.shader->info.cs.num_invocations_per_variable_workgroup = 64;
    b.shader->info.cs.user_data_components_amd = get_num_user_data_terms(key);
 
    nir_variable *img_src = NULL, *img_dst = NULL, *fmask_dst = NULL;
@@ -386,13 +538,16 @@ ac_create_blit_cs(const ac_cs_blit_options *options, const ac_cs_blit_key *key)
       if (key->dst_is_msaa)
          BITSET_SET(b.shader->info.msaa_images, has_src_image);
 
-      const enum glsl_base_type img_data_type = key->d16 ? GLSL_TYPE_UINT16 : GLSL_TYPE_UINT;
+      const enum glsl_base_type src_img_data_type =
+         key->d16 && !key->force_f2f16_rtz ? GLSL_TYPE_UINT16 : GLSL_TYPE_UINT;
+      const enum glsl_base_type dst_img_data_type = key->d16 ? GLSL_TYPE_UINT16 : GLSL_TYPE_UINT;
 
       if (has_src_sampler) {
          const struct glsl_type *src_sampler_type =
-            glsl_sampler_type(key->src_is_1d ? GLSL_SAMPLER_DIM_1D :
+            glsl_sampler_type(key->num_scaled_coords == 3 ? GLSL_SAMPLER_DIM_3D :
+                              key->src_is_1d ? GLSL_SAMPLER_DIM_1D :
                               key->src_is_msaa ? GLSL_SAMPLER_DIM_MS : GLSL_SAMPLER_DIM_2D,
-                              false, key->src_has_z, img_data_type);
+                              false, key->src_has_z && key->num_scaled_coords <= 2, src_img_data_type);
 
          img_src = nir_variable_create(b.shader, nir_var_uniform, src_sampler_type, "src_sampler");
       }
@@ -401,7 +556,7 @@ ac_create_blit_cs(const ac_cs_blit_options *options, const ac_cs_blit_key *key)
          const struct glsl_type *src_image_type =
             glsl_image_type(key->src_is_1d ? GLSL_SAMPLER_DIM_1D :
                             key->src_is_msaa ? GLSL_SAMPLER_DIM_MS : GLSL_SAMPLER_DIM_2D,
-                            key->src_has_z, img_data_type);
+                            key->src_has_z, src_img_data_type);
 
          img_src = nir_variable_create(b.shader, nir_var_image, src_image_type, "src_image");
       }
@@ -409,7 +564,7 @@ ac_create_blit_cs(const ac_cs_blit_options *options, const ac_cs_blit_key *key)
       const struct glsl_type *dst_image_type =
          glsl_image_type(key->dst_is_1d ? GLSL_SAMPLER_DIM_1D :
                          key->dst_is_msaa ? GLSL_SAMPLER_DIM_MS : GLSL_SAMPLER_DIM_2D,
-                         key->dst_has_z, img_data_type);
+                         key->dst_has_z, dst_img_data_type);
 
       img_dst = nir_variable_create(b.shader, nir_var_image, dst_image_type, "dst_image");
       /* NOTE: This is only correct for RADV where sampler and image bindings are in the same
@@ -448,6 +603,7 @@ ac_create_blit_cs(const ac_cs_blit_options *options, const ac_cs_blit_key *key)
    nir_def *dst_x = NULL, *dst_y = NULL, *dst_z = NULL;
    nir_def *src_x = NULL, *src_y = NULL, *src_z = NULL;
    nir_def *dst_dword_stride = NULL, *src_dword_stride = NULL;
+   nir_def *scale[3] = {0};
    unsigned num = 0;
 
    if (key->format_is_96bit) {
@@ -508,6 +664,11 @@ ac_create_blit_cs(const ac_cs_blit_options *options, const ac_cs_blit_key *key)
          src_y = nir_u2uN(&b, nir_unpack_32_2x16_split_y(&b, nir_channel(&b, user_data, num)),
                           coord_bit_size);
          num++;
+
+         for (unsigned i = 0; i < key->num_scaled_coords; i++) {
+            scale[i] = nir_channel(&b, user_data, num);
+            num++;
+         }
       } else {
          if (key->d16) {
             unsigned num_clear_dwords = DIV_ROUND_UP(key->last_dst_channel + 1, 2);
@@ -530,10 +691,10 @@ ac_create_blit_cs(const ac_cs_blit_options *options, const ac_cs_blit_key *key)
 
    /* Let's work with 0-based src and dst coordinates (thread IDs) first. */
    nir_def *log_workgroup_size = nir_vec3(&b, log_block_x, log_block_y, log_block_z);
-   nir_def *dst_xyz = nir_iadd_nuw(&b, nir_ishl(&b, nir_load_workgroup_id(&b), log_workgroup_size),
-                                   nir_load_local_invocation_id(&b));
-   dst_xyz = nir_u2uN(&b, nir_trim_vector(&b, dst_xyz, key->wg_dim), coord_bit_size);
-   dst_xyz = nir_pad_vector_imm_int(&b, dst_xyz, 0, 3);
+   nir_def *dispatch_xyz = nir_iadd_nuw(&b, nir_ishl(&b, nir_load_workgroup_id(&b), log_workgroup_size),
+                                        nir_load_local_invocation_id(&b));
+   dispatch_xyz = nir_u2uN(&b, nir_trim_vector(&b, dispatch_xyz, key->wg_dim), coord_bit_size);
+   dispatch_xyz = nir_pad_vector_imm_int(&b, dispatch_xyz, 0, 3);
 
    /* If the blit area is unaligned, we launched extra threads to make it aligned.
     * Skip those threads here.
@@ -543,42 +704,33 @@ ac_create_blit_cs(const ac_cs_blit_options *options, const ac_cs_blit_key *key)
       nir_def *start_xyz = nir_u2uN(&b, nir_vec3(&b, start_x, start_y, start_z), coord_bit_size);
       start_xyz = nir_trim_vector(&b, start_xyz, 3);
 
-      dst_xyz = nir_isub(&b, dst_xyz, start_xyz);
-      nir_def *is_positive_xyz = nir_ige_imm(&b, dst_xyz, 0);
+      dispatch_xyz = nir_isub(&b, dispatch_xyz, start_xyz);
+      nir_def *is_positive_xyz = nir_ige_imm(&b, dispatch_xyz, 0);
       nir_def *is_positive = nir_iand(&b, nir_channel(&b, is_positive_xyz, 0),
                                       nir_iand(&b, nir_channel(&b, is_positive_xyz, 1),
                                                nir_channel(&b, is_positive_xyz, 2)));
       if_positive = nir_push_if(&b, is_positive);
    }
 
-   dst_xyz = nir_imul(&b, dst_xyz, nir_imm_ivec3_intN(&b, lane_width, lane_height, lane_depth,
-                                                      coord_bit_size));
-   nir_def *src_xyz = dst_xyz;
+   dispatch_xyz = nir_imul(&b, dispatch_xyz,
+                           nir_imm_ivec3_intN(&b, lane_width, lane_height, lane_depth, coord_bit_size));
+   nir_def *dst_xyz = dispatch_xyz;
+   nir_def *src_xyz = dispatch_xyz;
 
-   /* Flip src coordinates. */
-   for (unsigned i = 0; i < 2; i++) {
-      if (i ? key->flip_y : key->flip_x) {
-         /* A normal blit loads from (box.x + tid.x) where tid.x = 0..(width - 1).
-          *
-          * A flipped blit sets box.x = width, so we should make tid.x negative to load from
-          * (width - 1)..0.
-          *
-          * Therefore do: x = -x - 1, which becomes (width - 1) to 0 after we add box.x = width.
-          */
-         nir_def *comp = nir_channel(&b, src_xyz, i);
-         comp = nir_iadd_imm(&b, nir_ineg(&b, comp), -(int)(i ? lane_height : lane_width));
-         src_xyz = nir_vector_insert_imm(&b, src_xyz, comp, i);
-      }
-   }
-
-   /* Add box.xyz. */
+   /* Add dst box.xyz. */
    nir_def *base_coord_dst =
       nir_pad_vector(&b, nir_iadd(&b, nir_vec3(&b, dst_x, dst_y, dst_z), dst_xyz), 4);
    nir_def *base_coord_src = NULL;
 
-   if (!key->is_clear) {
-      base_coord_src =
-         nir_pad_vector(&b, nir_iadd(&b, nir_vec3(&b, src_x, src_y, src_z), src_xyz), 4);
+   if (!key->num_scaled_coords) {
+      /* Flip src coordinates. */
+      src_xyz = flip_coords(&b, src_xyz, key);
+
+      /* Add src box.xyz. */
+      if (!key->is_clear) {
+         base_coord_src =
+            nir_pad_vector(&b, nir_iadd(&b, nir_vec3(&b, src_x, src_y, src_z), src_xyz), 4);
+      }
    }
 
 /* Iterate over all pixels in the lane. num_samples is the only input.
@@ -599,9 +751,9 @@ ac_create_blit_cs(const ac_cs_blit_options *options, const ac_cs_blit_key *key)
    unsigned num_src_coords = (key->src_is_1d ? 1 : 2) + key->src_has_z + key->src_is_msaa;
    unsigned num_dst_coords = (key->dst_is_1d ? 1 : 2) + key->dst_has_z + key->dst_is_msaa;
    unsigned num_samples = 1 << key->log_samples;
-   unsigned src_samples = key->src_is_msaa && !key->sample0_only &&
-                          !key->is_clear ? num_samples : 1;
-   unsigned dst_samples = key->dst_is_msaa && !(key->is_clear && key->sample0_only) ? num_samples : 1;
+   unsigned src_samples = key->src_is_msaa && !key->is_clear &&
+                          key->resolve_mode != AC_NIR_RESOLVE_SAMPLE_ZERO ? num_samples : 1;
+   unsigned dst_samples = key->dst_is_msaa && !key->clear_sample0_only ? num_samples : 1;
    nir_def *color[SI_MAX_COMPUTE_BLIT_LANE_SIZE * SI_MAX_COMPUTE_BLIT_SAMPLES] = {0};
    nir_def *coord_dst[SI_MAX_COMPUTE_BLIT_LANE_SIZE * SI_MAX_COMPUTE_BLIT_SAMPLES] = {0};
    nir_def *global_addr_dst[SI_MAX_COMPUTE_BLIT_LANE_SIZE] = {0};
@@ -623,73 +775,81 @@ ac_create_blit_cs(const ac_cs_blit_options *options, const ac_cs_blit_key *key)
 
       /* Initialize src coordinates, one vector per pixel. */
       foreach_pixel_in_lane(src_samples, sample, x, y, z, i) {
-         unsigned tmp_x = x;
-         unsigned tmp_y = y;
+         if (key->num_scaled_coords) {
+            /* Calculate FP32 scaled src coordinates. */
+            assert(!key->src_is_msaa);
 
-         /* Change the order from 0..N to N..0 for flipped blits. */
-         if (key->flip_x)
-            tmp_x = lane_width - 1 - x;
-         if (key->flip_y)
-            tmp_y = lane_height - 1 - y;
+            /* dispatch_coord = (global_invocation_ids - start_xyz) * lane_size + lane_coord; */
+            nir_def *dispatch_coord =
+               nir_iadd(&b, dispatch_xyz, nir_imm_ivec3_intN(&b, x, y, z, coord_bit_size));
+            nir_def *src_offset[3] = {src_x, src_y, src_z};
 
-         coord_src[i] = nir_iadd(&b, base_coord_src,
-                                     nir_imm_ivec4_intN(&b, tmp_x, tmp_y, z, 0, coord_bit_size));
-         if (key->src_is_1d)
-            coord_src[i] = nir_swizzle(&b, coord_src[i], swizzle_xz, 4);
-         if (key->src_is_msaa) {
-            coord_src[i] = nir_vector_insert_imm(&b, coord_src[i],
-                                                 nir_imm_intN_t(&b, sample, coord_bit_size),
-                                                 num_src_coords - 1);
-         }
+            coord_src[i] = nir_undef(&b, 3, 32);
+            unsigned c;
 
-         /* Clamp to edge for src, only X and Y because Z can't be out of bounds. */
-         for (unsigned chan = 0; chan < 2; chan++) {
-            if (chan ? key->y_clamp_to_edge : key->x_clamp_to_edge) {
-               assert(!key->src_is_1d || chan == 0);
+            for (c = 0; c < key->num_scaled_coords; c++) {
+               /* comp = src_offset + scale * (dispatch_coord + 0.5); */
+               nir_def *comp = nir_ffma(&b, scale[c],
+                                        nir_fadd_imm(&b, nir_i2f32(&b, nir_channel(&b, dispatch_coord, c)), 0.5),
+                                        nir_i2f32(&b, src_offset[c]));
+               coord_src[i] = nir_vector_insert_imm(&b, coord_src[i], comp, c);
+            }
 
-               if (!src_resinfo) {
-                  /* Always use the 32-bit return type because the image dimensions can be
-                   * > INT16_MAX even if the blit box fits within sint16. The txs builder
-                   * always sets the type to nir_type_int32.
-                   */
-                  if (has_src_sampler) {
-                     src_resinfo = nir_txs(&b, .texture_deref = img_src_deref,
-                                           .dim = img_src->type->sampler_dimensionality,
-                                           .is_array = img_src->type->sampler_array);
-                  } else {
-                     src_resinfo = nir_image_deref_size(&b, 4, 32, &img_src_deref->def,
-                                                        zero_coord);
-                  }
+            /* This should just be the array layer. */
+            if (key->num_scaled_coords < 3 && key->src_has_z) {
+               nir_def *layer = nir_iadd(&b, src_z, nir_channel(&b, dispatch_coord, 2));
+               coord_src[i] = nir_vector_insert_imm(&b, coord_src[i], nir_i2f32(&b, layer), 2);
+               c++;
+            }
 
-                  if (coord_bit_size == 16) {
-                     src_resinfo = nir_umin_imm(&b, src_resinfo, INT16_MAX);
-                     src_resinfo = nir_i2i16(&b, src_resinfo);
-                  }
-               }
+            if (key->src_is_1d)
+               coord_src[i] = nir_swizzle(&b, coord_src[i], swizzle_xz, 4);
 
-               nir_def *tmp = nir_channel(&b, coord_src[i], chan);
-               tmp = nir_imax_imm(&b, tmp, 0);
-               tmp = nir_imin(&b, tmp, nir_iadd_imm(&b, nir_channel(&b, src_resinfo, chan), -1));
-               coord_src[i] = nir_vector_insert_imm(&b, coord_src[i], tmp, chan);
+            assert(c == num_src_coords);
+
+            if (!has_src_sampler) {
+               /* Convert to integer to emulate nearest filtering before image loads. */
+               coord_src[i] = nir_f2iN(&b, coord_src[i], coord_bit_size);
+
+               clamp_to_edge(&b, &coord_src[i], &src_resinfo, img_src_deref, key);
+
+               /* Image loads require padding to vec4. */
+               coord_src[i] = nir_pad_vec4(&b, coord_src[i]);
+            }
+         } else {
+            unsigned lane_x = x;
+            unsigned lane_y = y;
+            unsigned lane_z = z;
+
+            /* Change the order from 0..N to N..0 for flipped blits. */
+            if (key->flip_x)
+               lane_x = lane_width - 1 - x;
+            if (key->flip_y)
+               lane_y = lane_height - 1 - y;
+            if (key->flip_z)
+               lane_z = lane_depth - 1 - z;
+
+            coord_src[i] = nir_iadd(&b, base_coord_src,
+                                        nir_imm_ivec4_intN(&b, lane_x, lane_y, lane_z, 0, coord_bit_size));
+            if (key->src_is_1d)
+               coord_src[i] = nir_swizzle(&b, coord_src[i], swizzle_xz, 4);
+            if (key->src_is_msaa) {
+               coord_src[i] = nir_vector_insert_imm(&b, coord_src[i],
+                                                    nir_imm_intN_t(&b, sample, coord_bit_size),
+                                                    num_src_coords - 1);
+            }
+
+            /* Clamp to edge for src. */
+            clamp_to_edge(&b, &coord_src[i], &src_resinfo, img_src_deref, key);
+
+            /* Compute the src offset for global-addressed images. */
+            if (key->format_is_96bit) {
+               assert(src_samples == 1);
+
+               global_addr_src[i] = get_global_image2d_addr(&b, key, img_src_global_addr, coord_src[i],
+                                                            src_dword_stride);
             }
          }
-
-         /* Compute the src offset for global-addressed images. */
-         if (key->format_is_96bit) {
-            assert(src_samples == 1);
-
-            global_addr_src[i] = get_global_image2d_addr(&b, key, img_src_global_addr, coord_src[i],
-                                                         src_dword_stride);
-         }
-      }
-
-      /* We don't want the computation of src coordinates to be interleaved with loads. */
-      if (lane_size > 1 || src_samples > 1) {
-         ac_optimization_barrier_vgpr_array(options->info, &b, coord_src,
-                                            lane_size * src_samples, num_src_coords);
-
-         if (key->format_is_96bit)
-            ac_optimization_barrier_vgpr_array(options->info, &b, global_addr_src, lane_size, 1);
       }
 
       /* Use "samples_identical" for MSAA resolving if it's supported. */
@@ -800,21 +960,18 @@ ac_create_blit_cs(const ac_cs_blit_options *options, const ac_cs_blit_key *key)
                                 key->src_is_msaa ?
                                    (key->src_has_non_identity_fmask ? nir_texop_txf_ms :
                                                                       nir_texop_fragment_fetch_amd) :
-                                   nir_texop_txf, coord_src[i], num_src_coords);
+                                   key->num_scaled_coords ? nir_texop_txl : nir_texop_txf,
+                                coord_src[i], num_src_coords);
          }
       }
 
       /* Resolve MSAA if necessary. */
       if (is_resolve) {
-         /* We don't want the averaging of samples to be interleaved with image loads. */
-         ac_optimization_barrier_vgpr_array(options->info, &b, color, lane_size * src_samples,
-                                            key->last_src_channel + 1);
-
          /* This reduces the "color" array from "src_samples * lane_size" elements to only
           * "lane_size" elements.
           */
          foreach_pixel_in_lane(1, sample, x, y, z, i) {
-            color[i] = ac_average_samples(&b, &color[i * src_samples], src_samples);
+            color[i] = ac_resolve_samples(&b, &color[i * src_samples], src_samples, key->resolve_mode);
          }
          src_samples = 1;
       }
@@ -845,15 +1002,9 @@ ac_create_blit_cs(const ac_cs_blit_options *options, const ac_cs_blit_key *key)
                                            .image_array = fmask_dst->type->sampler_array);
       }
 
-      if (lane_size > 1 && !b.shader->info.use_aco_amd) {
-         img_dst_desc = nir_optimization_barrier_sgpr_amd(&b, 32, img_dst_desc);
-         if (fmask_dst_desc)
-            fmask_dst_desc = nir_optimization_barrier_sgpr_amd(&b, 32, fmask_dst_desc);
-      }
-
       /* Apply the blit output modifiers, once per sample.  */
       foreach_pixel_in_lane(src_samples, sample, x, y, z, i) {
-         color[i] = apply_blit_output_modifiers(&b, color[i], key);
+         color[i] = apply_blit_output_modifiers(&b, color[i], key, options->info);
       }
    }
 
@@ -882,21 +1033,6 @@ ac_create_blit_cs(const ac_cs_blit_options *options, const ac_cs_blit_key *key)
          nir_def *coord_x = nir_channel(&b, coord_dst[i], 0);
          color[i] = nir_vector_extract(&b, clear_value, nir_umod_imm(&b, coord_x, 3));
       }
-   }
-
-   /* We don't want the computation of dst coordinates to be interleaved with stores. */
-   if (lane_size > 1 || dst_samples > 1) {
-      ac_optimization_barrier_vgpr_array(options->info, &b, coord_dst, lane_size * dst_samples,
-                                         num_dst_coords);
-
-      if (key->format_is_96bit)
-         ac_optimization_barrier_vgpr_array(options->info, &b, global_addr_dst, lane_size, 1);
-   }
-
-   /* We don't want the application of blit output modifiers to be interleaved with stores. */
-   if (!key->is_clear && (lane_size > 1 || MIN2(src_samples, dst_samples) > 1)) {
-      ac_optimization_barrier_vgpr_array(options->info, &b, color, lane_size * src_samples,
-                                         key->last_dst_channel + 1);
    }
 
    /* Store the pixels, one per sample. */
@@ -948,7 +1084,7 @@ ac_create_blit_cs(const ac_cs_blit_options *options, const ac_cs_blit_key *key)
       assert(!key->format_is_96bit);
 
       if (key->is_clear) {
-         assert(key->sample0_only);
+         assert(key->clear_sample0_only);
 
          /* Clear FMASK to 0. */
          foreach_pixel_in_lane(1, sample, x, y, z, i) {
@@ -1014,7 +1150,7 @@ static bool
 should_blit_clamp_to_edge(const ac_cs_blit_description *blit, unsigned coord_mask)
 {
    return util_is_box_out_of_bounds(&blit->src.box, coord_mask, blit->src.width0,
-                                    blit->src.height0, blit->src.level);
+                                    blit->src.height0, blit->src.depth0, blit->src.level);
 }
 
 /* Return a power-of-two alignment of a number. */
@@ -1060,107 +1196,170 @@ set_trimmed_blit(const ac_cs_blit_description *old, const struct pipe_box *box,
          out->src.box.height = -box->height;
       }
 
-      out->src.box.z += box->z - old->dst.box.z;
-      out->src.box.depth = box->depth;
+      if (out->src.box.depth > 0) {
+         out->src.box.z += box->z - old->dst.box.z;
+         out->src.box.depth = box->depth;
+      } else {
+         out->src.box.z -= box->z - old->dst.box.z;
+         out->src.box.depth = -box->depth;
+      }
    }
 }
 
 typedef struct {
-   unsigned x, y, z;
-} uvec3;
+   bool is_clear;
+   bool dst_is_stencil;
+   bool src_is_stencil;
+   ac_block_extent dst_block256B_extent;
+   ac_block_extent src_block256B_extent;
+   unsigned dst_tiling_dim;
+   unsigned src_tiling_dim;
+   unsigned dst_samples;
+   unsigned src_samples;
+   bool is_resolve;
+   bool is_upsampling;
+   bool is_scaled;
+   bool clear_sample0_only;
+   ac_nir_resolve_mode resolve_mode;
+   unsigned max_dst_chan_size;
+   unsigned max_src_chan_size;
+   unsigned dst_bpe;
+} ac_cs_blit_derived_info;
 
-/* This function uses the blit description to generate the shader key, prepare user SGPR constants,
- * and determine the parameters for up to 7 compute dispatches.
- *
- * The driver should use the shader key to create the shader, set the SGPR constants, and launch
- * compute dispatches.
- */
-bool
-ac_prepare_compute_blit(const ac_cs_blit_options *options,
-                        const ac_cs_blit_description *blit,
-                        ac_cs_blit_dispatches *out)
+static void
+get_derived_info(const ac_cs_blit_description *blit, ac_cs_blit_derived_info *out)
 {
-   const struct radeon_info *info = options->info;
-   const bool is_clear = !blit->src.surf;
-   const bool dst_is_stencil = util_format_is_stencil_only(blit->dst.format);
-   const bool src_is_stencil = util_format_is_stencil_only(blit->src.format);
-   const ac_block_extent dst_block256B_extent =
-      dst_is_stencil ? blit->dst.surf->stencil_block256B_extent : blit->dst.surf->block256B_extent;
-   const ac_block_extent src_block256B_extent =
-      is_clear ? (ac_block_extent){}
-               : src_is_stencil ? blit->src.surf->stencil_block256B_extent
-                                : blit->src.surf->block256B_extent;
-   const unsigned dst_tiling_dim = blit->dst.surf->is_linear ? 1 :
-                                   dst_block256B_extent.depth == 1 ? 2 : 3;
-   const unsigned src_tiling_dim = is_clear ? 0 : blit->src.surf->is_linear ? 1 :
-                                                  src_block256B_extent.depth == 1 ? 2 : 3;
-   const unsigned dst_samples = MAX2(1, blit->dst.num_samples);
-   const unsigned src_samples = is_clear ? 1 : MAX2(1, blit->src.num_samples);
-   const bool is_resolve = !is_clear && dst_samples == 1 && src_samples >= 2 &&
-                           !util_format_is_pure_integer(blit->dst.format);
-   const bool is_upsampling = !is_clear && src_samples == 1 && dst_samples >= 2;
-   const bool sample0_only = (is_clear && dst_samples >= 2 && blit->sample0_only) ||
-                             (!is_clear && src_samples >= 2 && dst_samples == 1 &&
-                              (blit->sample0_only || util_format_is_pure_integer(blit->dst.format)));
+   out->is_clear = !blit->src.surf;
+   out->dst_is_stencil = util_format_is_stencil_only(blit->dst.format);
+   out->src_is_stencil = util_format_is_stencil_only(blit->src.format);
+   out->dst_block256B_extent =
+      out->dst_is_stencil ? blit->dst.surf->stencil_block256B_extent : blit->dst.surf->block256B_extent;
+   out->src_block256B_extent =
+      out->is_clear ? (ac_block_extent){}
+                    : out->src_is_stencil ? blit->src.surf->stencil_block256B_extent
+                                          : blit->src.surf->block256B_extent;
+   out->dst_tiling_dim = blit->dst.surf->is_linear ? 1 : out->dst_block256B_extent.depth == 1 ? 2 : 3;
+   out->src_tiling_dim =
+      out->is_clear ? 0 : blit->src.surf->is_linear ? 1 : out->src_block256B_extent.depth == 1 ? 2 : 3;
+   out->dst_samples = MAX2(1, blit->dst.num_samples);
+   out->src_samples = out->is_clear ? 1 : MAX2(1, blit->src.num_samples);
+   out->is_resolve = !out->is_clear && out->dst_samples == 1 && out->src_samples >= 2;
+   out->is_upsampling = !out->is_clear && out->src_samples == 1 && out->dst_samples >= 2;
+   out->is_scaled = !out->is_clear && (blit->dst.box.width != abs(blit->src.box.width) ||
+                                       blit->dst.box.height != abs(blit->src.box.height) ||
+                                       blit->dst.box.depth != abs(blit->src.box.depth));
+   out->clear_sample0_only = out->is_clear && out->dst_samples >= 2 && blit->sample0_only;
+   out->resolve_mode = AC_NIR_RESOLVE_AVERAGE;
+
+   if (out->is_resolve) {
+      if (blit->resolve_min_mode) {
+         if (util_format_is_pure_sint(blit->src.format))
+            out->resolve_mode = AC_NIR_RESOLVE_SMIN;
+         else if (util_format_is_pure_integer(blit->src.format))
+            out->resolve_mode = AC_NIR_RESOLVE_UMIN;
+         else
+            out->resolve_mode = AC_NIR_RESOLVE_FMIN;
+      } else if (blit->resolve_max_mode) {
+         if (util_format_is_pure_sint(blit->src.format))
+            out->resolve_mode = AC_NIR_RESOLVE_SMAX;
+         else if (util_format_is_pure_integer(blit->src.format))
+            out->resolve_mode = AC_NIR_RESOLVE_UMAX;
+         else
+            out->resolve_mode = AC_NIR_RESOLVE_FMAX;
+      } else if (blit->sample0_only || util_format_is_pure_integer(blit->dst.format)) {
+         out->resolve_mode = AC_NIR_RESOLVE_SAMPLE_ZERO;
+      }
+   }
+
    /* Get the channel sizes. */
-   const unsigned max_dst_chan_size = util_format_get_max_channel_size(blit->dst.format);
-   const unsigned max_src_chan_size = is_clear ? 0 : util_format_get_max_channel_size(blit->src.format);
-   const unsigned dst_bpe = blit->format_is_96bit ? 4 : dst_is_stencil ? 1 : blit->dst.surf->bpe;
+   out->max_dst_chan_size = util_format_get_max_channel_size(blit->dst.format);
+   out->max_src_chan_size = out->is_clear ? 0 : util_format_get_max_channel_size(blit->src.format);
+   out->dst_bpe = blit->format_is_96bit ? 4 : out->dst_is_stencil ? 1 : blit->dst.surf->bpe;
+}
 
-   if (!options->is_nested)
-      memset(out, 0, sizeof(*out));
-
+static bool
+has_errors(const ac_cs_blit_description *blit)
+{
    /* Reject blits with invalid parameters. */
    if (blit->dst.box.x < 0 || blit->dst.box.y < 0 || blit->dst.box.z < 0 ||
-       blit->dst.box.width < 0 || blit->dst.box.height < 0 || blit->dst.box.depth < 0 ||
-       blit->src.box.depth < 0) {
+       blit->dst.box.width < 0 || blit->dst.box.height < 0 || blit->dst.box.depth < 0) {
       assert(!"invalid box parameters"); /* this is reachable and prevents hangs */
       return true;
    }
+
+   return false;
+}
+
+static bool
+boxes_are_supported(const ac_cs_blit_description *blit)
+{
+   const bool is_clear = !blit->src.surf;
 
    /* Negative src is possible with piglit/copyteximage-clipping, but it's very rare. */
    if (blit->src.box.x < 0 || blit->src.box.y < 0 || blit->src.box.z < 0)
       return false;
 
-   /* Skip zero-area blits. */
-   if (!blit->dst.box.width || !blit->dst.box.height || !blit->dst.box.depth ||
-       (!is_clear && (!blit->src.box.width || !blit->src.box.height || !blit->src.box.depth)))
+   /* Scaling is illegal for:
+    * - 96-bit formats
+    * - MSAA sources
+    * - linear filtering without a sampler
+    */
+   if (!is_clear &&
+       (blit->format_is_96bit || blit->src.num_samples >= 2 ||
+        (blit->linear_filter && !blit->src_is_sampler)) &&
+       (blit->dst.box.width != abs(blit->src.box.width) ||
+        blit->dst.box.height != abs(blit->src.box.height) ||
+        blit->dst.box.depth != abs(blit->src.box.depth)))
+      return false;
+
+   return true;
+}
+
+bool
+ac_should_use_compute_blit(const ac_cs_blit_options *options, const ac_cs_blit_description *blit)
+{
+   const struct radeon_info *info = options->info;
+   ac_cs_blit_derived_info d;
+   get_derived_info(blit, &d);
+
+   /* We don't want the errors to cause the driver to use the gfx path, so return success, so that
+    * the errors are contained. Then ac_prepare_compute_blit will skip everything.
+    */
+   if (has_errors(blit))
       return true;
+
+   if (!boxes_are_supported(blit))
+      return false;
 
    if (blit->dst.format == PIPE_FORMAT_A8R8_UNORM || /* This format fails AMD_TEST=imagecopy. */
        /* GFX8 doesn't seem to support R4G4B4A4_UINT and R5G5B5A1_UINT. VK doesn't have these formats. */
-       (info->gfx_level <= GFX8 && max_dst_chan_size <= 6 &&
+       (info->gfx_level <= GFX8 && d.max_dst_chan_size <= 6 &&
         util_format_is_pure_integer(blit->dst.format)) ||
-       dst_samples > SI_MAX_COMPUTE_BLIT_SAMPLES ||
-       (!is_clear &&
-        /* Scaling is not implemented by the compute shader. */
-        (blit->dst.box.width != abs(blit->src.box.width) ||
-         blit->dst.box.height != abs(blit->src.box.height) ||
-         blit->dst.box.depth != abs(blit->src.box.depth) ||
-         src_samples > SI_MAX_COMPUTE_BLIT_SAMPLES)))
+       d.dst_samples > SI_MAX_COMPUTE_BLIT_SAMPLES ||
+       (!d.is_clear && d.src_samples > SI_MAX_COMPUTE_BLIT_SAMPLES))
       return false;
 
    /* Return a failure if a compute blit is slower than a gfx blit. */
-   if (options->fail_if_slow) {
+   if (blit->fail_if_slow) {
       /* TODO: This block is no longer up to date since the last rewrite. */
-      if (is_clear) {
+      if (d.is_clear) {
          /* Verified on: Tahiti, Hawaii, Tonga, Vega10, Navi10, Navi21, Navi31 */
-         if (dst_tiling_dim == 3) {
-            if (info->gfx_level == GFX6 && dst_bpe == 8)
+         if (d.dst_tiling_dim == 3) {
+            if (info->gfx_level == GFX6 && d.dst_bpe == 8)
                return false;
-         } else if (dst_tiling_dim == 2) {
+         } else if (d.dst_tiling_dim == 2) {
             /* Each condition inside the parentheses enables the compute clear for that case. */
-            if (!(info->gfx_level == GFX6 && dst_bpe <= 4 && dst_samples == 1) &&
-                !(info->gfx_level == GFX7 && dst_bpe == 1 && dst_samples == 1) &&
+            if (!(info->gfx_level == GFX6 && d.dst_bpe <= 4 && d.dst_samples == 1) &&
+                !(info->gfx_level == GFX7 && d.dst_bpe == 1 && d.dst_samples == 1) &&
                 !(info->gfx_level == GFX12 &&
-                  (dst_bpe <= 2 ||
-                   (dst_bpe == 4 && dst_samples == 8) ||
-                   (dst_bpe == 16 && dst_samples <= 2))))
+                  (d.dst_bpe <= 2 ||
+                   (d.dst_bpe == 4 && d.dst_samples == 8) ||
+                   (d.dst_bpe == 16 && d.dst_samples <= 2))))
                return false;
          }
       } else {
          /* TODO: Optionally add an MSAA upsampling path for OpenGL. */
-         if (is_upsampling)
+         if (d.is_upsampling)
             return false;
 
          switch (info->gfx_level) {
@@ -1171,40 +1370,36 @@ ac_prepare_compute_blit(const ac_cs_blit_options *options,
          case GFX10:
          case GFX10_3:
             /* Verified on: Tahiti, Hawaii, Tonga, Vega10, Navi10, Navi21 */
-            if (is_resolve) {
-               if (!(info->gfx_level == GFX7 && dst_bpe == 16))
+            if (d.is_resolve) {
+               if (!(info->gfx_level == GFX7 && d.dst_bpe == 16))
                   return false;
             } else if (!blit->copy_physical_samples) {
-               assert(dst_samples == src_samples || sample0_only);
+               assert(d.dst_samples == d.src_samples || d.clear_sample0_only);
 
-               if (dst_tiling_dim == 2) {
-                  if (dst_samples == 1) {
-                     if (dst_bpe <= 8 &&
-                         !(info->gfx_level <= GFX7 && dst_bpe == 1) &&
-                         !(info->gfx_level == GFX6 && dst_bpe == 2 &&
-                           blit->src.surf->is_linear) &&
-                         !(info->gfx_level == GFX7 && dst_bpe >= 2 &&
-                           blit->src.surf->is_linear) &&
-                         !((info->gfx_level == GFX8 || info->gfx_level == GFX9) &&
-                           dst_bpe >= 2 && blit->src.surf->is_linear) &&
-                         !(info->gfx_level == GFX10 && dst_bpe <= 2 &&
-                           blit->src.surf->is_linear) &&
-                         !(info->gfx_level == GFX10_3 && dst_bpe == 8 &&
-                           blit->src.surf->is_linear))
+               if (d.dst_tiling_dim == 2) {
+                  if (d.dst_samples == 1) {
+                     if (d.dst_bpe <= 8 &&
+                         !(info->gfx_level <= GFX7 && d.dst_bpe == 1) &&
+                         !(info->gfx_level == GFX6 && d.dst_bpe == 2 && d.src_tiling_dim == 1) &&
+                         !(info->gfx_level == GFX7 && d.dst_bpe >= 2 && d.src_tiling_dim == 1) &&
+                         !((info->gfx_level == GFX8 || info->gfx_level == GFX9) && d.dst_bpe >= 2 &&
+                           d.src_tiling_dim == 1) &&
+                         !(info->gfx_level == GFX10 && d.dst_bpe <= 2 && d.src_tiling_dim == 1) &&
+                         !(info->gfx_level == GFX10_3 && d.dst_bpe == 8 && d.src_tiling_dim == 1))
                         return false;
 
-                     if (info->gfx_level == GFX6 && dst_bpe == 16 &&
-                         blit->src.surf->is_linear && blit->dst.dim != 3)
+                     if (info->gfx_level == GFX6 && d.dst_bpe == 16 && d.src_tiling_dim == 1 &&
+                         blit->dst.dim != 3)
                         return false;
 
-                     if (dst_bpe == 16 && !blit->src.surf->is_linear &&
+                     if (d.dst_bpe == 16 && d.src_tiling_dim >= 2 &&
                          /* Only GFX6 selects 2D tiling for 128bpp 3D textures. */
                          !(info->gfx_level == GFX6 && blit->dst.dim == 3) &&
                          info->gfx_level != GFX7)
                         return false;
                   } else {
                      /* MSAA copies - tested only without FMASK on Navi21. */
-                     if (dst_bpe >= 4)
+                     if (d.dst_bpe >= 4)
                         return false;
                   }
                }
@@ -1215,22 +1410,22 @@ ac_prepare_compute_blit(const ac_cs_blit_options *options,
          case GFX11_5:
          case GFX11_7:
             /* Verified on Navi31. */
-            if (is_resolve) {
-               if (!((dst_bpe <= 2 && src_samples == 2) ||
-                     (dst_bpe == 2 && src_samples == 4) ||
-                     (dst_bpe == 16 && src_samples == 4)))
+            if (d.is_resolve) {
+               if (!((d.dst_bpe <= 2 && d.src_samples == 2) ||
+                     (d.dst_bpe == 2 && d.src_samples == 4) ||
+                     (d.dst_bpe == 16 && d.src_samples == 4)))
                   return false;
             } else if (!blit->copy_physical_samples) {
-               assert(dst_samples == src_samples || sample0_only);
+               assert(d.dst_samples == d.src_samples || d.clear_sample0_only);
 
-               if (dst_tiling_dim == 2) {
-                  if (dst_bpe == 2 && blit->src.surf->is_linear && dst_samples == 1)
+               if (d.dst_tiling_dim == 2) {
+                  if (d.dst_bpe == 2 && d.src_tiling_dim == 1 && d.dst_samples == 1)
                      return false;
 
-                  if (dst_bpe >= 4 && dst_samples == 1 && !blit->src.surf->is_linear)
+                  if (d.dst_bpe >= 4 && d.dst_samples == 1 && d.src_tiling_dim >= 2)
                      return false;
 
-                  if (dst_bpe == 16 && dst_samples == 8)
+                  if (d.dst_bpe == 16 && d.dst_samples == 8)
                      return false;
                }
             }
@@ -1244,12 +1439,46 @@ ac_prepare_compute_blit(const ac_cs_blit_options *options,
       }
    }
 
+   return true;
+}
+
+typedef struct {
+   unsigned x, y, z;
+} uvec3;
+
+/* This function uses the blit description to generate the shader key, prepare user SGPR constants,
+ * and determine the parameters for up to 7 compute dispatches.
+ *
+ * The driver should use the shader key to create the shader, set the SGPR constants, and launch
+ * compute dispatches.
+ */
+void
+ac_prepare_compute_blit(const ac_cs_blit_options *options,
+                        const ac_cs_blit_description *blit,
+                        ac_cs_blit_dispatches *out)
+{
+   const struct radeon_info *info = options->info;
+   ac_cs_blit_derived_info d;
+   get_derived_info(blit, &d);
+
+   if (!options->is_nested)
+      memset(out, 0, sizeof(*out));
+
+   if (has_errors(blit))
+      return;
+
+   /* Skip zero-area blits. */
+   if (!blit->dst.box.width || !blit->dst.box.height || !blit->dst.box.depth)
+      return;
+
+   assert(boxes_are_supported(blit));
+
    /* Determine bytes per lane, which is the main tunable. */
    /* TODO: retune everything with RADV, especially MSAA copies on GFX10.3 */
-   unsigned bytes_per_lane = dst_bpe;
+   unsigned bytes_per_lane = d.dst_bpe;
 
    if (info->gfx_level >= GFX11) {
-      if (is_resolve) {
+      if (d.is_resolve) {
          static const unsigned resolve_bpl[][3] = {
             /* This performs best maybe due to interleaved samples, not sure. */
             /* 2, 4, 8 samples */
@@ -1260,9 +1489,9 @@ ac_prepare_compute_blit(const ac_cs_blit_options *options,
             {16, 16, 16}, /* 16 bpe */
          };
 
-         bytes_per_lane = resolve_bpl[util_logbase2(dst_bpe)][util_logbase2(src_samples) - 1];
+         bytes_per_lane = resolve_bpl[util_logbase2(d.dst_bpe)][util_logbase2(d.src_samples) - 1];
 
-         if (info->gfx_level >= GFX12 && dst_bpe == 8 && src_samples == 2)
+         if (info->gfx_level >= GFX12 && d.dst_bpe == 8 && d.src_samples == 2)
             bytes_per_lane = 16;
       } else {
          static const unsigned bpl[][4] = {
@@ -1275,27 +1504,27 @@ ac_prepare_compute_blit(const ac_cs_blit_options *options,
             {16, 32, 64, 128}, /* 16 bpe */
          };
 
-         bytes_per_lane = bpl[util_logbase2(dst_bpe)][util_logbase2(dst_samples)];
+         bytes_per_lane = bpl[util_logbase2(d.dst_bpe)][util_logbase2(d.dst_samples)];
 
-         if (info->gfx_level >= GFX12 && dst_bpe == 4 && src_samples == 2)
+         if (info->gfx_level >= GFX12 && d.dst_bpe == 4 && d.src_samples == 2)
             bytes_per_lane = 16;
       }
    } else if (info->gfx_level >= GFX10) {
       bytes_per_lane = MAX2(bytes_per_lane, 4);
 
       /* Special cases that were found to perform better than the default. */
-      if (is_resolve && dst_bpe == 1 && src_samples >= 4)
+      if (d.is_resolve && d.dst_bpe == 1 && d.src_samples >= 4)
          bytes_per_lane = 2;
 
-      bytes_per_lane = MAX2(bytes_per_lane, dst_bpe * dst_samples);
+      bytes_per_lane = MAX2(bytes_per_lane, d.dst_bpe * d.dst_samples);
    } else {
       /* GFX6-9. */
-      bytes_per_lane = MAX3(bytes_per_lane, 8, dst_bpe * dst_samples);
+      bytes_per_lane = MAX3(bytes_per_lane, 8, d.dst_bpe * d.dst_samples);
 
-      if (is_clear && dst_bpe >= 4 && dst_tiling_dim == 3)
+      if (d.is_clear && d.dst_bpe >= 4 && d.dst_tiling_dim == 3)
          bytes_per_lane = 16;
 
-      if (info->gfx_level <= GFX7 && is_resolve) {
+      if (info->gfx_level <= GFX7 && d.is_resolve) {
          static const unsigned resolve_bpl[][3] = {
             /* 2, 4, 8 samples */
             {4, 4, 2}, /* 1 bpe */
@@ -1305,7 +1534,7 @@ ac_prepare_compute_blit(const ac_cs_blit_options *options,
             {16, 16, 16}, /* 16 bpe */
          };
 
-         bytes_per_lane = resolve_bpl[util_logbase2(dst_bpe)][util_logbase2(src_samples) - 1];
+         bytes_per_lane = resolve_bpl[util_logbase2(d.dst_bpe)][util_logbase2(d.src_samples) - 1];
       }
    }
 
@@ -1314,29 +1543,29 @@ ac_prepare_compute_blit(const ac_cs_blit_options *options,
       bytes_per_lane = 16;
 
    uvec3 tile_size = {
-      dst_block256B_extent.width,
-      dst_block256B_extent.height,
-      dst_block256B_extent.depth,
+      d.dst_block256B_extent.width,
+      d.dst_block256B_extent.height,
+      d.dst_block256B_extent.depth,
    };
 
    /* Tuning for tiled<->linear copies. */
    /* TODO: This is only flyby tuning. More careful tuning is needed if this is important. */
-   if (dst_tiling_dim == 1 || src_tiling_dim == 1) {
+   if (d.dst_tiling_dim == 1 || d.src_tiling_dim == 1) {
       /* 2D->linear. */
-      if (dst_tiling_dim == 1 && src_tiling_dim == 2) {
+      if (d.dst_tiling_dim == 1 && d.src_tiling_dim == 2) {
          /* Make the tile (N/4, 4) instead of (N, 1). */
-         if (info->gfx_level >= GFX9 || dst_bpe <= 1) {
+         if (info->gfx_level >= GFX9 || d.dst_bpe <= 1) {
             assert(tile_size.x >= 4);
             tile_size.x /= 4;
             tile_size.y *= 4;
-         } else if (dst_bpe == 2) {
+         } else if (d.dst_bpe == 2) {
             assert(tile_size.x >= 2);
             tile_size.x /= 2;
             tile_size.y *= 2;
             bytes_per_lane = 4;
          }
 
-         if (info->gfx_level <= GFX7 && dst_bpe == 8) {
+         if (info->gfx_level <= GFX7 && d.dst_bpe == 8) {
             assert(tile_size.x >= 2);
             tile_size.x /= 2;
             tile_size.y *= 2;
@@ -1344,8 +1573,8 @@ ac_prepare_compute_blit(const ac_cs_blit_options *options,
       }
 
       /* 3D->linear. */
-      if (dst_tiling_dim == 1 && src_tiling_dim == 3) {
-         if (info->gfx_level >= GFX9 || dst_bpe == 1) {
+      if (d.dst_tiling_dim == 1 && d.src_tiling_dim == 3) {
+         if (info->gfx_level >= GFX9 || d.dst_bpe == 1) {
             /* Make the tile (N/4, 2, 2) instead of (N, 1, 1). */
             assert(tile_size.x >= 4);
             tile_size.x /= 4;
@@ -1354,7 +1583,7 @@ ac_prepare_compute_blit(const ac_cs_blit_options *options,
             bytes_per_lane = MAX2(bytes_per_lane, 8);
          }
 
-         if (info->gfx_level <= GFX7 && dst_bpe == 2) {
+         if (info->gfx_level <= GFX7 && d.dst_bpe == 2) {
             assert(tile_size.x >= 2);
             tile_size.x /= 2;
             tile_size.y *= 2;
@@ -1362,14 +1591,14 @@ ac_prepare_compute_blit(const ac_cs_blit_options *options,
       }
 
       /* Linear->2D. */
-      if (info->gfx_level <= GFX7 && dst_bpe >= 2 && dst_tiling_dim == 2 && src_tiling_dim == 1) {
+      if (info->gfx_level <= GFX7 && d.dst_bpe >= 2 && d.dst_tiling_dim == 2 && d.src_tiling_dim == 1) {
          assert(tile_size.y >= 2);
          tile_size.y /= 2;
          tile_size.x *= 2;
       }
 
       /* Linear->3D. */
-      if (dst_tiling_dim == 3 && src_tiling_dim == 1) {
+      if (d.dst_tiling_dim == 3 && d.src_tiling_dim == 1) {
          if (info->gfx_level >= GFX11) {
             assert(tile_size.y >= 2 && tile_size.z >= 2);
             tile_size.y /= 2;
@@ -1391,7 +1620,7 @@ ac_prepare_compute_blit(const ac_cs_blit_options *options,
       }
    }
 
-   const unsigned dst_element_size = dst_bpe * dst_samples;
+   const unsigned dst_element_size = d.dst_bpe * d.dst_samples;
    assert(bytes_per_lane >= dst_element_size);
 
    /* Determine the tile shape of each lane. */
@@ -1449,12 +1678,13 @@ ac_prepare_compute_blit(const ac_cs_blit_options *options,
     * then blit the unaligned sides separately. This splits the blit into up to 7 blits for 3D,
     * and 5 blits for 2D.
     */
-   if (blit->dst.box.x % lane_tile.x ||
-       blit->dst.box.y % lane_tile.y ||
-       blit->dst.box.z % lane_tile.z ||
-       blit->dst.box.width % lane_tile.x ||
-       blit->dst.box.height % lane_tile.y ||
-       blit->dst.box.depth % lane_tile.z) {
+   if (!d.is_scaled &&
+       (blit->dst.box.x % lane_tile.x ||
+        blit->dst.box.y % lane_tile.y ||
+        blit->dst.box.z % lane_tile.z ||
+        blit->dst.box.width % lane_tile.x ||
+        blit->dst.box.height % lane_tile.y ||
+        blit->dst.box.depth % lane_tile.z)) {
       struct pipe_box middle;
 
       /* Cut off unaligned regions on the sides of the box. */
@@ -1476,25 +1706,20 @@ ac_prepare_compute_blit(const ac_cs_blit_options *options,
        * This was fine-tuned for Navi31, and might be suboptimal on different generations.
        */
       /* TODO: Retune this with RADV to improve perf of partial/unaligned ops. */
-      bool slow = (blit->dst.surf->is_linear && !is_clear && blit->src.surf->is_linear &&
+      bool slow = (d.dst_tiling_dim == 1 && d.src_tiling_dim == 1 &&
                    blit->dst.box.depth > 1) ||
-                  (dst_tiling_dim == 3 &&
-                   ((dst_bpe == 8 && is_clear) ||
-                    (dst_bpe == 4 &&
-                     (blit->dst.surf->is_linear || (!is_clear && blit->src.surf->is_linear))) ||
-                    (dst_bpe == 2 && blit->dst.surf->is_linear && !is_clear &&
-                     blit->src.surf->is_linear))) ||
-                  (dst_tiling_dim != 3 &&
-                   ((dst_bpe == 4 && blit->dst.surf->is_linear && !is_clear &&
-                     blit->src.surf->is_linear) ||
-                    (dst_bpe == 8 && !is_clear &&
-                     blit->dst.surf->is_linear != blit->src.surf->is_linear) ||
-                    (is_resolve && dst_bpe == 4 && src_samples == 4) ||
-                    (is_resolve && dst_bpe == 8 && src_samples == 2)));
+                  (d.dst_tiling_dim == 3 &&
+                   ((d.dst_bpe == 8 && d.is_clear) ||
+                    (d.dst_bpe == 4 && d.src_tiling_dim == 1))) ||
+                  (d.dst_tiling_dim != 3 &&
+                   ((d.dst_bpe == 4 && d.dst_tiling_dim == 1 && d.src_tiling_dim == 1) ||
+                    (d.dst_bpe == 8 && !d.is_clear && (d.dst_tiling_dim == 1) != (d.src_tiling_dim == 1)) ||
+                    (d.is_resolve && d.dst_bpe == 4 && d.src_samples == 4) ||
+                    (d.is_resolve && d.dst_bpe == 8 && d.src_samples == 2)));
 
       /* Only use this if the middle blit is large enough. */
       if (!slow && middle.width > 0 && middle.height > 0 && middle.depth > 0 &&
-          (uint64_t)middle.width * middle.height * middle.depth * dst_bpe * dst_samples >
+          (uint64_t)middle.width * middle.height * middle.depth * d.dst_bpe * d.dst_samples >
           128 * 1024) {
          /* Compute the size of unaligned regions on all sides of the box. */
          struct pipe_box top, left, right, bottom, front, back;
@@ -1563,14 +1788,12 @@ ac_prepare_compute_blit(const ac_cs_blit_options *options,
          for (unsigned i = 0; i < ARRAY_SIZE(boxes); i++) {
             if (boxes[i].width > 0 && boxes[i].height > 0 && boxes[i].depth > 0) {
                ac_cs_blit_description new_blit;
-               ASSERTED bool ok;
 
-               set_trimmed_blit(blit, &boxes[i], is_clear, &new_blit);
-               ok = ac_prepare_compute_blit(&nested_options, &new_blit, out);
-               assert(ok);
+               set_trimmed_blit(blit, &boxes[i], d.is_clear, &new_blit);
+               ac_prepare_compute_blit(&nested_options, &new_blit, out);
             }
          }
-         return true;
+         return;
       }
    }
 
@@ -1714,15 +1937,13 @@ ac_prepare_compute_blit(const ac_cs_blit_options *options,
    const unsigned dst_dword_stride =
       ac_surface_get_plane_stride(options->info->gfx_level, blit->dst.surf, 0, 0) / 4;
    const unsigned src_dword_stride =
-      is_clear ? 0 : ac_surface_get_plane_stride(options->info->gfx_level, blit->src.surf, 0, 0) / 4;
+      d.is_clear ? 0 : ac_surface_get_plane_stride(options->info->gfx_level, blit->src.surf, 0, 0) / 4;
 
    /* Get the shader key. */
    ac_cs_blit_key key;
    key.key = 0;
 
-   /* Only ACO can form VMEM clauses for image stores, which is a requirement for performance. */
-   key.use_aco = true;
-   key.is_clear = is_clear;
+   key.is_clear = d.is_clear;
    key.wg_dim = wg_dim;
    key.has_start_xyz = start_x || start_y || start_z;
    key.format_is_96bit = blit->format_is_96bit;
@@ -1733,26 +1954,24 @@ ac_prepare_compute_blit(const ac_cs_blit_options *options,
    key.log_lane_height = util_logbase2(lane_tile.y);
    key.log_lane_depth = util_logbase2(lane_tile.z);
    key.dst_is_1d = blit->dst.dim == 1;
-   key.dst_is_msaa = dst_samples > 1;
+   key.dst_is_msaa = d.dst_samples > 1;
    key.dst_has_z = blit->dst.dim == 3 || blit->dst.is_array;
    key.dst_store_fmask = blit->dst_store_fmask;
    key.copy_physical_samples = blit->copy_physical_samples;
-   key.dst_is_rgb5 = max_dst_chan_size <= 6 &&
+   key.dst_is_rgb5 = d.max_dst_chan_size <= 6 &&
                      !util_format_is_pure_integer(blit->dst.format);
    key.last_dst_channel = key.format_is_96bit ? 0 : util_format_get_last_component(blit->dst.format);
 
-   /* ACO doesn't support D16 on GFX8 */
-   bool has_d16 = info->gfx_level >= (key.use_aco || options->use_aco ? GFX9 : GFX8) &&
-                  !key.dst_is_rgb5;
+   bool has_d16 = info->gfx_level >= GFX8 && !key.dst_is_rgb5;
 
-   if (is_clear) {
-      assert(dst_samples <= 8);
-      key.log_samples = sample0_only ? 0 : util_logbase2(dst_samples);
+   if (d.is_clear) {
+      assert(d.dst_samples <= 8);
+      key.log_samples = d.clear_sample0_only ? 0 : util_logbase2(d.dst_samples);
       key.a16 = !key.format_is_96bit && info->gfx_level >= GFX9 && util_is_box_sint16(&blit->dst.box);
       key.d16 = has_d16 &&
-                max_dst_chan_size <= (util_format_is_float(blit->dst.format) ||
+                d.max_dst_chan_size <= (util_format_is_float(blit->dst.format) ||
                                       util_format_is_pure_integer(blit->dst.format) ? 16 : 11);
-      key.sample0_only = sample0_only;
+      key.clear_sample0_only = d.clear_sample0_only;
    } else {
       /* src.box.height is clamped to 0 because it's negative and src.box.y contains the upper
        * bound when the Y axis is flipped.
@@ -1762,18 +1981,21 @@ ac_prepare_compute_blit(const ac_cs_blit_options *options,
                              src_dword_stride * 4 > UINT32_MAX;
       key.src_is_sampler = blit->src_is_sampler;
       key.src_is_1d = blit->src.dim == 1;
-      key.src_is_msaa = src_samples > 1;
+      key.src_is_msaa = d.src_samples > 1;
       key.src_has_z = blit->src.dim == 3 || blit->src.is_array;
-      key.src_has_non_identity_fmask = src_samples > 1 && blit->src_has_non_identity_fmask;
-      /* Resolving integer formats only copies sample 0. log_samples is then unused. */
-      key.sample0_only = sample0_only;
-      unsigned num_samples = MAX2(src_samples, dst_samples);
+      key.src_has_non_identity_fmask = d.src_samples > 1 && blit->src_has_non_identity_fmask;
+      key.resolve_mode = d.resolve_mode;
+      unsigned num_samples = MAX2(d.src_samples, d.dst_samples);
       assert(num_samples <= 8);
-      key.log_samples = sample0_only ? 0 : util_logbase2(num_samples);
+      key.log_samples = d.resolve_mode == AC_NIR_RESOLVE_SAMPLE_ZERO ? 0 : util_logbase2(num_samples);
+      key.num_scaled_coords = d.is_scaled ? blit->src.dim : 0;
       key.x_clamp_to_edge = should_blit_clamp_to_edge(blit, BITFIELD_BIT(0));
       key.y_clamp_to_edge = should_blit_clamp_to_edge(blit, BITFIELD_BIT(1));
-      key.flip_x = blit->src.box.width < 0;
-      key.flip_y = blit->src.box.height < 0;
+      key.z_clamp_to_edge = blit->src.dim == 3 && should_blit_clamp_to_edge(blit, BITFIELD_BIT(2));
+      key.flip_x = !d.is_scaled && blit->src.box.width < 0;
+      key.flip_y = !d.is_scaled && blit->src.box.height < 0;
+      key.flip_z = !d.is_scaled && blit->src.box.depth < 0;
+      assert(blit->src.box.depth > 0 || key.flip_z || key.num_scaled_coords == 3);
       key.sint_to_uint = util_format_is_pure_sint(blit->src.format) &&
                          util_format_is_pure_uint(blit->dst.format);
       key.uint_to_sint = util_format_is_pure_uint(blit->src.format) &&
@@ -1785,15 +2007,23 @@ ac_prepare_compute_blit(const ac_cs_blit_options *options,
       key.use_integer_one = util_format_is_pure_integer(blit->dst.format) &&
                             key.last_src_channel < key.last_dst_channel &&
                             key.last_dst_channel == 3;
+      /* a16 only applies to image loads/stores and texel fetches. For scaled blits (using txl),
+       * dst always obeys a16, but src only uses it for integer coordinate calculations before
+       * the conversion to FP32 coordinates.
+       */
       key.a16 = !key.format_is_96bit && info->gfx_level >= GFX9 &&
                 util_is_box_sint16(&blit->dst.box) && util_is_box_sint16(&blit->src.box);
       key.d16 = has_d16 &&
                 /* Blitting FP16 using D16 has precision issues. Resolving has precision
                  * issues all the way down to R11G11B10_FLOAT. */
-                MIN2(max_dst_chan_size, max_src_chan_size) <=
+                MIN2(d.max_dst_chan_size, d.max_src_chan_size) <=
                 (util_format_is_pure_integer(blit->dst.format) ?
                     (key.sint_to_uint || key.uint_to_sint ? 10 : 16) :
-                    (is_resolve ? 10 : 11));
+                    (d.is_resolve ? 10 : 11));
+      key.force_f2f16_rtz = blit->force_f2f16_rtz && !key.dst_is_rgb5 &&
+                            ((d.max_dst_chan_size <= 10 && (util_format_is_unorm(blit->dst.format) ||
+                                                            util_format_is_snorm(blit->dst.format))) ||
+                             (d.max_dst_chan_size <= 16 && util_format_is_float(blit->dst.format)));
    }
 
    dispatch->shader_key = key;
@@ -1817,6 +2047,7 @@ ac_prepare_compute_blit(const ac_cs_blit_options *options,
       assert(!key.d16);
       assert(!key.x_clamp_to_edge);
       assert(!key.y_clamp_to_edge);
+      assert(!key.z_clamp_to_edge);
       assert(!key.log_samples);
       assert(!(dst_dword_stride & ~0x3ffff));
       assert(!(src_dword_stride & ~0x3ffff));
@@ -1831,7 +2062,7 @@ ac_prepare_compute_blit(const ac_cs_blit_options *options,
                                    ((log_block_x & 0x7) << 18) | ((log_block_y & 0x7) << 21);
       dispatch->user_data[num++] = (blit->src.box.y & 0xffff) | (((uint32_t)blit->dst.box.y & 0xffff) << 16);
 
-      if (!is_clear) {
+      if (!d.is_clear) {
          dispatch->user_data[num++] = blit->src.box.x;
          dispatch->user_data[num++] = src_dword_stride;
       } else {
@@ -1847,8 +2078,17 @@ ac_prepare_compute_blit(const ac_cs_blit_options *options,
       if (key.dst_has_z || key.src_has_z)
          dispatch->user_data[num++] = (blit->dst.box.z & 0xffff) | ((uint32_t)(blit->src.box.z & 0xffff) << 16);
 
-      if (!is_clear) {
+      if (!d.is_clear) {
          dispatch->user_data[num++] = (blit->src.box.x & 0xffff) | ((uint32_t)(blit->src.box.y & 0xffff) << 16);
+
+         if (key.num_scaled_coords) {
+            const float src_dim[3] = {blit->src.box.width, blit->src.box.height, blit->src.box.depth};
+            const float dst_dim[3] = {blit->dst.box.width, blit->dst.box.height, blit->dst.box.depth};
+
+            /* Set src coordinate scaling factors. */
+            for (unsigned i = 0; i < key.num_scaled_coords; i++)
+               dispatch->user_data[num++] = fui(src_dim[i] / dst_dim[i]);
+         }
       } else {
          union pipe_color_union final_value;
          memcpy(&final_value, &blit->clear_color, sizeof(final_value));
@@ -1881,5 +2121,4 @@ ac_prepare_compute_blit(const ac_cs_blit_options *options,
 
    assert(get_num_user_data_terms(&dispatch->shader_key) == num);
    dispatch->num_user_data_terms = num;
-   return true;
 }

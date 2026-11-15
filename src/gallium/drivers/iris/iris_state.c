@@ -2681,6 +2681,10 @@ fill_sampler_state(struct iris_screen *screen,
          samp.MaxLOD = CLAMP(state->max_lod, 0, hw_max_lod);
          samp.TextureLODBias = CLAMP(state->lod_bias, -16, 15);
          samp.YCRCBBorderMode = YCRCBBM_PASSTHROUGH;
+         /* Bspec 57016 (r77793) HSD 22021085527. Also refer to the names of
+          * values in the dri option.
+          */
+         samp.sample_d_performance = screen->driconf.sample_d_performance;
       }
 
       return;
@@ -2697,6 +2701,14 @@ fill_sampler_state(struct iris_screen *screen,
       samp.MagModeFilter = mag_img_filter;
       samp.MipModeFilter = translate_mip_filter(state->min_mip_filter);
       samp.MaximumAnisotropy = RATIO21;
+
+#if GFX_VER >= 35
+      /* Bspec 57016 (r77793) HSD 22021085527. Also refer to the names of
+       * values in the dri option.
+       */
+      samp.sample_d_performance = screen->driconf.sample_d_performance;
+#endif
+
 #if GFX_VER > 8
       samp.ReductionType = reduction_mode;
       samp.ReductionTypeEnable =
@@ -3427,7 +3439,8 @@ iris_create_surface(struct iris_screen *screen,
                               read_view->base_level,
                               0, read_view->base_array_layer,
                               &read_surf, &read_surf_offset_B,
-                              &read_surf_tile_x_sa, &read_surf_tile_y_sa);
+                              &read_surf_tile_x_sa, &read_surf_tile_y_sa,
+                              NULL);
       read_view->base_level = 0;
       read_view->base_array_layer = 0;
       assert(read_view->array_len == 1);
@@ -7823,6 +7836,13 @@ iris_upload_dirty_render_state(struct iris_context *ice,
             tbimr.HorizontalTileCount = DIV_ROUND_UP(cso_fb->width, tile_width);
             tbimr.TBIMRBatchSize = util_logbase2(batch_size) - 5;
             tbimr.TileBoxCheck = true;
+#if GFX_VERx10 >= 350
+            /* Bspec 56050 (r66625) HSD 14020415808*/
+            tbimr.PolyTriggerWidth =
+               screen->driconf.intel_tbimr_poly_trigger_width;
+            tbimr.PolyTriggerHeight =
+               screen->driconf.intel_tbimr_poly_trigger_height;
+#endif
          }
       }
    }

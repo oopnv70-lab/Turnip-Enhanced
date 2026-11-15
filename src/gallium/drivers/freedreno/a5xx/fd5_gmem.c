@@ -372,6 +372,89 @@ emit_binning_pass(struct fd_batch *batch) assert_dt
    OUT_RING(ring, 0x0);
 }
 
+static void
+emit_fb_read_offset(struct fd_batch *batch, struct fd_ringbuffer *ring,
+                    uint32_t x, uint32_t y, bool sysmem) assert_dt
+{
+   struct fd5_context *fd5_ctx = fd5_context(batch->ctx);
+
+   if (!(batch->gmem_reason & FD_GMEM_FB_READ))
+      return;
+
+   OUT_PKT7(ring, CP_MEM_WRITE, 4);
+   OUT_RELOC(ring, fd5_ctx->fb_read_params,
+             offsetof(struct fd5_fb_read_params, dp.frag_offset), 0, 0);
+   OUT_RING(ring, x);
+   OUT_RING(ring, y);
+
+   OUT_PKT7(ring, CP_MEM_WRITE, 3);
+   OUT_RELOC(ring, fd5_ctx->fb_read_params,
+             offsetof(struct fd5_fb_read_params, sysmem), 0, 0);
+   OUT_RING(ring, sysmem);
+
+   OUT_PKT7(ring, CP_WAIT_MEM_WRITES, 0);
+   /* the draw's indirect const load must not be prefetched past this */
+   OUT_PKT7(ring, CP_WAIT_FOR_ME, 0);
+
+   /* the shader reads these through UCHE, which the CP write does not update */
+   fd5_cache_flush(batch, ring);
+}
+
+static void
+patch_fb_read(struct fd_batch *batch, bool gmem_mode)
+{
+   const struct fd_gmem_stateobj *gmem = batch->gmem_state;
+   struct pipe_framebuffer_state *pfb = &batch->framebuffer;
+
+   for (unsigned i = 0; i < fd_patch_num_elements(&batch->fb_read_patches); i++) {
+      struct fd_cs_patch *patch = fd_patch_element(&batch->fb_read_patches, i);
+      unsigned rt = patch->val;
+      struct pipe_surface *psurf = &pfb->cbufs[rt];
+      enum pipe_format format = psurf->format;
+      uint32_t *d = patch->cs;
+
+      if (!psurf->texture)
+         continue;
+
+      d[0] = A5XX_TEX_CONST_0_FMT(fd5_pipe2tex(format)) |
+             A5XX_TEX_CONST_0_SAMPLES(fd_msaa_samples(pfb->samples)) |
+             COND(util_format_is_srgb(format), A5XX_TEX_CONST_0_SRGB);
+      d[1] = A5XX_TEX_CONST_1_WIDTH(pfb->width) |
+             A5XX_TEX_CONST_1_HEIGHT(pfb->height);
+
+      if (gmem_mode) {
+         uint64_t base = batch->ctx->screen->gmem_base + gmem->cbuf_base[rt];
+
+         /* gmem holds what the RB wrote, in its own channel order */
+         d[0] |= A5XX_TEX_CONST_0_TILE_MODE(TILE5_2) |
+                 A5XX_TEX_CONST_0_SWIZ_X(A5XX_TEX_X) |
+                 A5XX_TEX_CONST_0_SWIZ_Y(A5XX_TEX_Y) |
+                 A5XX_TEX_CONST_0_SWIZ_Z(A5XX_TEX_Z) |
+                 A5XX_TEX_CONST_0_SWIZ_W(A5XX_TEX_W);
+         d[2] = A5XX_TEX_CONST_2_TYPE(A5XX_TEX_2D) |
+                A5XX_TEX_CONST_2_PITCH(gmem->bin_w * gmem->cbuf_cpp[rt]);
+         d[3] = 0;
+         d[4] = (uint32_t)base;
+         d[5] = (uint32_t)(base >> 32) | A5XX_TEX_CONST_5_DEPTH(1);
+      } else {
+         struct fd_resource *rsc = fd_resource(psurf->texture);
+         unsigned layers = psurf->last_layer - psurf->first_layer + 1;
+         uint64_t base = fd_bo_get_iova(rsc->bo) +
+                         fd_resource_offset(rsc, psurf->level, psurf->first_layer);
+
+         d[0] |= A5XX_TEX_CONST_0_TILE_MODE(rsc->layout.tile_mode) |
+                 fd5_tex_swiz(format, PIPE_SWIZZLE_X, PIPE_SWIZZLE_Y,
+                              PIPE_SWIZZLE_Z, PIPE_SWIZZLE_W);
+         d[2] = A5XX_TEX_CONST_2_TYPE(A5XX_TEX_2D) |
+                A5XX_TEX_CONST_2_PITCH(fd_resource_pitch(rsc, psurf->level));
+         d[3] = A5XX_TEX_CONST_3_ARRAY_PITCH(rsc->layout.layer_size);
+         d[4] = (uint32_t)base;
+         d[5] = (uint32_t)(base >> 32) | A5XX_TEX_CONST_5_DEPTH(layers);
+      }
+   }
+   util_dynarray_clear(&batch->fb_read_patches);
+}
+
 /* before first tile */
 static void
 fd5_emit_tile_init(struct fd_batch *batch) assert_dt
@@ -399,13 +482,13 @@ fd5_emit_tile_init(struct fd_batch *batch) assert_dt
    OUT_PKT4(ring, REG_A5XX_VFD_POWER_CNTL, 1);
    OUT_RING(ring, ctx->screen->info->num_sp_cores - 1); /* VFD_POWER_CNTL */
 
-   /* 0x10000000 for BYPASS.. 0x7c13c080 for GMEM: */
    fd_wfi(batch, ring);
    OUT_PKT4(ring, REG_A5XX_RB_CCU_CNTL, 1);
-   OUT_RING(ring, 0x7c13c080); /* RB_CCU_CNTL */
+   OUT_RING(ring, fd5_ccu_cntl_gmem(ctx->screen));
 
    emit_zs(ring, &pfb->zsbuf, batch->gmem_state);
    emit_mrt(ring, pfb->nr_cbufs, pfb->cbufs, batch->gmem_state);
+   patch_fb_read(batch, true);
 
    /* Enable stream output for the first pass (likely the binning). */
    OUT_PKT4(ring, REG_A5XX_VPC_SO_OVERRIDE, 1);
@@ -479,6 +562,8 @@ fd5_emit_tile_prep(struct fd_batch *batch, const struct fd_tile *tile) assert_dt
 
    OUT_PKT4(ring, REG_A5XX_RB_WINDOW_OFFSET, 1);
    OUT_RING(ring, A5XX_RB_WINDOW_OFFSET_X(x1) | A5XX_RB_WINDOW_OFFSET_Y(y1));
+
+   emit_fb_read_offset(batch, ring, x1, y1, false);
 }
 
 /*
@@ -545,7 +630,7 @@ emit_mem2gmem_surf(struct fd_batch *batch, uint32_t base,
 }
 
 static void
-fd5_emit_tile_mem2gmem(struct fd_batch *batch, const struct fd_tile *tile)
+fd5_emit_tile_mem2gmem(struct fd_batch *batch, const struct fd_tile *tile) assert_dt
 {
    struct fd_ringbuffer *ring = batch->gmem;
    const struct fd_gmem_stateobj *gmem = batch->gmem_state;
@@ -584,6 +669,10 @@ fd5_emit_tile_mem2gmem(struct fd_batch *batch, const struct fd_tile *tile)
          emit_mem2gmem_surf(batch, gmem->zsbuf_base[0], &pfb->zsbuf, BLIT_ZS);
       if (rsc->stencil && fd_gmem_needs_restore(batch, tile, FD_BUFFER_STENCIL))
          emit_mem2gmem_surf(batch, gmem->zsbuf_base[1], &pfb->zsbuf, BLIT_S);
+   }
+   if (batch->gmem_reason & FD_GMEM_FB_READ) {
+      fd5_event_write(batch, ring, PC_CCU_FLUSH_COLOR_TS, true);
+      fd_wfi(batch, ring);
    }
 }
 
@@ -721,10 +810,9 @@ fd5_emit_sysmem_prep(struct fd_batch *batch) assert_dt
    OUT_PKT4(ring, REG_A5XX_VFD_POWER_CNTL, 1);
    OUT_RING(ring, ctx->screen->info->num_sp_cores - 1); /* VFD_POWER_CNTL */
 
-   /* 0x10000000 for BYPASS.. 0x7c13c080 for GMEM: */
    fd_wfi(batch, ring);
    OUT_PKT4(ring, REG_A5XX_RB_CCU_CNTL, 1);
-   OUT_RING(ring, 0x10000000); /* RB_CCU_CNTL */
+   OUT_RING(ring, fd5_ccu_cntl_bypass(ctx->screen));
 
    OUT_PKT4(ring, REG_A5XX_RB_CNTL, 1);
    OUT_RING(ring, A5XX_RB_CNTL_WIDTH(0) | A5XX_RB_CNTL_HEIGHT(0) |
@@ -749,6 +837,9 @@ fd5_emit_sysmem_prep(struct fd_batch *batch) assert_dt
 
    OUT_PKT4(ring, REG_A5XX_RB_WINDOW_OFFSET, 1);
    OUT_RING(ring, A5XX_RB_WINDOW_OFFSET_X(0) | A5XX_RB_WINDOW_OFFSET_Y(0));
+
+   emit_fb_read_offset(batch, ring, 0, 0, true);
+   patch_fb_read(batch, false);
 
    /* Enable stream output, since there's no binning pass to put it in. */
    OUT_PKT4(ring, REG_A5XX_VPC_SO_OVERRIDE, 1);

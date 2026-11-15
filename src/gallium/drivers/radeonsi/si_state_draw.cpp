@@ -39,6 +39,8 @@
 #define GFX(name) name##GFX11_7
 #elif (GFX_VER == 12)
 #define GFX(name) name##GFX12
+#elif (GFX_VER == 13)
+#define GFX(name) name##GFX13
 #else
 #error "Unknown gfx level"
 #endif
@@ -374,47 +376,52 @@ static bool si_update_shaders_shared_by_vertex_and_mesh_pipe(struct si_context *
             pipeline = (struct si_sqtt_fake_pipeline *)
                CALLOC(1, sizeof(struct si_sqtt_fake_pipeline));
 
-            pipeline->code_hash = pipeline_code_hash;
-            pipeline->bo = bo;
+            if (pipeline) {
+               pipeline->code_hash = pipeline_code_hash;
+               pipeline->bo = bo;
 
-            /* Re-upload all gfx shaders and init PM4. */
-            si_pm4_clear_state(&pipeline->pm4, sctx->screen, false);
+               /* Re-upload all gfx shaders and init PM4. */
+               si_pm4_clear_state(&pipeline->pm4, sctx->screen, false);
 
-            uint32_t offset = 0;
-            uint64_t scratch_va = sctx->scratch_buffer ? sctx->scratch_buffer->gpu_address : 0;
-            uint32_t gfx_sh_offsets[SI_NUM_SHADERS] = { 0 };
-            if (HAS_MS) {
-               if (sctx->ts_shader_state.program) {
-                  struct si_shader *shader = &sctx->ts_shader_state.program->shader;
-                  gfx_sh_offsets[MESA_SHADER_TASK] = offset;
-                  offset += upload_shader_for_sqtt(sctx, pipeline, shader, offset, scratch_va);
-               }
-
-               gfx_sh_offsets[MESA_SHADER_MESH] = offset;
-               struct si_shader *shader = sctx->ms_shader_state.current;
-               offset += upload_shader_for_sqtt(sctx, pipeline, shader, offset, scratch_va);
-
-               shader = sctx->shader.ps.current;
-               if (sctx->shader.ps.cso && shader) {
-                  gfx_sh_offsets[MESA_SHADER_FRAGMENT] = offset;
-                  offset += upload_shader_for_sqtt(sctx, pipeline, shader, offset, scratch_va);
-               }
-            } else {
-               for (int i = 0; i < SI_NUM_GRAPHICS_SHADERS; i++) {
-                  struct si_shader *shader = sctx->shaders[i].current;
-                  if (sctx->shaders[i].cso && shader) {
-                     gfx_sh_offsets[i] = offset;
+               uint32_t offset = 0;
+               uint64_t scratch_va = sctx->scratch_buffer ? sctx->scratch_buffer->gpu_address : 0;
+               uint32_t gfx_sh_offsets[SI_NUM_SHADERS] = { 0 };
+               if (HAS_MS) {
+                  if (sctx->ts_shader_state.program) {
+                     struct si_shader *shader = &sctx->ts_shader_state.program->shader;
+                     gfx_sh_offsets[MESA_SHADER_TASK] = offset;
                      offset += upload_shader_for_sqtt(sctx, pipeline, shader, offset, scratch_va);
                   }
+
+                  gfx_sh_offsets[MESA_SHADER_MESH] = offset;
+                  struct si_shader *shader = sctx->ms_shader_state.current;
+                  offset += upload_shader_for_sqtt(sctx, pipeline, shader, offset, scratch_va);
+
+                  shader = sctx->shader.ps.current;
+                  if (sctx->shader.ps.cso && shader) {
+                     gfx_sh_offsets[MESA_SHADER_FRAGMENT] = offset;
+                     offset += upload_shader_for_sqtt(sctx, pipeline, shader, offset, scratch_va);
+                  }
+               } else {
+                  for (int i = 0; i < SI_NUM_GRAPHICS_SHADERS; i++) {
+                     struct si_shader *shader = sctx->shaders[i].current;
+                     if (sctx->shaders[i].cso && shader) {
+                        gfx_sh_offsets[i] = offset;
+                        offset += upload_shader_for_sqtt(sctx, pipeline, shader, offset, scratch_va);
+                     }
+                  }
                }
+               ac_pm4_finalize(&pipeline->pm4.base);
+               sctx->screen->ws->buffer_unmap(sctx->screen->ws, bo->buf);
+
+               _mesa_hash_table_u64_insert(sctx->sqtt.data->pipeline_bos,
+                                          pipeline_code_hash, pipeline);
+
+               si_sqtt_register_pipeline(sctx, pipeline, gfx_sh_offsets);
+            } else {
+               sctx->screen->ws->buffer_unmap(sctx->screen->ws, bo->buf);
+               si_resource_reference(&bo, NULL);
             }
-            ac_pm4_finalize(&pipeline->pm4.base);
-            sctx->screen->ws->buffer_unmap(sctx->screen->ws, bo->buf);
-
-            _mesa_hash_table_u64_insert(sctx->sqtt.data->pipeline_bos,
-                                        pipeline_code_hash, pipeline);
-
-            si_sqtt_register_pipeline(sctx, pipeline, gfx_sh_offsets);
          } else {
             if (bo)
                si_resource_reference(&bo, NULL);
@@ -456,6 +463,8 @@ bool si_update_shaders_for_mesh(struct si_context *sctx, struct si_shader *old_v
       return si_update_shaders_shared_by_vertex_and_mesh_pipe<GFX11_7, TESS_OFF, GS_OFF, MS_ON, NGG_ON>(sctx, old_vs, new_vs);
    case GFX12:
       return si_update_shaders_shared_by_vertex_and_mesh_pipe<GFX12, TESS_OFF, GS_OFF, MS_ON, NGG_ON>(sctx, old_vs, new_vs);
+   case GFX13:
+      return si_update_shaders_shared_by_vertex_and_mesh_pipe<GFX13, TESS_OFF, GS_OFF, MS_ON, NGG_ON>(sctx, old_vs, new_vs);
    default:
       UNREACHABLE("invalid GFX version for mesh shaders");
    }
@@ -723,6 +732,9 @@ void si_cp_dma_prefetch(struct radeon_cmdbuf *cs,
       break;
    case GFX12:
       si_cp_dma_prefetch_inline<GFX12>(cs, address, size);
+      break;
+   case GFX13:
+      si_cp_dma_prefetch_inline<GFX13>(cs, address, size);
       break;
    default:
       break;
@@ -1130,6 +1142,9 @@ void si_emit_rasterizer_prim_state_for_mesh(struct si_context *sctx)
       break;
    case GFX12:
       si_emit_rasterizer_prim_state<GFX12, GS_OFF, NGG_ON>(sctx);
+      break;
+   case GFX13:
+      si_emit_rasterizer_prim_state<GFX13, GS_OFF, NGG_ON>(sctx);
       break;
    default:
       UNREACHABLE("invalid GFX version for mesh shaders");
@@ -1909,13 +1924,15 @@ template<amd_gfx_level GFX_VERSION>
 static void ALWAYS_INLINE si_set_vb_descriptor(struct si_vertex_elements *velems,
                                                const struct pipe_vertex_buffer *vb,
                                                unsigned index, /* vertex element index */
-                                               uint32_t *desc) /* where to upload descriptors */
+                                               uint32_t *desc, uint32_t *format_dword) /* where to upload descriptors */
 {
    struct si_resource *buf = si_resource(vb->buffer.resource);
    int64_t offset = (int64_t)((int)vb->buffer_offset) + velems->elem[index].src_offset;
 
    if (!buf || offset >= buf->b.b.width0) {
       memset(desc, 0, 16);
+      if (GFX_VERSION >= GFX13)
+         *format_dword = 0;
       return;
    }
 
@@ -1923,54 +1940,69 @@ static void ALWAYS_INLINE si_set_vb_descriptor(struct si_vertex_elements *velems
    unsigned stride = velems->elem[index].stride;
 
    int64_t num_records = (int64_t)buf->b.b.width0 - offset;
-   if (GFX_VERSION != GFX8 && stride) {
+   if (GFX_VERSION < GFX13 && GFX_VERSION != GFX8 && stride) {
       /* Round up by rounding down and adding 1 */
       num_records = (num_records - velems->elem[index].format_size) / stride + 1;
    }
    assert(num_records >= 0 && num_records <= UINT_MAX);
 
-   desc[0] = va;
-   desc[1] = S_008F04_BASE_ADDRESS_HI(va >> 32) | S_008F04_STRIDE(stride);
-   desc[2] = num_records;
-   desc[3] = velems->elem[index].rsrc_word3;
+   if (GFX_VERSION >= GFX13) {
+      desc[0] = va;
+      desc[1] = S_008F04_BASE_ADDRESS_HI(va >> 32) | S_008F04_NUM_RECORDS_1(num_records);
+      desc[2] = num_records >> 7;
+      desc[3] = S_008F0C_NUM_RECORDS_3(num_records >> 39) |
+                S_008F0C_STRIDE(stride) |
+                /* 0: oob = total_offset + payload > numRecords
+                 * 1: oob = total_offset + payload > numRecords || offset + payload > stride */
+                S_008F0C_OOB_SELECT_GFX13(0);
+      *format_dword = velems->elem[index].rsrc_word3;
+   } else {
+      desc[0] = va;
+      desc[1] = S_008F04_BASE_ADDRESS_HI(va >> 32) | S_008F04_STRIDE(stride);
+      desc[2] = num_records;
+      desc[3] = velems->elem[index].rsrc_word3;
+   }
 }
 
 #if GFX_VER == 6 /* declare this function only once because it supports all chips. */
 
 void si_set_vertex_buffer_descriptor(struct si_screen *sscreen, struct si_vertex_elements *velems,
                                      const struct pipe_vertex_buffer *vb, unsigned element_index,
-                                     uint32_t *out)
+                                     uint32_t *out, uint32_t *format_dword)
 {
    switch (sscreen->info.gfx_level) {
    case GFX6:
-      si_set_vb_descriptor<GFX6>(velems, vb, element_index, out);
+      si_set_vb_descriptor<GFX6>(velems, vb, element_index, out, NULL);
       break;
    case GFX7:
-      si_set_vb_descriptor<GFX7>(velems, vb, element_index, out);
+      si_set_vb_descriptor<GFX7>(velems, vb, element_index, out, NULL);
       break;
    case GFX8:
-      si_set_vb_descriptor<GFX8>(velems, vb, element_index, out);
+      si_set_vb_descriptor<GFX8>(velems, vb, element_index, out, NULL);
       break;
    case GFX9:
-      si_set_vb_descriptor<GFX9>(velems, vb, element_index, out);
+      si_set_vb_descriptor<GFX9>(velems, vb, element_index, out, NULL);
       break;
    case GFX10:
-      si_set_vb_descriptor<GFX10>(velems, vb, element_index, out);
+      si_set_vb_descriptor<GFX10>(velems, vb, element_index, out, NULL);
       break;
    case GFX10_3:
-      si_set_vb_descriptor<GFX10_3>(velems, vb, element_index, out);
+      si_set_vb_descriptor<GFX10_3>(velems, vb, element_index, out, NULL);
       break;
    case GFX11:
-      si_set_vb_descriptor<GFX11>(velems, vb, element_index, out);
+      si_set_vb_descriptor<GFX11>(velems, vb, element_index, out, NULL);
       break;
    case GFX11_5:
-      si_set_vb_descriptor<GFX11_5>(velems, vb, element_index, out);
+      si_set_vb_descriptor<GFX11_5>(velems, vb, element_index, out, NULL);
       break;
    case GFX11_7:
-      si_set_vb_descriptor<GFX11_7>(velems, vb, element_index, out);
+      si_set_vb_descriptor<GFX11_7>(velems, vb, element_index, out, NULL);
       break;
    case GFX12:
-      si_set_vb_descriptor<GFX12>(velems, vb, element_index, out);
+      si_set_vb_descriptor<GFX12>(velems, vb, element_index, out, NULL);
+      break;
+   case GFX13:
+      si_set_vb_descriptor<GFX13>(velems, vb, element_index, out, format_dword);
       break;
    default:
       UNREACHABLE("unhandled gfx level");
@@ -2011,8 +2043,54 @@ static unsigned si_emit_VB_descriptors(struct si_context *sctx, struct si_vertex
 {
    unsigned i = 0;
 
-   /* There will be future work here and this will be the else statement of that. */
-   {
+   if (GFX_VERSION >= GFX13) {
+      /* Layout in user SGPRs:
+       *
+       * 4 4-dword descriptors + the format dword via soffset. The format dwords are first
+       * in the descending order because we want a single packet to set both format dwords
+       * and descriptors while minimizing how many dwords we set:
+       *    user_sgpr[12] = format dword 3--------------\
+       *    user_sgpr[13] = format dword 2------------\ |
+       *    user_sgpr[14] = format dword 1----------\ | |
+       *    user_sgpr[15] = format dword 0-------\  | | |
+       *    user_sgpr[16:19] = vertex buffer 0---/  | | |
+       *    user_sgpr[20:23] = vertex buffer 1------/ | |
+       *    user_sgpr[24:27] = vertex buffer 2--------/ |
+       *    user_sgpr[28:31] = vertex buffer 3----------/
+       */
+      assert(count_in_user_sgprs <= 4);
+      unsigned gfx13_offset_sgpr = 4 - count_in_user_sgprs;
+
+      radeon_begin(&sctx->gfx_cs);
+      radeon_set_sh_reg_seq(sh_base + (SI_SGPR_VS_VB_DESCRIPTOR_FIRST + gfx13_offset_sgpr) * 4,
+                            count_in_user_sgprs * 5);
+
+      uint32_t *ib_format_dword;
+      radeon_emit_array_get_ptr(count_in_user_sgprs, &ib_format_dword);
+      /* GFX13 format dwords are written in descending order. */
+      ib_format_dword += count_in_user_sgprs - 1;
+
+      /* the first iteration always executes */
+      do {
+         if (IS_DRAW_VERTEX_STATE) {
+            unsigned velem_index = get_next_vertex_state_elem<POPCNT>(&vstate->b, partial_velem_mask);
+            uint32_t *desc = &vstate->descriptors[velem_index * 5];
+
+            radeon_emit_array(desc, 4);
+            *ib_format_dword = desc[4];
+         } else {
+            unsigned vbo_index = velems->vertex_buffer_index[i];
+            const struct pipe_vertex_buffer *vb = &sctx->vertex_buffer[vbo_index];
+            uint32_t *ib_desc;
+
+            radeon_emit_array_get_ptr(4, &ib_desc);
+
+            si_set_vb_descriptor<GFX_VERSION>(velems, vb, i, ib_desc, ib_format_dword);
+         }
+         ib_format_dword--;
+      } while (++i < count_in_user_sgprs);
+      radeon_end();
+   } else {
       /* Layout in user SGPRs:
        *
        * GFX6-8 (4-dword descriptor):
@@ -2041,7 +2119,7 @@ static unsigned si_emit_VB_descriptors(struct si_context *sctx, struct si_vertex
 
             radeon_emit_array_get_ptr(4, &ib_desc);
 
-            si_set_vb_descriptor<GFX_VERSION>(velems, vb, i, ib_desc);
+            si_set_vb_descriptor<GFX_VERSION>(velems, vb, i, ib_desc, NULL);
          }
       } while (++i < count_in_user_sgprs);
       radeon_end();
@@ -2056,8 +2134,31 @@ static void si_upload_VB_descriptors(struct si_context *sctx, struct si_vertex_s
                                      uint32_t *partial_velem_mask, struct si_vertex_elements *velems,
                                      uint32_t *ptr, unsigned i, unsigned count)
 {
-   /* There will be future work here and this will be the else statement of that. */
-   {
+   if (GFX_VERSION >= GFX13) {
+      /* The layout is the same as user SGPRs for each group of 4. */
+      do {
+         uint32_t *format_dword = ptr + 3;
+         ptr += 4;
+
+         /* For each descriptor in the group of 4. (the 1st iteration always executes) */
+         unsigned j = 0;
+         do {
+            if (IS_DRAW_VERTEX_STATE) {
+               unsigned index = get_next_vertex_state_elem<POPCNT>(&vstate->b, partial_velem_mask) * 5;
+               memcpy(ptr, &vstate->descriptors[index], 16);
+               *format_dword = vstate->descriptors[index + 4];
+            } else {
+               unsigned vbo_index = velems->vertex_buffer_index[i];
+               si_set_vb_descriptor<GFX_VERSION>(velems, &sctx->vertex_buffer[vbo_index],
+                                                 i, ptr, format_dword);
+            }
+            ptr += 4;
+            format_dword--;
+            i++;
+            j++;
+         } while (i < count && j < 4);
+      } while (IS_DRAW_VERTEX_STATE ? *partial_velem_mask : i < count);
+   } else {
       /* The first iteration always executes. */
       do {
          if (IS_DRAW_VERTEX_STATE) {
@@ -2065,7 +2166,7 @@ static void si_upload_VB_descriptors(struct si_context *sctx, struct si_vertex_s
             memcpy(ptr, &vstate->descriptors[velem_index * 4], 16);
          } else {
             unsigned vbo_index = velems->vertex_buffer_index[i];
-            si_set_vb_descriptor<GFX_VERSION>(velems, &sctx->vertex_buffer[vbo_index], i, ptr);
+            si_set_vb_descriptor<GFX_VERSION>(velems, &sctx->vertex_buffer[vbo_index], i, ptr, NULL);
          }
          ptr += 4;
          i++;

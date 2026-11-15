@@ -29,7 +29,7 @@ struct jay_fs_perprim_data {
 };
 
 bool jay_nir_lower_bool(nir_shader *nir);
-bool jay_nir_lower_fsign(nir_shader *nir, unsigned verx10);
+bool jay_nir_lower_algebraic(nir_shader *nir, unsigned verx10);
 bool jay_nir_lower_bfloat_math(nir_shader *nir);
 
 void jay_populate_prog_data(const struct intel_device_info *devinfo,
@@ -50,7 +50,10 @@ void jay_compute_liveness(jay_function *f);
 void jay_calculate_last_use(jay_function *func);
 void jay_calculate_register_demands(jay_function *f);
 
-void jay_spill(jay_function *func, enum jay_file file, unsigned limit);
+void jay_spill(jay_function *func,
+               enum jay_file file,
+               enum jay_file target,
+               unsigned limit);
 void jay_partition_grf(jay_shader *shader);
 void jay_print_partition(FILE *fp, jay_shader *s);
 void jay_register_allocate(jay_shader *s);
@@ -94,6 +97,7 @@ jay_validate_ra(jay_function *func)
 
 void jay_opt_propagate_forwards(jay_shader *s);
 void jay_opt_propagate_backwards(jay_shader *s);
+void jay_opt_bfn(jay_shader *s);
 void jay_opt_dead_code(jay_shader *s);
 void jay_opt_predicate(jay_shader *s);
 void jay_opt_postra_vectorize(jay_shader *s);
@@ -104,6 +108,8 @@ void jay_lower_flags(jay_shader *s);
 void jay_lower_pre_ra(jay_shader *s);
 void jay_lower_post_ra(jay_shader *s);
 void jay_lower_helpers(jay_shader *s);
+void jay_lower_helpers_pre_ra(jay_shader *s);
+void jay_lower_send(jay_shader *func);
 void jay_lower_spill(jay_function *func);
 void jay_lower_simd_width(jay_shader *s);
 void jay_lower_scoreboard(jay_shader *s);

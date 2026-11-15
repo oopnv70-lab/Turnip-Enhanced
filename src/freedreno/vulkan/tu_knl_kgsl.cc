@@ -301,56 +301,6 @@ kgsl_align_flag(uint64_t align)
 }
 
 static VkResult
-kgsl_bo_init_userptr(struct tu_device *dev,
-                     struct vk_object_base *base,
-                     struct tu_bo **out_bo,
-                     uint64_t size,
-                     uint64_t align,
-                     VkMemoryPropertyFlags mem_property,
-                     enum tu_bo_alloc_flags flags,
-                     void *host_ptr,
-                     const char *name)
-{
-   struct kgsl_map_user_mem req = {
-      .fd = -1,
-      .len = size,
-      .offset = 0,
-      .hostptr = reinterpret_cast<unsigned long>(host_ptr),
-      .memtype = KGSL_USER_MEM_TYPE_ADDR,
-      .flags = KGSL_MEMFLAGS_USERMEM_ADDR,
-   };
-
-   int ret = safe_ioctl(dev->physical_device->local_fd,
-                        IOCTL_KGSL_MAP_USER_MEM, &req);
-   if (ret)
-      return vk_errorf(dev, VK_ERROR_INVALID_EXTERNAL_HANDLE,
-                       "MAP_USER_MEM failed for host pointer (%s)",
-                       strerror(errno));
-
-   struct tu_bo *bo = static_cast<struct tu_bo *>(
-      calloc(1, sizeof(struct tu_bo)));
-   if (!bo)
-      return vk_error(dev, VK_ERROR_OUT_OF_HOST_MEMORY);
-
-   *bo = (struct tu_bo) {
-      .gem_handle = 0,
-      .size = size,
-      .iova = req.gpuaddr,
-      .map = host_ptr,
-      .name = name,
-      .refcnt = 1,
-      .shared_fd = -1,
-      .never_unmap = true,
-      .base = base,
-   };
-
-   TU_RMV(bo_allocate, dev, bo);
-
-   *out_bo = bo;
-   return VK_SUCCESS;
-}
-
-static VkResult
 kgsl_bo_init(struct tu_device *dev,
              struct vk_object_base *base,
              struct tu_bo **out_bo,
@@ -382,52 +332,93 @@ kgsl_bo_init(struct tu_device *dev,
       }
    }
 
-   struct kgsl_gpumem_alloc_id req = {
-      .size = size,
-   };
+   uint64_t kgsl_flags = 0;
 
    if (mem_property & VK_MEMORY_PROPERTY_HOST_CACHED_BIT) {
       if (mem_property & VK_MEMORY_PROPERTY_HOST_COHERENT_BIT) {
-         req.flags |= KGSL_MEMFLAGS_IOCOHERENT;
+         kgsl_flags |= KGSL_MEMFLAGS_IOCOHERENT;
       }
 
-      req.flags |= KGSL_CACHEMODE_WRITEBACK << KGSL_CACHEMODE_SHIFT;
+      kgsl_flags |= KGSL_CACHEMODE_WRITEBACK << KGSL_CACHEMODE_SHIFT;
    } else {
-      req.flags |= KGSL_CACHEMODE_WRITECOMBINE << KGSL_CACHEMODE_SHIFT;
+      kgsl_flags |= KGSL_CACHEMODE_WRITECOMBINE << KGSL_CACHEMODE_SHIFT;
    }
 
    if (flags & TU_BO_ALLOC_GPU_READ_ONLY)
-      req.flags |= KGSL_MEMFLAGS_GPUREADONLY;
+      kgsl_flags |= KGSL_MEMFLAGS_GPUREADONLY;
 
    if (flags & TU_BO_ALLOC_REPLAYABLE)
-      req.flags |= KGSL_MEMFLAGS_USE_CPU_MAP;
+      kgsl_flags |= KGSL_MEMFLAGS_USE_CPU_MAP;
 
-   req.flags |= kgsl_align_flag(align);
+   kgsl_flags |= kgsl_align_flag(align);
 
    /* Forcing everything in the first 4GB is overkill, but we don't have many
     * other options here since we don't control iova addresses and kgsl
     * doesn't have a flag to avoid 32B rollover.
     */
    if (flags & TU_BO_ALLOC_NO_32B_ROLLOVER)
-      req.flags |= KGSL_MEMFLAGS_FORCE_32BIT;
+      kgsl_flags |= KGSL_MEMFLAGS_FORCE_32BIT;
 
+   uint32_t id;
+   uint64_t mmapsize, gpuaddr;
    int ret;
 
-   ret = safe_ioctl(dev->physical_device->local_fd,
-                    IOCTL_KGSL_GPUMEM_ALLOC_ID, &req);
-   if (ret) {
-      return vk_errorf(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY,
-                       "GPUMEM_ALLOC_ID failed (%s)", strerror(errno));
+   if (kgsl_flags >> 32) {
+      /* kgsl_gpumem_alloc_id only has a 32-bit flags field, which would
+       * silently drop flags such as KGSL_MEMFLAGS_FORCE_32BIT.
+       */
+      struct kgsl_gpuobj_alloc req = {
+         .size = size,
+         .flags = kgsl_flags,
+      };
+
+      ret = safe_ioctl(dev->physical_device->local_fd, IOCTL_KGSL_GPUOBJ_ALLOC, &req);
+      if (ret) {
+         return vk_errorf(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY, "GPUOBJ_ALLOC failed (%s)", strerror(errno));
+      }
+
+      struct kgsl_gpuobj_info info_req = {
+         .id = req.id,
+      };
+
+      ret = safe_ioctl(dev->physical_device->local_fd, IOCTL_KGSL_GPUOBJ_INFO, &info_req);
+      if (ret) {
+         const int error = errno;
+         struct kgsl_gpumem_free_id free_req = {
+            .id = req.id,
+         };
+         safe_ioctl(dev->physical_device->local_fd, IOCTL_KGSL_GPUMEM_FREE_ID, &free_req);
+
+         return vk_errorf(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY, "GPUOBJ_INFO failed (%s)", strerror(error));
+      }
+
+      id = req.id;
+      mmapsize = req.mmapsize;
+      gpuaddr = info_req.gpuaddr;
+   } else {
+      struct kgsl_gpumem_alloc_id req = {
+         .flags = (unsigned int) kgsl_flags,
+         .size = size,
+      };
+
+      ret = safe_ioctl(dev->physical_device->local_fd, IOCTL_KGSL_GPUMEM_ALLOC_ID, &req);
+      if (ret) {
+         return vk_errorf(dev, VK_ERROR_OUT_OF_DEVICE_MEMORY, "GPUMEM_ALLOC_ID failed (%s)", strerror(errno));
+      }
+
+      id = req.id;
+      mmapsize = req.mmapsize;
+      gpuaddr = req.gpuaddr;
    }
 
-   struct tu_bo* bo = tu_device_lookup_bo(dev, req.id);
+   struct tu_bo* bo = tu_device_lookup_bo(dev, id);
    assert(bo && bo->gem_handle == 0);
 
    *bo = (struct tu_bo) {
-      .gem_handle = req.id,
-      .size = req.mmapsize,
-      .iova = req.gpuaddr,
-      .name = tu_debug_bos_add(dev, req.mmapsize, name),
+      .gem_handle = id,
+      .size = mmapsize,
+      .iova = gpuaddr,
+      .name = tu_debug_bos_add(dev, mmapsize, name),
       .refcnt = 1,
       .shared_fd = -1,
       .base = base,
@@ -566,27 +557,10 @@ kgsl_bo_allow_dump(struct tu_device *dev, struct tu_bo *bo)
 static void
 kgsl_bo_finish(struct tu_device *dev, struct tu_bo *bo)
 {
+   assert(bo->gem_handle);
+
    if (!p_atomic_dec_zero(&bo->refcnt))
       return;
-
-   if (bo->gem_handle == 0) {
-      /* Host-pointer import via MAP_USER_MEM: there is no gem handle and
-       * no debug/accounting entry, and the mapping itself is owned by the
-       * application, so only release the KGSL-side mapping.
-       */
-      TU_RMV(bo_destroy, dev, bo);
-
-      struct kgsl_sharedmem_free req = {
-         .gpuaddr = bo->iova,
-      };
-
-      /* Tell sparse array that entry is free */
-      memset(bo, 0, sizeof(*bo));
-
-      safe_ioctl(dev->physical_device->local_fd, IOCTL_KGSL_SHAREDMEM_FREE,
-                 &req);
-      return;
-   }
 
    tu_debug_bos_del(dev, bo);
    tu_dump_bo_del(dev, bo);
@@ -1914,6 +1888,95 @@ fail_submit:
    return result;
 }
 
+static int
+kgsl_read_calibrated_ts(int fd, uint64_t *ts)
+{
+   uint32_t source = KGSL_CALIBRATED_TIME_DOMAIN_DEVICE;
+   struct kgsl_read_calibrated_timestamps req = {
+      .sources = (uint64_t) (uintptr_t) &source,
+      .ts = (uint64_t) (uintptr_t) ts,
+      .count = 1,
+   };
+
+   if (safe_ioctl(fd, IOCTL_KGSL_READ_CALIBRATED_TIMESTAMPS, &req))
+      return -errno;
+
+   return 0;
+}
+
+static bool
+kgsl_time_domain(VkTimeDomainKHR domain, uint32_t *source)
+{
+   switch (domain) {
+   case VK_TIME_DOMAIN_DEVICE_KHR:
+      *source = KGSL_CALIBRATED_TIME_DOMAIN_DEVICE;
+      return true;
+   case VK_TIME_DOMAIN_CLOCK_MONOTONIC_KHR:
+      *source = KGSL_CALIBRATED_TIME_DOMAIN_MONOTONIC;
+      return true;
+   case VK_TIME_DOMAIN_CLOCK_MONOTONIC_RAW_KHR:
+      *source = KGSL_CALIBRATED_TIME_DOMAIN_MONOTONIC_RAW;
+      return true;
+   default:
+      return false;
+   }
+}
+
+/* KGSL samples all of the requested domains together in the kernel. */
+static VkResult
+kgsl_device_get_calibrated_timestamps(struct tu_device *dev,
+                                      uint32_t count,
+                                      const VkCalibratedTimestampInfoKHR *infos,
+                                      uint64_t *ts,
+                                      uint64_t *max_deviation)
+{
+   uint32_t sources[KGSL_CALIBRATED_TIME_DOMAIN_MAX];
+   uint64_t source_ts[KGSL_CALIBRATED_TIME_DOMAIN_MAX];
+   uint32_t source_idx[KGSL_CALIBRATED_TIME_DOMAIN_MAX];
+   uint32_t source_count = 0;
+
+   for (uint32_t i = 0; i < KGSL_CALIBRATED_TIME_DOMAIN_MAX; i++)
+      source_idx[i] = UINT32_MAX;
+
+   /* Sample each domain only once even if it is requested multiple times. */
+   for (uint32_t i = 0; i < count; i++) {
+      uint32_t source;
+      if (!kgsl_time_domain(infos[i].timeDomain, &source))
+         return VK_ERROR_FEATURE_NOT_PRESENT;
+
+      if (source_idx[source] == UINT32_MAX) {
+         source_idx[source] = source_count;
+         sources[source_count++] = source;
+      }
+   }
+
+   struct kgsl_read_calibrated_timestamps req = {
+      .sources = (uint64_t) (uintptr_t) sources,
+      .ts = (uint64_t) (uintptr_t) source_ts,
+      .count = source_count,
+   };
+
+   /* This may fail after system suspend until the GPU is woken up and KGSL reseeds the CX timer.
+    * It's rather awkward since Vulkan doesn't expect the call to fail for such reason,
+    * so while misleading, we return the only allowed error.
+    */
+   if (safe_ioctl(dev->fd, IOCTL_KGSL_READ_CALIBRATED_TIMESTAMPS, &req))
+      return VK_ERROR_OUT_OF_HOST_MEMORY;
+
+   for (uint32_t i = 0; i < count; i++) {
+      uint32_t source;
+      kgsl_time_domain(infos[i].timeDomain, &source);
+      ts[i] = source_ts[source_idx[source]];
+   }
+
+   /* See vk_time_max_deviation(). */
+   uint64_t max_clock_period =
+      source_idx[KGSL_CALIBRATED_TIME_DOMAIN_DEVICE] != UINT32_MAX ? dev->vk.device_time_domain_period : 1;
+   *max_deviation = req.deviation + max_clock_period;
+
+   return VK_SUCCESS;
+}
+
 static VkResult
 kgsl_device_init(struct tu_device *dev)
 {
@@ -1930,8 +1993,7 @@ kgsl_device_finish(struct tu_device *dev)
 static int
 kgsl_device_get_gpu_timestamp(struct tu_device *dev, uint64_t *ts)
 {
-   UNREACHABLE("");
-   return 0;
+   return kgsl_read_calibrated_ts(dev->fd, ts);
 }
 
 static int
@@ -1979,13 +2041,13 @@ static const struct tu_knl kgsl_knl_funcs = {
       .device_init = kgsl_device_init,
       .device_finish = kgsl_device_finish,
       .device_get_gpu_timestamp = kgsl_device_get_gpu_timestamp,
+      .device_get_calibrated_timestamps = kgsl_device_get_calibrated_timestamps,
       .device_get_suspend_count = kgsl_device_get_suspend_count,
       .device_check_status = kgsl_device_check_status,
       .submitqueue_new = kgsl_submitqueue_new,
       .submitqueue_close = kgsl_submitqueue_close,
       .bo_init = kgsl_bo_init,
       .bo_init_dmabuf = kgsl_bo_init_dmabuf,
-      .bo_init_userptr = kgsl_bo_init_userptr,
       .bo_export_dmabuf = kgsl_bo_export_dmabuf,
       .bo_map = kgsl_bo_map,
       .bo_allow_dump = kgsl_bo_allow_dump,
@@ -2092,6 +2154,9 @@ tu_knl_kgsl_load(struct tu_instance *instance, int fd)
 
    device->has_raytracing = tu_kgsl_get_raytracing(fd);
 
+   uint64_t ts;
+   device->has_gpu_timestamp = kgsl_read_calibrated_ts(fd, &ts) == 0;
+
    device->submitqueue_priority_count = ARRAY_SIZE(kgsl_context_priorities);
 
    device->timeline_type = vk_sync_timeline_get_type(&vk_kgsl_sync_type);
@@ -2164,7 +2229,7 @@ tu_knl_kgsl_load(struct tu_instance *instance, int fd)
    /* kgsl unfortunately hardcodes some settings for certain GPUs and doesn't
     * expose them in the uAPI so hardcode them here to match.
     */
-   if (device->dev_id.gpu_id == 663 || device->dev_id.gpu_id == 680) {
+   if (device->dev_id.gpu_id == 635 || device->dev_id.gpu_id == 663 || device->dev_id.gpu_id == 680) {
       device->ubwc_config.macrotile_mode = FDL_MACROTILE_8_CHANNEL;
    }
    if (device->dev_id.gpu_id == 663) {

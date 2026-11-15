@@ -2772,7 +2772,7 @@ dri2_initialize_wayland_drm(_EGLDisplay *disp)
       goto cleanup;
    };
 
-   if (loader_get_user_preferred_device(render_dev, preferred_dev))
+   if (loader_get_user_preferred_device(render_dev, &preferred_dev))
    {
       bool found_matching_tranche = false;
 
@@ -3387,6 +3387,7 @@ void
 dri2_teardown_wayland(struct dri2_egl_display *dri2_dpy)
 {
    dri2_wl_formats_fini(&dri2_dpy->formats);
+   dmabuf_feedback_fini(&dri2_dpy->dmabuf_feedback);
    if (dri2_dpy->wp_presentation)
       wp_presentation_destroy(dri2_dpy->wp_presentation);
 #ifdef HAVE_BIND_WL_DISPLAY

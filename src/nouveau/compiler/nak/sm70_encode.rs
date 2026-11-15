@@ -931,6 +931,9 @@ impl SM70Op for OpFMnMx {
     }
 
     fn encode(&self, e: &mut SM70Encoder<'_>) {
+        assert!(e.sm >= 80 || !self.nan);
+        assert!(e.sm >= 86 || !self.xorsign);
+
         if self.is_uniform() {
             assert!(e.sm >= 120);
             e.encode_ualu(
@@ -952,11 +955,12 @@ impl SM70Op for OpFMnMx {
             e.set_pred_src(87..90, 90, &self.min);
         }
 
-        e.set_bit(80, self.ftz);
-
         // .IS_A (SM90+): Dst predicate will be set if the first source is picked.
         e.set_bit(65, false);
         // e.set_pred_dst(66..69, &Dst::None); // dst0
+        e.set_bit(80, self.ftz);
+        e.set_bit(81, self.nan);
+        e.set_bit(82, self.xorsign);
     }
 }
 
@@ -1495,6 +1499,7 @@ impl SM70Op for OpHMnMx2 {
 
     fn encode(&self, e: &mut SM70Encoder<'_>) {
         assert!(e.sm >= 80);
+        assert!(e.sm >= 86 || !self.xorsign);
 
         e.encode_fp16v2_alu(
             0x040,
@@ -1507,8 +1512,8 @@ impl SM70Op for OpHMnMx2 {
         // This differentiate between integer and fp16 output
         e.set_bit(78, false); // .F32 (SM86)
         e.set_bit(80, self.ftz);
-        e.set_bit(81, false); // .NAN
-        e.set_bit(82, false); // .XORSIGN
+        e.set_bit(81, self.nan);
+        e.set_bit(82, self.xorsign);
         e.set_bit(85, false); // .BF16_V2
 
         e.set_pred_src(87..90, 90, &self.min);
@@ -1786,10 +1791,13 @@ impl SM70Op for OpIMad64 {
         let [src0, src1, src2] = &mut self.srcs;
         swap_srcs_if_not_reg(src0, src1, gpr);
         b.copy_alu_src_if_not_reg(src0, gpr, SrcType::ALU);
-        b.copy_alu_src_if_both_not_reg(src1, src2, gpr, SrcType::ALU);
+        // We prefer copying src1, because src2 is 64 bit and more expensive to
+        // copy, so src1 needs to be the second source passed in.
+        b.copy_alu_src_if_both_not_reg(src2, src1, gpr, SrcType::ALU);
     }
 
     fn encode(&self, e: &mut SM70Encoder<'_>) {
+        assert!(!self.srcs[2].is_immediate());
         if self.is_uniform() {
             e.encode_ualu(
                 0x0a5,

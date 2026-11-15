@@ -666,7 +666,7 @@ radv_GetPhysicalDeviceVideoCapabilitiesKHR(VkPhysicalDevice physicalDevice, cons
          intra_refresh_caps->nonRectangularIntraRefreshRegions = false;
       }
 
-      if (qp_map_caps) {
+      if (qp_map_caps && pdev->vk.supported_extensions.KHR_video_encode_quantization_map) {
          qp_map_caps->maxQuantizationMapExtent.width = pCapabilities->maxCodedExtent.width / ecap->qp_map_texel_size;
          qp_map_caps->maxQuantizationMapExtent.height = pCapabilities->maxCodedExtent.height / ecap->qp_map_texel_size;
       }
@@ -679,7 +679,7 @@ radv_GetPhysicalDeviceVideoCapabilitiesKHR(VkPhysicalDevice physicalDevice, cons
          rgb_caps->xChromaOffsets = VK_VIDEO_ENCODE_RGB_CHROMA_OFFSET_COSITED_EVEN_BIT_VALVE;
          rgb_caps->yChromaOffsets = VK_VIDEO_ENCODE_RGB_CHROMA_OFFSET_MIDPOINT_BIT_VALVE |
                                     VK_VIDEO_ENCODE_RGB_CHROMA_OFFSET_COSITED_EVEN_BIT_VALVE;
-         if (pdev->info.vcn_ip_version >= VCN_5_0_0) {
+         if (ecap->efc_range_bug) {
             /* FW bug: only BT709/Limited and BT2020/Full works, so we only expose BT709/Limited */
             rgb_caps->rgbModels = VK_VIDEO_ENCODE_RGB_MODEL_CONVERSION_YCBCR_709_BIT_VALVE;
             rgb_caps->rgbRanges = VK_VIDEO_ENCODE_RGB_RANGE_COMPRESSION_NARROW_RANGE_BIT_VALVE;
@@ -1083,24 +1083,13 @@ radv_GetVideoSessionMemoryRequirementsKHR(VkDevice _device, VkVideoSessionKHR vi
    VK_FROM_HANDLE(radv_video_session, vid, videoSession);
    const struct radv_physical_device *pdev = radv_device_physical(device);
 
-   uint32_t memory_type_bits = (1u << pdev->memory_properties.memoryTypeCount) - 1;
-   uint32_t memory_type_bits_visible = 0;
-
-   /* These buffers are only mapped once during session reset, for performance reasons
-    * we should prefer visible VRAM when available.
-    */
-   for (unsigned i = 0; i < pdev->memory_properties.memoryTypeCount; i++) {
-      VkMemoryPropertyFlags flags = pdev->memory_properties.memoryTypes[i].propertyFlags;
-
-      if ((flags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) &&
-          (flags & (VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT)))
-         memory_type_bits_visible |= (1 << i);
-   }
+   uint32_t memory_type_bits = device->memory_types_allowed;
 
    if (vid->encode) {
       return radv_video_get_encode_session_memory_requirements(device, vid, pMemoryRequirementsCount,
                                                                pMemoryRequirements);
    }
+
    VK_OUTARRAY_MAKE_TYPED(VkVideoSessionMemoryRequirementsKHR, out, pMemoryRequirements, pMemoryRequirementsCount);
 
    if (vid->dec->session_size) {
@@ -1109,8 +1098,20 @@ radv_GetVideoSessionMemoryRequirementsKHR(VkDevice _device, VkVideoSessionKHR vi
          m->memoryBindIndex = RADV_BIND_SESSION_CTX;
          m->memoryRequirements.size = vid->dec->session_size;
          m->memoryRequirements.alignment = 0;
-         m->memoryRequirements.memoryTypeBits =
-            vid->dec->init_session_buf ? memory_type_bits_visible : memory_type_bits;
+         m->memoryRequirements.memoryTypeBits = memory_type_bits;
+
+         if (vid->dec->init_session_buf) {
+            /* These buffers are only mapped once during session reset, for performance reasons
+             * we should prefer visible VRAM when available.
+             */
+            for (unsigned i = 0; i < pdev->memory_properties.memoryTypeCount; i++) {
+               VkMemoryPropertyFlags flags = pdev->memory_properties.memoryTypes[i].propertyFlags;
+
+               if (!(flags & VK_MEMORY_PROPERTY_HOST_VISIBLE_BIT) ||
+                   !(flags & (VK_MEMORY_PROPERTY_DEVICE_LOCAL_BIT | VK_MEMORY_PROPERTY_HOST_CACHED_BIT)))
+                  m->memoryRequirements.memoryTypeBits &= ~(1u << i);
+            }
+         }
       }
    }
 
@@ -1118,8 +1119,8 @@ radv_GetVideoSessionMemoryRequirementsKHR(VkDevice _device, VkVideoSessionKHR vi
       vk_outarray_append_typed(VkVideoSessionMemoryRequirementsKHR, &out, m)
       {
          m->memoryBindIndex = RADV_BIND_INTRA_ONLY;
-         m->memoryRequirements.size = vid->intra_only_dpb->size,
-         m->memoryRequirements.alignment = vid->intra_only_dpb->alignment,
+         m->memoryRequirements.size = vid->intra_only_dpb->size;
+         m->memoryRequirements.alignment = vid->intra_only_dpb->alignment;
          m->memoryRequirements.memoryTypeBits = memory_type_bits;
       }
    }

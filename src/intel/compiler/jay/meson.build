@@ -57,8 +57,10 @@ libintel_compiler_jay_files = files(
   'jay_lower_post_sched.c',
   'jay_lower_pre_ra.c',
   'jay_lower_scoreboard.c',
+  'jay_lower_send.c',
   'jay_lower_spill.c',
   'jay_nir.c',
+  'jay_opt_bfn.c',
   'jay_opt_dead_code.c',
   'jay_opt_postra_vectorize.c',
   'jay_opt_predicate.c',
@@ -85,7 +87,7 @@ libintel_compiler_jay = static_library(
   include_directories : [inc_include, inc_src, inc_intel],
   c_args : [no_override_init_args, soong_compat_c_args, '-Wno-c23-extensions', '-Wno-array-bounds'],
   gnu_symbol_visibility : 'hidden',
-  dependencies : [idep_nir_headers, idep_jay_opcodes_h, idep_jay_builder_opcodes_h, idep_jay_extra_info_h, idep_mesautil, idep_intel_dev, idep_intel_compiler_gen, idep_mda],
+  dependencies : [idep_nir_headers, idep_jay_opcodes_h, idep_jay_builder_opcodes_h, idep_jay_extra_info_h, idep_mesautil, idep_intel_dev, idep_intel_compiler_brw, idep_intel_compiler_gen, idep_mda],
   build_by_default : false,
 )
 

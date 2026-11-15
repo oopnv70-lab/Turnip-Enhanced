@@ -27,12 +27,50 @@ lower_non_tied_default(jay_builder *b, jay_inst *I, jay_def default_)
       jay_remove_instruction(I);
    } else {
       jay_foreach_comp(I->dst, c) {
-         jay_def dst = jay_bare_reg(I->dst.file, I->dst.reg + c);
-         jay_def src = jay_bare_reg(default_.file, default_.reg + c);
+         jay_def dst = jay_bare_reg(I->dst.file, I->dst.reg + c * 2);
+         jay_def src = jay_bare_reg(default_.file, default_.reg + c * 2);
 
          jay_inst *mov = jay_MOV(b, dst, src);
          mov->type = I->type;
          jay_add_predicate(b, mov, not_pred, jay_null());
+      }
+   }
+}
+
+/*
+ * Lower 4B<-->2B copies. To pack the register file, RA sometimes inserts 32-bit
+ * copies involving 16-bit strided sources like "mov.u32 r4 <32-bit>, r50
+ * <16-bit>". This cannot be implemented in a single hardware instruction, so we
+ * split into two 16-bit copies.
+ */
+static void
+split(jay_builder *b, jay_inst *I)
+{
+   if (I->dst.file == GPR && I->src[0].file == GPR) {
+      enum jay_stride min_stride = jay_def_stride(b->shader, I->dst);
+
+      jay_foreach_src(I, s) {
+         if (I->src[s].file == GPR) {
+            min_stride = MIN2(min_stride, jay_def_stride(b->shader, I->src[s]));
+         }
+      }
+
+      if (jay_stride_to_bits(min_stride) < jay_type_size_bits(I->type)) {
+         assert(min_stride == JAY_STRIDE_2 && I->type == JAY_TYPE_U32);
+
+         jay_inst *instrs[2] = { I, jay_clone_inst(b, I, I->num_srcs) };
+         jay_builder_insert(b, instrs[1]);
+
+         for (unsigned i = 0; i < 2; ++i) {
+            instrs[i]->type = JAY_TYPE_U16;
+            instrs[i]->dst.size = JAY_SIZE_16;
+            instrs[i]->dst.reg += i;
+
+            jay_foreach_src(I, s) {
+               instrs[i]->src[s].size = JAY_SIZE_16;
+               instrs[i]->src[s].reg += i;
+            }
+         }
       }
    }
 }
@@ -54,29 +92,7 @@ lower(jay_builder *b, jay_inst *I)
       if (jay_regs_equal(I->dst, I->src[0]) && !I->predication)
          return true;
 
-      if (I->dst.file == GPR && I->src[0].file == GPR) {
-         jay_def dst = I->dst, src = I->src[0];
-         enum jay_stride dst_stride = jay_def_stride(b->shader, dst);
-         enum jay_stride src_stride = jay_def_stride(b->shader, src);
-
-         /* Lower 4B<-->2B copies. To pack the register file, RA
-          * sometimes inserts 32-bit copies involving 16-bit strided sources like
-          * "mov.u32 r4 <32-bit>, r50 <16-bit>". This cannot be implemented in a
-          * single hardware instruction, so we split into two 16-bit copies.
-          */
-         enum jay_stride min_stride = MIN2(dst_stride, src_stride);
-         unsigned stride_sz = jay_stride_to_bits(min_stride);
-         unsigned type_sz = jay_type_size_bits(I->type);
-
-         if (stride_sz < type_sz) {
-            assert(stride_sz == 16 && type_sz == 32 && "no other case hit");
-            I->type = JAY_TYPE_U16;
-
-            dst.hi = true;
-            src.hi = true;
-            jay_MOV(b, dst, src)->type = JAY_TYPE_U16;
-         }
-      }
+      split(b, I);
 
       /* Do moves on the float point to promote accumulator usage */
       if (I->type == JAY_TYPE_U32 && !I->conditional_mod &&
@@ -101,6 +117,12 @@ lower(jay_builder *b, jay_inst *I)
    case JAY_OPCODE_LOOP_ONCE_HALT:
       jay_HALT(b, false);
       jay_WHILE(b);
+      return true;
+
+   case JAY_OPCODE_SWAP:
+      split(b, jay_XOR(b, I->type, I->src[0], I->src[0], I->src[1]));
+      split(b, jay_XOR(b, I->type, I->src[1], I->src[0], I->src[1]));
+      split(b, jay_XOR(b, I->type, I->src[0], I->src[0], I->src[1]));
       return true;
 
    case JAY_OPCODE_SEL_ACTIVE: {
@@ -178,10 +200,10 @@ pass(jay_function *func)
             if (!jay_is_null(I->cond_flag) && I->uniform) {
                BITSET_CLEAR(inactive_are_0, I->cond_flag.reg);
             }
+         }
 
-            if (lower(&b, I)) {
-               jay_remove_instruction(I);
-            }
+         if (lower(&b, I)) {
+            jay_remove_instruction(I);
          }
       }
    }

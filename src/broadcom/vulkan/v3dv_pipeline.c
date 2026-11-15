@@ -1320,8 +1320,8 @@ pipeline_populate_v3d_fs_key(struct v3d_fs_key *key,
              ms_info->rasterization_samples == VK_SAMPLE_COUNT_4_BIT);
       key->msaa = ms_info->rasterization_samples > VK_SAMPLE_COUNT_1_BIT;
 
-      if (key->msaa)
-         key->sample_alpha_to_coverage = ms_info->alpha_to_coverage_enable;
+      /* Unlike GL, Vulkan allows alphaToCoverage without MSAA */
+      key->sample_alpha_to_coverage = ms_info->alpha_to_coverage_enable;
 
       key->sample_alpha_to_one = ms_info->alpha_to_one_enable;
    }
@@ -1565,7 +1565,11 @@ upload_assembly(struct v3dv_pipeline *pipeline)
          total_size += variant->qpu_insts_size;
    }
 
-   struct v3dv_bo *bo = v3dv_bo_alloc(pipeline->device, total_size,
+   /* Shaders for each pipeline stage are packed with no gap, so pad after
+    * the last one.
+    */
+   struct v3dv_bo *bo = v3dv_bo_alloc(pipeline->device,
+                                      total_size + V3D_QPU_PREFETCH_PAD,
                                       "pipeline shader assembly", true,
                                       VK_OBJECT_TYPE_PIPELINE,
                                       vk_object_to_u64_handle(&pipeline->base));
@@ -2110,8 +2114,8 @@ pipeline_populate_graphics_key(struct v3dv_pipeline *pipeline,
              ms_info->rasterization_samples == VK_SAMPLE_COUNT_4_BIT);
       key->msaa = ms_info->rasterization_samples > VK_SAMPLE_COUNT_1_BIT;
 
-      if (key->msaa)
-         key->sample_alpha_to_coverage = ms_info->alpha_to_coverage_enable;
+      /* Unlike GL, Vulkan allows alphaToCoverage without MSAA */
+      key->sample_alpha_to_coverage = ms_info->alpha_to_coverage_enable;
 
       key->sample_alpha_to_one = ms_info->alpha_to_one_enable;
    }

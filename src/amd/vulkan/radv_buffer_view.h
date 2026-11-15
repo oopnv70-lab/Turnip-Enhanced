@@ -18,12 +18,12 @@ struct radv_device;
 struct radv_buffer_view {
    struct vk_buffer_view vk;
    struct radeon_winsys_bo *bo;
-   uint32_t state[4];
+   uint32_t state[8];
 };
 
 VK_DEFINE_NONDISP_HANDLE_CASTS(radv_buffer_view, vk.base, VkBufferView, VK_OBJECT_TYPE_BUFFER_VIEW)
 
-void radv_make_texel_buffer_descriptor(struct radv_device *device, uint64_t va, VkFormat vk_format, unsigned range,
+void radv_make_texel_buffer_descriptor(struct radv_device *device, uint64_t va, VkFormat vk_format, uint64_t range,
                                        uint32_t *state);
 
 #endif /* RADV_BUFFER_VIEW_H */

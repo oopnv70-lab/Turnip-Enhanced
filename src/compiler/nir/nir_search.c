@@ -408,7 +408,9 @@ construct_value(nir_builder *build,
       unsigned dst_bit_size = replace_bitsize(value, search_bitsize, state);
       nir_op op = nir_op_for_search_op(expr->opcode, dst_bit_size);
 
-      if (nir_op_infos[op].output_size != 0)
+      if (expr->replace_num_components)
+         num_components = expr->replace_num_components;
+      else if (nir_op_infos[op].output_size != 0)
          num_components = nir_op_infos[op].output_size;
 
       nir_alu_instr *alu = nir_alu_instr_create(build->shader, op);
@@ -763,19 +765,20 @@ nir_algebraic_automaton(nir_instr *instr, struct util_dynarray *states,
       nir_op op = alu->op;
       uint16_t search_op = nir_search_op_for_nir_op(op);
       const struct per_op_table *tbl = &pass_op_table[search_op];
-      if (tbl->num_filtered_states == 0)
+      if (tbl->table == NULL)
          return false;
 
-      /* Calculate the index into the transition table. Note the index
-       * calculated must match the iteration order of Python's
+      /* Calculate a mixed-radix index using each source's filtered dimension.
+       * The index must match the iteration order of Python's
        * itertools.product(), which was used to emit the transition
        * table.
        */
       unsigned index = 0;
       for (unsigned i = 0; i < nir_op_infos[op].num_inputs; i++) {
-         index *= tbl->num_filtered_states;
-         if (tbl->filter)
-            index += tbl->filter[*util_dynarray_element(states, uint16_t,
+         const struct per_src_filter *src = &tbl->srcs[i];
+         index *= src->num_filtered_states;
+         if (src->filter)
+            index += src->filter[*util_dynarray_element(states, uint16_t,
                                                         alu->src[i].src.ssa->index)];
       }
 

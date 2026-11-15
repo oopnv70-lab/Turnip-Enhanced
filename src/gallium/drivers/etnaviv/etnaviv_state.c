@@ -455,7 +455,10 @@ etna_set_framebuffer_state(struct pipe_context *pctx,
 
       assert(res->layout &ETNA_LAYOUT_BIT_TILE); /* Cannot render to linear surfaces */
 
-      uint32_t depth_format = translate_depth_format(surf->format);
+      const struct eil_format *entry = eil_get_format_entry(surf->format);
+      assert(entry->has_zs);
+      uint8_t depth_format = entry->zs;
+
       unsigned depth_bits =
          depth_format == VIVS_PE_DEPTH_CONFIG_DEPTH_FORMAT_D16 ? 16 : 24;
       bool depth_supertiled = (res->layout & ETNA_LAYOUT_BIT_SUPER) != 0;
@@ -772,7 +775,8 @@ etna_vertex_elements_state_create(struct pipe_context *pctx,
       unsigned buffer_idx = elements[idx].vertex_buffer_index;
       unsigned element_size = util_format_get_blocksize(elements[idx].src_format);
       unsigned end_offset = elements[idx].src_offset + element_size;
-      uint32_t format_type, normalize;
+      uint8_t format_type;
+      uint32_t normalize;
 
       if (nonconsecutive)
          start_offset = elements[idx].src_offset;

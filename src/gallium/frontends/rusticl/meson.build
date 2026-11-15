@@ -121,6 +121,7 @@ rusticl_bindgen_args = [
 
 rusticl_bindgen_c_args = [
   '-fno-builtin-malloc',
+  bindgen_c_args,
 ]
 
 cl_c_args = [
@@ -237,6 +238,8 @@ rusticl_libc_bindings_rs = rust.bindgen(
     '--allowlist-function',     'dlsym',
     '--allowlist-function',     'free',
     '--allowlist-function',     'malloc',
+    '--allowlist-var',          'SEEK_END',
+    '--allowlist-function',     'lseek',
   ]
 )
 

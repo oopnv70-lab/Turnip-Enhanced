@@ -394,6 +394,7 @@ v3d_init_screen_caps(struct v3d_screen *screen)
         caps->robust_buffer_access_behavior = true;
 
         caps->sample_shading = true;
+        caps->fs_sample_variables = true;
 
         /* FIXME: same settings as v3dv, maybe put them in a common place. */
         if (screen->devinfo.ver >= 71) {
@@ -500,6 +501,19 @@ v3d_screen_is_format_supported(struct pipe_screen *pscreen,
             format != PIPE_FORMAT_NONE &&
             !v3d_rt_format_supported(&screen->devinfo, format)) {
                 return false;
+        }
+
+        /* RGB32 has no TMU format of its own: it is only supported for
+         * texture buffers, sampled through an R32 view (see
+         * v3d_nir_lower_txf_buffer_rgb32.c).  It is not one of the image
+         * unit formats, so any shader image usage is rejected too.
+         */
+        if (v3d_format_is_rgb32(format)) {
+                if ((usage & PIPE_BIND_SAMPLER_VIEW) && target != PIPE_BUFFER)
+                        return false;
+
+                if (usage & PIPE_BIND_SHADER_IMAGE)
+                        return false;
         }
 
         if ((usage & PIPE_BIND_SAMPLER_VIEW) &&

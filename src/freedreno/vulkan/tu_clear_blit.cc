@@ -178,7 +178,7 @@ tu_pack_float32_for_d32(float val)
 
 /* r2d_ = BLIT_OP_SCALE operations */
 
-static enum a6xx_2d_ifmt
+static enum adreno_2d_ifmt
 format_to_ifmt(enum pipe_format format)
 {
    if (format == PIPE_FORMAT_Z24_UNORM_S8_UINT ||
@@ -460,7 +460,7 @@ r2d_clear_value(struct tu_cmd_buffer *cmd,
    default:
       assert(!util_format_is_depth_or_stencil(format));
       const struct util_format_description *desc = util_format_description(format);
-      enum a6xx_2d_ifmt ifmt = format_to_ifmt(format);
+      enum adreno_2d_ifmt ifmt = format_to_ifmt(format);
 
       assert(desc->layout == UTIL_FORMAT_LAYOUT_PLAIN ||
              format == PIPE_FORMAT_R11G11B10_FLOAT);
@@ -725,7 +725,7 @@ r2d_setup_common(struct tu_cmd_buffer *cmd,
 
    enum a6xx_format fmt = blit_base_format<CHIP>(dst_format, ubwc, false);
    fixup_dst_format(src_format, &dst_format, &fmt);
-   enum a6xx_2d_ifmt ifmt = format_to_ifmt(dst_format);
+   enum adreno_2d_ifmt ifmt = format_to_ifmt(dst_format);
 
    enum a6xx_a2d_pixel_op pixel_op = PIXEL_OP_DISABLED;
    enum adreno_rb_blend_factor color_src_factor = FACTOR_ZERO;
@@ -785,7 +785,7 @@ r2d_setup_common(struct tu_cmd_buffer *cmd,
    if (fmt == FMT6_10_10_10_2_UNORM_DEST)
       fmt = FMT6_16_16_16_16_FLOAT;
 
-   enum a6xx_sp_a2d_output_ifmt_type output_ifmt_type;
+   enum adreno_2d_output_ifmt_type output_ifmt_type;
    if (util_format_is_pure_uint(dst_format))
       output_ifmt_type = OUTPUT_IFMT_2D_UINT;
    else if (util_format_is_pure_sint(dst_format))
@@ -1304,10 +1304,13 @@ r3d_common(struct tu_cmd_buffer *cmd, struct tu_cs *cs, enum r3d_type type,
          .cs_bindless = CHIP == A6XX ? 0x1f : 0xff,
          .gfx_bindless = CHIP == A6XX ? 0x1f : 0xff,));
 
-   with_crb (cs, 2 * 5 + 2 * 12) {
+   with_crb (cs, 2 * 5 + 2 * 12 + 2 * 3) {
       tu6_emit_xs_config<CHIP>(crb, { .vs = vs, .fs = fs });
       struct tu_pvtmem_config pvtmem = {};
       tu6_emit_xs<CHIP>(crb, cs->device, MESA_SHADER_VERTEX, vs, &pvtmem, vs_iova);
+      tu6_emit_xs<CHIP>(crb, cs->device, MESA_SHADER_TESS_CTRL, NULL, &pvtmem, 0);
+      tu6_emit_xs<CHIP>(crb, cs->device, MESA_SHADER_TESS_EVAL, NULL, &pvtmem, 0);
+      tu6_emit_xs<CHIP>(crb, cs->device, MESA_SHADER_GEOMETRY, NULL, &pvtmem, 0);
       tu6_emit_xs<CHIP>(crb, cs->device, MESA_SHADER_FRAGMENT, fs, &pvtmem, fs_iova);
    }
 
@@ -2650,14 +2653,12 @@ tu6_clear_lrz_partial(struct tu_cmd_buffer *cmd,
          if (first >= lrz->lrz_layer_size)
             continue;
 
-         const uint32_t clear_block_bytes = 2048;
-         /* LRZ FC layer stride alignment is 64 bytes, or 512 bits. Each bit
-          * is a FC block that covers 128 bytes.
-          */
-         assert(first % (512 * 128) == 0);
-         /* LRZ layer stride is a multiple of 2048 bytes on all gens currently.
-          */
-         assert(lrz->lrz_layer_size % clear_block_bytes == 0);
+         if constexpr (CHIP < A8XX) {
+            /* LRZ FC layer stride alignment is 64 bytes, or 512 bits. Each bit
+             * is a FC block that covers 128 bytes.
+             */
+            assert(first % (512 * 128) == 0);
+         }
 
          /* The LRZ FC layout is based on the LRZ layout. Each bit in the LRZ
           * fast-clear RAM corresponds to 1 fast-clear block of 128 bytes, or
@@ -2668,9 +2669,9 @@ tu6_clear_lrz_partial(struct tu_cmd_buffer *cmd,
                          i * lrz->lrz_buffer_size +
                          static_cast<uint64_t>(layer) * lrz->lrz_layer_size +
                          static_cast<uint64_t>(first);
-         uint64_t size_remaining =
-            lrz->lrz_layer_size - first;
-         assert(size_remaining % clear_block_bytes == 0);
+         uint32_t size_remaining = lrz->lrz_layer_size - first;
+         /* Pick power-of-two divisor of size_remaining. */
+         const uint32_t clear_block_bytes = MIN2(1u << (ffs(size_remaining) - 1), 0x4000u * 2);
 
          if (!any) {
             ops->setup(cmd, cs, PIPE_FORMAT_Z16_UNORM, PIPE_FORMAT_Z16_UNORM,
@@ -6630,6 +6631,12 @@ store_3d_blit(struct tu_cmd_buffer *cmd,
    const struct fdl6_view *src_fdl_view = tu_image_view_fdl_view(src_iview, separate_stencil);
    const struct fdl6_view *dst_fdl_view = tu_image_view_fdl_view(dst_iview, separate_stencil);
 
+   /* sync GMEM writes with CACHE. */
+   tu_emit_event_write<CHIP>(cmd, cs, FD_CACHE_INVALIDATE);
+
+   /* Wait for CACHE_INVALIDATE to land. Without a WFI, CP_REG_TO_SCRATCH may read stale values. */
+   tu_cs_emit_wfi(cs);
+
    /* RB_CNTL/GRAS_SC_BIN_CNTL are normally only set once and they
     * aren't set until we know whether we're HW binning or not, and we want to
     * avoid a dependence on that here to be able to store attachments before
@@ -6650,12 +6657,6 @@ store_3d_blit(struct tu_cmd_buffer *cmd,
    r3d_dst<CHIP>(cs, dst_fdl_view, layer, src_format);
 
    r3d_src_gmem<CHIP>(cmd, cs, src_fdl_view, src_format, dst_format, gmem_offset, cpp);
-
-   /* sync GMEM writes with CACHE. */
-   tu_emit_event_write<CHIP>(cmd, cs, FD_CACHE_INVALIDATE);
-
-   /* Wait for CACHE_INVALIDATE to land */
-   tu_cs_emit_wfi(cs);
 
    r3d_run(cmd, cs);
 

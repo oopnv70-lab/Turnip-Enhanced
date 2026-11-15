@@ -604,6 +604,7 @@ struct ntd_context {
 
    BITSET_WORD *float_types;
    BITSET_WORD *int_types;
+   bool disable_math_refactoring;
 
    const struct dxil_logger *logger;
 };
@@ -1886,7 +1887,7 @@ get_module_flags(struct ntd_context *ctx)
    if (ctx->mod.feats.extended_command_info)
       flags |= (1ull << 38);
 
-   if (ctx->opts->disable_math_refactoring)
+   if (ctx->opts->disable_math_refactoring || ctx->disable_math_refactoring)
       flags |= (1 << 1);
 
    /* Work around https://github.com/microsoft/DirectXShaderCompiler/issues/4616
@@ -2270,7 +2271,8 @@ emit_binop(struct ntd_context *ctx, nir_alu_instr *alu,
    bool is_float_op = nir_alu_type_get_base_type(nir_op_infos[alu->op].output_type) == nir_type_float;
 
    enum dxil_opt_flags flags = 0;
-   if (is_float_op && !nir_alu_instr_is_exact(alu))
+   if (is_float_op && !nir_alu_instr_is_exact(alu) &&
+       !nir_alu_instr_is_signed_zero_inf_nan_preserve(alu))
       flags |= DXIL_UNSAFE_ALGEBRA;
 
    const struct dxil_value *v = dxil_emit_binop(&ctx->mod, opcode, op0, op1, flags);
@@ -5725,10 +5727,19 @@ emit_undefined(struct ntd_context *ctx, nir_undef_instr *undef)
 static bool emit_instr(struct ntd_context *ctx, struct nir_instr* instr)
 {
    switch (instr->type) {
-   case nir_instr_type_alu:
-      return emit_alu(ctx, nir_instr_as_alu(instr));
-   case nir_instr_type_intrinsic:
-      return emit_intrinsic(ctx, nir_instr_as_intrinsic(instr));
+   case nir_instr_type_alu: {
+      nir_alu_instr *alu = nir_instr_as_alu(instr);
+      if ((alu->fp_math_ctrl & nir_fp_preserve_sz_inf_nan) == nir_fp_preserve_sz_inf_nan)
+         ctx->disable_math_refactoring = true;
+      return emit_alu(ctx, alu);
+   }
+   case nir_instr_type_intrinsic: {
+      nir_intrinsic_instr *intr = nir_instr_as_intrinsic(instr);
+      if (nir_intrinsic_has_fp_math_ctrl(intr) &&
+          (nir_intrinsic_fp_math_ctrl(intr) & nir_fp_preserve_sz_inf_nan) == nir_fp_preserve_sz_inf_nan)
+         ctx->disable_math_refactoring = true;
+      return emit_intrinsic(ctx, intr);
+   }
    case nir_instr_type_load_const:
       return emit_load_const(ctx, nir_instr_as_load_const(instr));
    case nir_instr_type_deref:
@@ -6695,6 +6706,9 @@ nir_to_dxil(struct nir_shader *s, const struct nir_to_dxil_options *opts,
       return false;
 
    NIR_PASS(_, s, dxil_nir_lower_sysval_to_load_input, ctx->system_value);
+   /* Must run after optimize_nir(), whose nir_opt_peephole_select folds if/phi into bcsel */
+   if (opts->lower_fp32_compare_select)
+      NIR_PASS(_, s, dxil_nir_lower_fp32_compare_select);
    NIR_PASS(_, s, nir_opt_dce);
 
    /* This needs to be after any copy prop is done to prevent these movs from being erased */

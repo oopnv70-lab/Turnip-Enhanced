@@ -179,13 +179,16 @@ cmd_buffer_render_pass_emit_load(struct v3dv_cmd_buffer *cmd_buffer,
       load.input_image_format = iview->format->planes[0].rt_type;
 
       /* If we create an image view with only the stencil format, we
-       * re-interpret the format as RGBA8_UINT, as it is want we want in
+       * re-interpret the format as RGBA8_UINT, as it is what we want in
        * general (see CreateImageView).
        *
-       * However, when we are loading/storing tiles from the ZSTENCIL tile
-       * buffer, we need to use the underlying DS format.
+       * However, when we are loading/storing tiles from the depth/stencil
+       * tile buffers, we need to use the underlying DS format. The aspect
+       * mask of a depth/stencil attachment view must be ignored, so a
+       * stencil-only view of a combined depth/stencil image can also be used
+       * here as the depth attachment.
        */
-      if (buffer == ZSTENCIL &&
+      if ((buffer == Z || buffer == STENCIL || buffer == ZSTENCIL) &&
           iview->format->planes[0].rt_type == V3D_OUTPUT_IMAGE_FORMAT_RGBA8UI) {
          assert(image->format->planes[image_plane].rt_type == V3D_OUTPUT_IMAGE_FORMAT_D24S8);
          load.input_image_format = image->format->planes[image_plane].rt_type;
@@ -381,13 +384,16 @@ cmd_buffer_render_pass_emit_store(struct v3dv_cmd_buffer *cmd_buffer,
       store.output_image_format = iview->format->planes[0].rt_type;
 
       /* If we create an image view with only the stencil format, we
-       * re-interpret the format as RGBA8_UINT, as it is want we want in
+       * re-interpret the format as RGBA8_UINT, as it is what we want in
        * general (see CreateImageView).
        *
-       * However, when we are loading/storing tiles from the ZSTENCIL tile
-       * buffer, we need to use the underlying DS format.
+       * However, when we are loading/storing tiles from the depth/stencil
+       * tile buffers, we need to use the underlying DS format. The aspect
+       * mask of a depth/stencil attachment view must be ignored, so a
+       * stencil-only view of a combined depth/stencil image can also be used
+       * here as the depth attachment.
        */
-      if (buffer == ZSTENCIL &&
+      if ((buffer == Z || buffer == STENCIL || buffer == ZSTENCIL) &&
           iview->format->planes[0].rt_type == V3D_OUTPUT_IMAGE_FORMAT_RGBA8UI) {
          assert(image->format->planes[image_plane].rt_type == V3D_OUTPUT_IMAGE_FORMAT_D24S8);
          store.output_image_format = image->format->planes[image_plane].rt_type;
@@ -994,7 +1000,15 @@ v3dX(cmd_buffer_emit_render_pass_rcl)(struct v3dv_cmd_buffer *cmd_buffer)
           */
          assert(iview->plane_count == 1);
          assert(iview->format->plane_count == 1);
-         config.internal_depth_type = iview->planes[0].internal_type;
+
+         /* The aspect mask of a depth/stencil attachment view must be
+          * ignored, so this can be a stencil-only view of a D24S8 image,
+          * which we re-interpret as RGBA8UI (see CreateImageView) and so has
+          * a color internal type. Use the view's depth/stencil format
+          * instead.
+          */
+         config.internal_depth_type =
+            v3dX(get_internal_depth_type)(iview->vk.format);
 
          set_rcl_early_z_config(job,
                                 &config.early_z_disable,
@@ -1850,6 +1864,19 @@ cmd_buffer_decide_global_ez_enable(struct v3dv_cmd_buffer *cmd_buffer)
       job->ez_state = V3D_EZ_DISABLED;
       return false;
    }
+
+#if V3D_VERSION == 42
+   /* Using early-Z in a render pass split in a suspend/resume chain can
+    * violate the early-Z constraints on V3D 4.2, so disable it for the whole
+    * chain.
+    */
+   if (state->suspending || state->resuming) {
+      perf_debug("Suspending or resuming a render pass disables early-Z tests.\n");
+      job->first_ez_state = V3D_EZ_DISABLED;
+      job->ez_state = V3D_EZ_DISABLED;
+      return false;
+   }
+#endif
 
    /* GFXH-1918: the early-z buffer may load incorrect depth values if the
     * frame has odd width or height, or if the buffer is 16-bit and

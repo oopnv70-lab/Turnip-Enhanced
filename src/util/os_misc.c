@@ -56,10 +56,12 @@
 
 
 #if DETECT_OS_ANDROID
-#  define LOG_TAG "MESA"
 #  include <unistd.h>
-#  include <android/log.h>
 #  include <sys/system_properties.h>
+#  ifdef HAVE_ANDROID_PLATFORM
+#    define LOG_TAG "MESA"
+#    include <android/log.h>
+#  endif
 #elif DETECT_OS_LINUX || DETECT_OS_CYGWIN || DETECT_OS_SOLARIS || DETECT_OS_HURD || DETECT_OS_MANAGARM
 #  include <unistd.h>
 #elif DETECT_OS_OPENBSD || DETECT_OS_FREEBSD
@@ -135,7 +137,8 @@ os_log_message(const char *message)
    fflush(stdout);
    fputs(message, fout);
    fflush(fout);
-#  if DETECT_OS_ANDROID
+#  if DETECT_OS_ANDROID && defined(HAVE_ANDROID_PLATFORM)
+   /* also log to logcat when building for Android platform build */
    __android_log_write(ANDROID_LOG_ERROR, LOG_TAG, message);
 #  endif
 #endif
@@ -480,7 +483,14 @@ os_get_available_system_memory(uint64_t *size)
       return false;
    }
 
-   *size = ((uint64_t)vm_stats.free_count + (uint64_t)vm_stats.inactive_count) * PAGE_SIZE;
+   /* host_statistics64() counts are in kernel pages. Query their size
+    * since PAGE_SIZE may differ (e.g. under Rosetta). */
+   vm_size_t page_size;
+   if (host_page_size(mach_host_self(), &page_size) != KERN_SUCCESS)
+      return false;
+
+   *size = ((uint64_t)vm_stats.free_count +
+            (uint64_t)vm_stats.inactive_count) * page_size;
    return true;
 #else
    return false;

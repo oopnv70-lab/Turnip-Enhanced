@@ -3205,7 +3205,10 @@ print_dedup_entry(const char *place, struct set *set, dedup_entry *entry)
  * over the full struct are correct and efficient.
  * If this assert fires, audit all nir_scalar assignments below.
  */
-static_assert(sizeof(dedup_entry) == (sizeof(void *) == 8 ? 48 : 28),
+static_assert(sizeof(dedup_entry) ==
+              ALIGN_POT(sizeof(nir_block *) + 2 * sizeof(nir_scalar) +
+                        sizeof(unsigned) + sizeof(bool),
+                        alignof(dedup_entry)),
               "dedup_entry layout changed");
 
 static uint32_t
@@ -5843,6 +5846,7 @@ default_varying_estimate_instr_cost(nir_instr *instr)
       case nir_op_umul_16x16:
       case nir_op_imul_2x32_64:
       case nir_op_umul_2x32_64:
+      case nir_op_umad_2x32_64:
          return dst_bit_size <= 16 ? 1 : 4 * num_dst_dwords;
 
       /* High bits of 64-bit multiplications. */

@@ -500,11 +500,11 @@ copy_image(struct anv_cmd_buffer *cmd_buffer,
                                            dst_base_layer, layer_count);
 
          for (unsigned i = 0; i < layer_count; i++) {
-            blorp_copy(batch, &src_surf, src_level, src_base_layer + i,
-                       &dst_surf, dst_level, dst_base_layer + i,
-                       srcOffset.x, srcOffset.y,
-                       dstOffset.x, dstOffset.y,
-                       extent.width, extent.height);
+            blorp_blit_copy(batch, &src_surf, src_level, src_base_layer + i,
+                            &dst_surf, dst_level, dst_base_layer + i,
+                            srcOffset.x, srcOffset.y,
+                            dstOffset.x, dstOffset.y,
+                            extent.width, extent.height);
          }
       }
    } else {
@@ -533,11 +533,11 @@ copy_image(struct anv_cmd_buffer *cmd_buffer,
                                         dst_base_layer, layer_count);
 
       for (unsigned i = 0; i < layer_count; i++) {
-         blorp_copy(batch, &src_surf, src_level, src_base_layer + i,
-                    &dst_surf, dst_level, dst_base_layer + i,
-                    srcOffset.x, srcOffset.y,
-                    dstOffset.x, dstOffset.y,
-                    extent.width, extent.height);
+         blorp_blit_copy(batch, &src_surf, src_level, src_base_layer + i,
+                         &dst_surf, dst_level, dst_base_layer + i,
+                         srcOffset.x, srcOffset.y,
+                         dstOffset.x, dstOffset.y,
+                         extent.width, extent.height);
       }
    }
 
@@ -885,10 +885,11 @@ copy_buffer_to_image(struct anv_cmd_buffer *cmd_buffer,
    }
 
    for (unsigned z = 0; z < extent.depth; z++) {
-      blorp_copy(batch, &src->surf, src->level, src->offset.z,
-                 &dst->surf, dst->level, dst->offset.z,
-                 src->offset.x, src->offset.y, dst->offset.x, dst->offset.y,
-                 extent.width, extent.height);
+      blorp_blit_copy(batch, &src->surf, src->level, src->offset.z,
+                      &dst->surf, dst->level, dst->offset.z,
+                      src->offset.x, src->offset.y,
+                      dst->offset.x, dst->offset.y,
+                      extent.width, extent.height);
 
       image.offset.z++;
       memory.surf.addr.offset += mem_layout->image_stride_B;
@@ -1224,6 +1225,24 @@ void anv_CmdBlitImage2(
 /* This is maximum possible width/height our HW can handle */
 #define MAX_SURFACE_DIM (1ull << 14)
 
+static bool
+blorp_copy_must_use_blit(const struct anv_device *device,
+                         const struct anv_address src_addr,
+                         const struct anv_address dst_addr)
+{
+   /* The blorp_mem_copy shaders write memory through pointers, protected
+    * memory won't work.
+    */
+   if (src_addr.protected || dst_addr.protected)
+      return true;
+
+   /* Support for newer platforms will be added soon. */
+   if (device->info->verx10 < 200)
+      return true;
+
+   return false;
+}
+
 static void
 copy_memory(struct anv_device *device,
             struct blorp_batch *batch,
@@ -1246,7 +1265,10 @@ copy_memory(struct anv_device *device,
                                                   dst_addr.protected)),
    };
 
-   blorp_buffer_copy(batch, src, dst, size);
+   if (blorp_copy_must_use_blit(device, src_addr, dst_addr))
+      blorp_blit_buffer_copy(batch, src, dst, size);
+   else
+      blorp_mem_copy(batch, src, dst, size);
 }
 
 void
@@ -1307,6 +1329,7 @@ anv_cmd_buffer_update_addr(
     VkDeviceSize                                dataSize,
     const void*                                 pData)
 {
+   struct anv_device *device = cmd_buffer->device;
    struct blorp_batch batch;
    anv_blorp_batch_init(cmd_buffer, &batch,
                         &(struct anv_blorp_batch_params) {
@@ -1361,7 +1384,10 @@ anv_cmd_buffer_update_addr(
                              address.protected)),
       };
 
-      blorp_buffer_copy(&batch, src, dst, copy_size);
+      if (blorp_copy_must_use_blit(device, address, tmp_addr))
+         blorp_blit_buffer_copy(&batch, src, dst, copy_size);
+      else
+         blorp_mem_copy(&batch, src, dst, copy_size);
 
       dataSize -= copy_size;
       address = anv_address_add(address, copy_size);

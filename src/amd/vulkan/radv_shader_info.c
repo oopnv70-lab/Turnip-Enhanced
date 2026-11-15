@@ -426,7 +426,7 @@ assign_outinfo_params(struct radv_vs_output_info *outinfo, uint64_t mask, unsign
 }
 
 static void
-radv_get_output_masks(const struct nir_shader *nir, const struct radv_graphics_state_key *gfx_state,
+radv_get_output_masks(const struct nir_shader *nir, const struct radv_shader_stage_key *stage_key,
                       uint64_t *per_vtx_mask, uint64_t *per_prim_mask)
 {
    /* These are not compiled into neither output param nor position exports. */
@@ -437,16 +437,16 @@ radv_get_output_masks(const struct nir_shader *nir, const struct radv_graphics_s
    *per_vtx_mask = nir->info.outputs_written & ~nir->info.per_primitive_outputs & ~special_mask;
 
    /* Mesh multiview is only lowered in ac_nir_lower_ngg, so we have to fake it here. */
-   if (nir->info.stage == MESA_SHADER_MESH && gfx_state->has_multiview_view_index)
+   if (nir->info.stage == MESA_SHADER_MESH && stage_key->multiview)
       *per_prim_mask |= VARYING_BIT_LAYER;
 }
 
 static void
-radv_set_vs_output_param(enum amd_gfx_level gfx_level, const struct nir_shader *nir,
-                         const struct radv_graphics_state_key *gfx_state, struct radv_shader_info *info,
-                         bool export_prim_id, bool export_clip_cull_dists)
+radv_set_vs_output_param(enum amd_gfx_level gfx_level, struct radv_shader_stage *stage,
+                         const struct radv_graphics_state_key *gfx_state, bool export_prim_id,
+                         bool export_clip_cull_dists)
 {
-   struct radv_vs_output_info *outinfo = &info->outinfo;
+   struct radv_vs_output_info *outinfo = &stage->info.outinfo;
    uint64_t per_vtx_mask, per_prim_mask;
 
    memset(outinfo->vs_output_param_offset, AC_EXP_PARAM_UNDEFINED, sizeof(outinfo->vs_output_param_offset));
@@ -454,16 +454,16 @@ radv_set_vs_output_param(enum amd_gfx_level gfx_level, const struct nir_shader *
    if (gfx_state->rs.rasterizer_discard)
       return;
 
-   radv_get_output_masks(nir, gfx_state, &per_vtx_mask, &per_prim_mask);
+   radv_get_output_masks(stage->nir, &stage->key, &per_vtx_mask, &per_prim_mask);
 
    /* Implicit primitive ID for VS and TES is added by ac_nir_lower_legacy_vs / ac_nir_lower_ngg,
     * it can be configured as either a per-vertex or per-primitive output depending on the GPU.
     */
    const bool implicit_prim_id_per_prim =
-      export_prim_id && info->is_ngg && gfx_level >= GFX10_3 && nir->info.stage == MESA_SHADER_VERTEX;
+      export_prim_id && stage->info.is_ngg && gfx_level >= GFX10_3 && stage->nir->info.stage == MESA_SHADER_VERTEX;
    const bool implicit_prim_id_per_vertex =
       export_prim_id && !implicit_prim_id_per_prim &&
-      (nir->info.stage == MESA_SHADER_VERTEX || nir->info.stage == MESA_SHADER_TESS_EVAL);
+      (stage->nir->info.stage == MESA_SHADER_VERTEX || stage->nir->info.stage == MESA_SHADER_TESS_EVAL);
 
    unsigned total_param_exports = 0;
 
@@ -479,9 +479,9 @@ radv_set_vs_output_param(enum amd_gfx_level gfx_level, const struct nir_shader *
    }
 
    if (export_clip_cull_dists) {
-      if (nir->info.outputs_written & VARYING_BIT_CLIP_DIST0)
+      if (stage->nir->info.outputs_written & VARYING_BIT_CLIP_DIST0)
          outinfo->vs_output_param_offset[VARYING_SLOT_CLIP_DIST0] = total_param_exports++;
-      if (nir->info.outputs_written & VARYING_BIT_CLIP_DIST1)
+      if (stage->nir->info.outputs_written & VARYING_BIT_CLIP_DIST1)
          outinfo->vs_output_param_offset[VARYING_SLOT_CLIP_DIST1] = total_param_exports++;
    }
 
@@ -817,6 +817,26 @@ calc_mesh_workgroup_size(const struct radv_compiler_info *compiler_info, const n
    }
 }
 
+bool
+radv_force_disable_vrs(enum amd_gfx_level gfx_level, const struct nir_shader *nir,
+                       const struct radv_graphics_state_key *gfx_state)
+{
+   /* Disable VRS in these cases:
+    *
+    * - if the fragment shader reads gl_SampleMaskIn or writes gl_SampleMask because we expose
+    *   fragmentShadingRateWithShaderSampleMask = VK_FALSE because the SAMPLE_COVERAGE PS VGPR only contains a
+    *   16-bit sample coverage mask, which isn't enough for 8xMSAA and 2x2 coarse shading (we no longer support
+    *   8xMSAA, so we could allow gl_SampleMaskIn with VRS now).
+    * - on GFX10.3, if the fragment shader requests a fragment interlock execution mode even if the ordered
+    *   section was optimized out, to consistently implement fragmentShadingRateWithFragmentShaderInterlock =
+    *   VK_FALSE.
+    */
+   return gfx_state->ms.sample_shading_enable || nir->info.fs.uses_sample_shading ||
+          nir->info.fs.sample_mask_in_declared || nir->info.fs.sample_mask_out_declared ||
+          (gfx_level == GFX10_3 && (nir->info.fs.sample_interlock_ordered || nir->info.fs.sample_interlock_unordered ||
+                                    nir->info.fs.pixel_interlock_ordered || nir->info.fs.pixel_interlock_unordered));
+}
+
 static void
 gather_shader_info_fs(enum amd_gfx_level gfx_level, const nir_shader *nir,
                       const struct radv_graphics_state_key *gfx_state, struct radv_shader_info *info)
@@ -830,7 +850,6 @@ gather_shader_info_fs(enum amd_gfx_level gfx_level, const nir_shader *nir,
        nir->info.fs.stencil_back_layout == FRAG_STENCIL_LAYOUT_NONE);
    info->ps.post_depth_coverage = nir->info.fs.post_depth_coverage;
    info->ps.depth_layout = nir->info.fs.depth_layout;
-   info->ps.uses_sample_shading = nir->info.fs.uses_sample_shading;
    info->ps.writes_memory = nir->info.writes_memory;
    info->ps.uses_fbfetch_output = nir->info.fs.uses_fbfetch_output;
    info->ps.has_pcoord = nir->info.inputs_read & VARYING_BIT_PNTC;
@@ -870,6 +889,29 @@ gather_shader_info_fs(enum amd_gfx_level gfx_level, const nir_shader *nir,
    info->ps.pops_is_per_sample =
       info->ps.pops && (nir->info.fs.sample_interlock_ordered || nir->info.fs.sample_interlock_unordered);
 
+   /* From the Vulkan 1.1.129 spec, 26.7. Sample Shading:
+    *
+    * "Sample shading is enabled for a graphics pipeline:
+    *
+    * - If the interface of the fragment shader entry point of the
+    *   graphics pipeline includes an input variable decorated
+    *   with SampleId or SamplePosition. In this case
+    *   minSampleShadingFactor takes the value 1.0.
+    * - Else if the sampleShadingEnable member of the
+    *   VkPipelineMultisampleStateCreateInfo structure specified
+    *   when creating the graphics pipeline is set to VK_TRUE. In
+    *   this case minSampleShadingFactor takes the value of
+    *   VkPipelineMultisampleStateCreateInfo::minSampleShading.
+    *
+    * Otherwise, sample shading is considered disabled."
+    */
+   info->ps.uses_sample_shading = nir->info.fs.uses_sample_shading || gfx_state->ms.sample_shading_enable;
+   if (nir->info.fs.uses_sample_shading) {
+      info->ps.min_sample_shading = 1.0f;
+   } else if (gfx_state->ms.sample_shading_enable) {
+      info->ps.min_sample_shading = gfx_state->ms.min_sample_shading;
+   }
+
    info->ps.spi_ps_input_ena = radv_compute_spi_ps_input(gfx_level, gfx_state, info);
    info->ps.spi_ps_input_addr = info->ps.spi_ps_input_ena;
    if (gfx_level >= GFX12) {
@@ -907,21 +949,7 @@ gather_shader_info_fs(enum amd_gfx_level gfx_level, const nir_shader *nir,
    }
 
    if (gfx_level >= GFX10_3) {
-      /* Disable VRS in these cases:
-       *
-       * - if the fragment shader reads gl_SampleMaskIn or writes gl_SampleMask because we expose
-       *   fragmentShadingRateWithShaderSampleMask = VK_FALSE because the SAMPLE_COVERAGE PS VGPR only contains a
-       *   16-bit sample coverage mask, which isn't enough for 8xMSAA and 2x2 coarse shading (we no longer support
-       *   8xMSAA, so we could allow gl_SampleMaskIn with VRS now).
-       * - on GFX10.3, if the fragment shader requests a fragment interlock execution mode even if the ordered
-       *   section was optimized out, to consistently implement fragmentShadingRateWithFragmentShaderInterlock =
-       *   VK_FALSE.
-       */
-      info->ps.force_disable_vrs =
-         gfx_state->ms.sample_shading_enable || info->ps.uses_sample_shading || nir->info.fs.sample_mask_in_declared ||
-         nir->info.fs.sample_mask_out_declared ||
-         (gfx_level == GFX10_3 && (nir->info.fs.sample_interlock_ordered || nir->info.fs.sample_interlock_unordered ||
-                                   nir->info.fs.pixel_interlock_ordered || nir->info.fs.pixel_interlock_unordered));
+      info->ps.force_disable_vrs = radv_force_disable_vrs(gfx_level, nir, gfx_state);
 
       /* Do not enable if the PS uses gl_FragCoord because it breaks postprocessing in some games. */
       info->ps.disallow_force_vrs_per_vertex =
@@ -1092,10 +1120,10 @@ radv_nir_shader_info_pass(const struct radv_compiler_info *compiler_info, const 
       struct radv_vs_output_info *outinfo = &info->outinfo;
       uint64_t per_vtx_mask, per_prim_mask;
 
-      radv_get_output_masks(nir, gfx_state, &per_vtx_mask, &per_prim_mask);
+      radv_get_output_masks(nir, stage_key, &per_vtx_mask, &per_prim_mask);
 
       /* Mesh multiview is only lowered in ac_nir_lower_ngg, so we have to fake it here. */
-      if (nir->info.stage == MESA_SHADER_MESH && gfx_state->has_multiview_view_index)
+      if (nir->info.stage == MESA_SHADER_MESH && stage_key->multiview)
          info->uses_view_index = true;
 
       /* Per vertex outputs. */
@@ -1451,8 +1479,7 @@ radv_link_shaders_info(const struct radv_compiler_info *compiler_info, struct ra
       const bool ps_prim_id_in = !fs_stage || fs_stage->info.ps.prim_id_input;
       const bool ps_clip_dists_in = !fs_stage || !!fs_stage->info.ps.input_clips_culls_mask;
 
-      radv_set_vs_output_param(compiler_info->ac->gfx_level, prerast_stage->nir, gfx_state, &prerast_stage->info,
-                               ps_prim_id_in, ps_clip_dists_in);
+      radv_set_vs_output_param(compiler_info->ac->gfx_level, prerast_stage, gfx_state, ps_prim_id_in, ps_clip_dists_in);
    }
 
    if (prerast_stage && !ms_stage) {

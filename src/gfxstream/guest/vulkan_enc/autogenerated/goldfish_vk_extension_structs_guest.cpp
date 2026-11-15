@@ -47,8 +47,16 @@ size_t goldfish_vk_extension_struct_size(VkStructureType rootType, const void* s
         case VK_STRUCTURE_TYPE_SHADER_MODULE_CREATE_INFO: {
             return sizeof(VkShaderModuleCreateInfo);
         }
+        case VK_STRUCTURE_TYPE_COMPUTE_PIPELINE_CREATE_INFO: {
+            return sizeof(VkComputePipelineCreateInfo);
+        }
         case VK_STRUCTURE_TYPE_PIPELINE_LAYOUT_CREATE_INFO: {
             return sizeof(VkPipelineLayoutCreateInfo);
+        }
+#endif
+#ifdef VK_GRAPHICS_VERSION_1_0
+        case VK_STRUCTURE_TYPE_GRAPHICS_PIPELINE_CREATE_INFO: {
+            return sizeof(VkGraphicsPipelineCreateInfo);
         }
 #endif
 #ifdef VK_BASE_VERSION_1_1
@@ -505,6 +513,11 @@ size_t goldfish_vk_extension_struct_size(VkStructureType rootType, const void* s
             return sizeof(VkPhysicalDevicePipelineExecutablePropertiesFeaturesKHR);
         }
 #endif
+#ifdef VK_KHR_pipeline_library
+        case VK_STRUCTURE_TYPE_PIPELINE_LIBRARY_CREATE_INFO_KHR: {
+            return sizeof(VkPipelineLibraryCreateInfoKHR);
+        }
+#endif
 #ifdef VK_KHR_maintenance7
         case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MAINTENANCE_7_FEATURES_KHR: {
             return sizeof(VkPhysicalDeviceMaintenance7FeaturesKHR);
@@ -802,6 +815,9 @@ size_t goldfish_vk_extension_struct_size(VkStructureType rootType, const void* s
         }
         case VK_STRUCTURE_TYPE_GUEST_CAPABILITIES_GOOGLE: {
             return sizeof(VkGuestCapabilitiesGOOGLE);
+        }
+        case VK_STRUCTURE_TYPE_HOST_POINTER_RESOLVE_GOOGLE: {
+            return sizeof(VkHostPointerResolveGOOGLE);
         }
 #endif
 #ifdef VK_EXT_border_color_swizzle

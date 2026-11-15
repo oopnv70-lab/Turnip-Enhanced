@@ -149,6 +149,7 @@ static void pvr_physical_device_get_supported_extensions(
       .KHR_index_type_uint8 = true,
       .KHR_internally_synchronized_queues = true,
       .KHR_line_rasterization = true,
+      .KHR_load_store_op_none = true,
       .KHR_maintenance1 = true,
       .KHR_maintenance2 = true,
       .KHR_maintenance3 = true,
@@ -191,6 +192,7 @@ static void pvr_physical_device_get_supported_extensions(
       .KHR_uniform_buffer_standard_layout = true,
       .KHR_vertex_attribute_divisor = true,
       .KHR_workgroup_memory_explicit_layout = true,
+      .KHR_zero_initialize_workgroup_memory = true,
       .EXT_border_color_swizzle = true,
       .EXT_color_write_enable = true,
       .EXT_custom_border_color = true,
@@ -212,6 +214,7 @@ static void pvr_physical_device_get_supported_extensions(
       .EXT_index_type_uint8 = true,
       .EXT_inline_uniform_block = true,
       .EXT_line_rasterization = true,
+      .EXT_load_store_op_none = true,
       .EXT_map_memory_placed = true,
       .EXT_non_seamless_cube_map = true,
       .EXT_physical_device_drm = true,
@@ -551,7 +554,7 @@ static void pvr_physical_device_get_supported_features(
       .workgroupMemoryExplicitLayout16BitAccess = false,
 
       /* Vulkan 1.3 / VK_KHR_zero_initialize_workgroup_memory */
-      .shaderZeroInitializeWorkgroupMemory = false,
+      .shaderZeroInitializeWorkgroupMemory = true,
 
       /* VK_EXT_border_color_swizzle */
       .borderColorSwizzle = true,
@@ -619,9 +622,9 @@ static bool pvr_physical_device_get_properties(
    UNUSED const uint32_t sub_pixel_precision =
       PVR_HAS_FEATURE(dev_info, simple_internal_parameter_format) ? 4U : 8U;
 
-   UNUSED const uint32_t max_render_size = rogue_get_render_size_max(dev_info);
+   const uint32_t max_render_size = rogue_get_render_size_max(dev_info);
 
-   UNUSED const uint32_t max_sample_bits = ((max_multisample << 1) - 1);
+   const uint32_t max_sample_bits = ((max_multisample << 1) - 1);
 
    UNUSED const uint32_t max_user_vertex_components =
       pvr_get_max_user_vertex_output_components(dev_info);
@@ -670,10 +673,10 @@ static bool pvr_physical_device_get_properties(
       .deviceType = VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU,
       /* deviceName and pipelineCacheUUID are filled below .*/
 
-      .maxImageDimension1D = 4096U,
-      .maxImageDimension2D = 4096U,
+      .maxImageDimension1D = max_render_size,
+      .maxImageDimension2D = max_render_size,
       .maxImageDimension3D = pvr_get_texture_extent_max_z(dev_info),
-      .maxImageDimensionCube = 4096U,
+      .maxImageDimensionCube = max_render_size,
       .maxImageArrayLayers = rogue_get_render_size_max_z(dev_info),
       .maxTexelBufferElements = 64U * 1024U,
       .maxUniformBufferRange = 16U * 1024U,
@@ -757,10 +760,10 @@ static bool pvr_physical_device_get_properties(
       .maxSamplerAnisotropy = 16.0f, /* Requires samplerAnisotropy */
       .maxViewports = 1U, /* Requires multiViewport */
 
-      .maxViewportDimensions[0] = 4096U,
-      .maxViewportDimensions[1] = 4096U,
-      .viewportBoundsRange[0] = -8192.0f,
-      .viewportBoundsRange[1] = 8191.0f,
+      .maxViewportDimensions[0] = max_render_size,
+      .maxViewportDimensions[1] = max_render_size,
+      .viewportBoundsRange[0] = -(int32_t)(2U * max_render_size),
+      .viewportBoundsRange[1] = 2U * max_render_size,
 
       .viewportSubPixelBits = 0U,
       .minMemoryMapAlignment = pdevice->ws->page_size,
@@ -780,20 +783,20 @@ static bool pvr_physical_device_get_properties(
       .maxInterpolationOffset = 0.5f,
       .subPixelInterpolationOffsetBits = 4U,
 
-      .maxFramebufferWidth = 4096U,
-      .maxFramebufferHeight = 4096U,
+      .maxFramebufferWidth = max_render_size,
+      .maxFramebufferHeight = max_render_size,
       .maxFramebufferLayers = 256U,
 
       /* Note: update nir_shader_compiler_options.max_samples when changing this. */
-      .framebufferColorSampleCounts = VK_SAMPLE_COUNT_1_BIT | VK_SAMPLE_COUNT_4_BIT,
-      .framebufferDepthSampleCounts = VK_SAMPLE_COUNT_1_BIT | VK_SAMPLE_COUNT_4_BIT,
-      .framebufferStencilSampleCounts = VK_SAMPLE_COUNT_1_BIT | VK_SAMPLE_COUNT_4_BIT,
-      .framebufferNoAttachmentsSampleCounts = VK_SAMPLE_COUNT_1_BIT | VK_SAMPLE_COUNT_4_BIT,
+      .framebufferColorSampleCounts = max_sample_bits,
+      .framebufferDepthSampleCounts = max_sample_bits,
+      .framebufferStencilSampleCounts = max_sample_bits,
+      .framebufferNoAttachmentsSampleCounts = max_sample_bits,
       .maxColorAttachments = 4U,
-      .sampledImageColorSampleCounts = VK_SAMPLE_COUNT_1_BIT | VK_SAMPLE_COUNT_4_BIT,
-      .sampledImageIntegerSampleCounts = VK_SAMPLE_COUNT_1_BIT | VK_SAMPLE_COUNT_4_BIT,
-      .sampledImageDepthSampleCounts = VK_SAMPLE_COUNT_1_BIT | VK_SAMPLE_COUNT_4_BIT,
-      .sampledImageStencilSampleCounts = VK_SAMPLE_COUNT_1_BIT | VK_SAMPLE_COUNT_4_BIT,
+      .sampledImageColorSampleCounts = max_sample_bits,
+      .sampledImageIntegerSampleCounts = max_sample_bits,
+      .sampledImageDepthSampleCounts = max_sample_bits,
+      .sampledImageStencilSampleCounts = max_sample_bits,
       .storageImageSampleCounts = VK_SAMPLE_COUNT_1_BIT, /* Requires shaderStorageImageMultisample */
       .maxSampleMaskWords = 1U,
       .timestampComputeAndGraphics = false,
@@ -860,8 +863,7 @@ static bool pvr_physical_device_get_properties(
       .maxDescriptorSetUpdateAfterBindInputAttachments = 0,
       .filterMinmaxSingleComponentFormats = false,
       .filterMinmaxImageComponentMapping = false,
-      .framebufferIntegerColorSampleCounts =
-         VK_SAMPLE_COUNT_1_BIT | VK_SAMPLE_COUNT_4_BIT,
+      .framebufferIntegerColorSampleCounts = max_sample_bits,
 
       /* Vulkan 1.0 / VK_KHR_maintenance2 */
       .pointClippingBehavior =
@@ -1165,6 +1167,15 @@ static inline uint64_t pvr_compute_heap_size(struct pvr_instance *instance)
 static void
 pvr_physical_device_setup_formats(struct pvr_physical_device *const pdevice);
 
+static void pvr_physical_device_init_pdsc(struct pvr_physical_device *pdevice)
+{
+   pdevice->pdsc_features = 0;
+   if (PVR_HAS_FEATURE(&pdevice->dev_info, pds_ddmadt))
+      pdevice->pdsc_features |= PDSC_FEATURE_DDMADT;
+
+   pdsc_init();
+}
+
 VkResult pvr_physical_device_init(struct pvr_physical_device *pdevice,
                                   struct pvr_instance *instance,
                                   drmDevicePtr drm_render_device,
@@ -1303,6 +1314,8 @@ VkResult pvr_physical_device_init(struct pvr_physical_device *pdevice,
    }
 
    pdevice->vk.supported_sync_types = ws->sync_types;
+
+   pvr_physical_device_init_pdsc(pdevice);
 
    pdevice->pco_ctx =
       pco_ctx_create(&pdevice->dev_info, &pdevice->dev_runtime_info, NULL);

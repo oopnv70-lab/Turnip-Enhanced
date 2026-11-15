@@ -263,13 +263,19 @@ ac_nir_lower_ngg_mesh(nir_shader *shader, const ac_nir_lower_ngg_options *option
 
 bool
 ac_nir_lower_task_outputs_to_mem(nir_shader *shader,
-                                 bool has_query);
+                                 bool has_query,
+                                 enum amd_gfx_level gfx_level);
 
 bool
-ac_nir_lower_mesh_inputs_to_mem(nir_shader *shader, bool has_task_shader);
+ac_nir_lower_mesh_inputs_to_mem(nir_shader *shader, bool has_task_shader,
+                                enum amd_gfx_level gfx_level);
 
 bool
 ac_nir_lower_global_access(nir_shader *shader, enum amd_gfx_level gfx_level);
+
+nir_def *
+ac_nir_get_buffer_num_records(nir_builder *b, unsigned bit_size, nir_def *desc,
+                              enum amd_gfx_level gfx_level);
 
 bool ac_nir_lower_resinfo(nir_shader *nir, enum amd_gfx_level gfx_level);
 bool ac_nir_lower_image_opcodes(nir_shader *nir);
@@ -312,10 +318,15 @@ ac_nir_lower_legacy_gs(nir_shader *nir, ac_nir_lower_legacy_gs_options *options,
 typedef struct {
    /* System values. */
    bool msaa_disabled; /* true if MSAA is disabled, false may mean that the state is unknown */
+   bool vrs_disabled; /* true if VRS is disabled, false may mean that the state is unknown */
+   /* true if programmable sample locations are disabled, false may mean that the state is unknown */
+   bool custom_sample_locations_disabled;
    bool load_sample_positions_always_loads_current_ones; /* TODO: unify with RADV or remove */
    bool dynamic_rasterization_samples; /* TODO: unify with RADV or remove */
    int force_front_face; /* 0 -> keep, 1 -> set to true, -1 -> set to false */
+   bool has_front_face_select;
    bool sample_shading;
+   bool lower_sample_pos;
 
    /* barycentrics:
     *    msaa_disabled:
@@ -345,6 +356,7 @@ typedef struct {
    bool kill_z;
    bool kill_stencil;
    bool kill_samplemask;
+   bool lower_1bit_sample_mask_to_discard;
 } ac_nir_lower_ps_early_options;
 
 bool
@@ -428,8 +440,6 @@ bool
 ac_nir_lower_ps_late(nir_shader *nir, const ac_nir_lower_ps_late_options *options);
 
 typedef struct {
-   enum amd_gfx_level gfx_level;
-
    /* If true, round the layer component of the coordinates source to the nearest
     * integer for all array ops. This is always done for cube array ops.
     */
@@ -458,7 +468,7 @@ bool
 ac_nir_lower_image_tex(nir_shader *nir, const ac_nir_lower_image_tex_options *options);
 
 void
-ac_nir_store_debug_log_amd(nir_builder *b, nir_def *uvec4);
+ac_nir_store_debug_log_amd(nir_builder *b, enum amd_gfx_level gfx_level, nir_def *uvec4);
 
 unsigned
 ac_nir_varying_expression_max_cost(nir_shader *producer, nir_shader *consumer);
@@ -492,6 +502,10 @@ bool
 ac_nir_might_lower_bit_size(const nir_shader *shader);
 
 bool
+ac_nir_can_increase_load_size(uint32_t align_mul, uint32_t align_offset, unsigned old_size,
+                              unsigned new_size);
+
+bool
 ac_nir_mem_vectorize_callback(unsigned align_mul, unsigned align_offset, unsigned bit_size,
                               unsigned num_components, int64_t hole_size,
                               nir_intrinsic_instr *low, nir_intrinsic_instr *high, void *data);
@@ -503,7 +517,7 @@ bool
 ac_nir_store_may_be_subdword(const nir_intrinsic_instr *instr);
 
 uint8_t
-ac_nir_lower_phis_to_scalar_cb(const nir_instr *instr, const void *_);
+ac_nir_lower_phis_to_scalar_cb(const nir_instr *instr, const void *_compiler_info);
 
 bool
 ac_nir_allow_offset_wrap_cb(nir_intrinsic_instr *instr, const void *data);
@@ -525,6 +539,9 @@ ac_nir_fixup_smem_loads_null_prt(nir_shader *shader, uint8_t address_prt_wa_cont
 
 bool
 ac_nir_lower_fs_input_loads(nir_shader *nir, const struct ac_shader_args *args);
+
+bool
+ac_nir_opt_16bit_tex_image(nir_shader *shader, enum amd_gfx_level gfx_level);
 
 #ifdef __cplusplus
 }

@@ -246,8 +246,11 @@ static unsigned si_get_num_vs_user_sgprs(struct si_shader *shader,
    /* 1 SGPR is reserved for the vertex buffer pointer. */
    assert(num_always_on_user_sgprs <= SI_SGPR_VS_VB_DESCRIPTOR_FIRST - 1);
 
-   if (num_vbos_in_user_sgprs)
-      return SI_SGPR_VS_VB_DESCRIPTOR_FIRST + num_vbos_in_user_sgprs * 4;
+   if (num_vbos_in_user_sgprs) {
+      /* 4 format dwords used via soffset for BUF/format loads on GFX13.*/
+      unsigned format_dwords = shader->selector->screen->info.gfx_level >= GFX13 ? 4 : 0;
+      return SI_SGPR_VS_VB_DESCRIPTOR_FIRST + format_dwords + num_vbos_in_user_sgprs * 4;
+   }
 
    /* Add the pointer to VBO descriptors. */
    return num_always_on_user_sgprs + 1;
@@ -3288,10 +3291,8 @@ bool si_update_ngg(struct si_context *sctx)
       if (sctx->screen->info.has_vgt_flush_ngg_legacy_bug && !new_ngg) {
          si_set_barrier_flags(sctx, AC_BARRIER_VGT_FLUSH);
 
-         if (sctx->gfx_level == GFX10) {
-            /* Workaround for https://gitlab.freedesktop.org/mesa/mesa/-/issues/2941 */
-            si_flush_gfx_cs(sctx, RADEON_FLUSH_ASYNC_START_NEXT_GFX_IB_NOW, NULL);
-         }
+         /* Workaround for https://gitlab.freedesktop.org/mesa/mesa/-/issues/2941 */
+         si_flush_gfx_cs(sctx, RADEON_FLUSH_ASYNC_START_NEXT_GFX_IB_NOW, NULL);
       }
 
       sctx->ngg = new_ngg;

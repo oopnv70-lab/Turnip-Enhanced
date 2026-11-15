@@ -319,13 +319,14 @@ ac_nir_lower_indirect_derefs(nir_shader *shader)
  *   the oldest entries.
  */
 void
-ac_nir_store_debug_log_amd(nir_builder *b, nir_def *uvec4)
+ac_nir_store_debug_log_amd(nir_builder *b, enum amd_gfx_level gfx_level, nir_def *uvec4)
 {
    nir_def *buf = nir_load_debug_log_desc_amd(b);
    nir_def *zero = nir_imm_int(b, 0);
+   nir_def *size = ac_nir_get_buffer_num_records(b, 32, buf, gfx_level);
 
    nir_def *max_index =
-      nir_iadd_imm(b, nir_ushr_imm(b, nir_iadd_imm(b, nir_channel(b, buf, 2), -4), 4), -1);
+      nir_iadd_imm(b, nir_ushr_imm(b, nir_iadd_imm(b, size, -4), 4), -1);
    nir_def *index = nir_ssbo_atomic(b, 32, buf, zero, nir_imm_int(b, 1),
                                     .atomic_op = nir_atomic_op_iadd);
    index = nir_iand(b, index, max_index);
@@ -334,28 +335,58 @@ ac_nir_store_debug_log_amd(nir_builder *b, nir_def *uvec4)
 }
 
 nir_def *
-ac_average_samples(nir_builder *b, nir_def **samples, unsigned num_samples)
+ac_resolve_samples(nir_builder *b, nir_def **samples, unsigned num_samples, ac_nir_resolve_mode mode)
 {
-   /* This works like add-reduce by computing the sum of each pair independently, and then
-    * computing the sum of each pair of sums, and so on, to get better instruction-level
-    * parallelism.
+   nir_def *(*alu)(nir_builder *, nir_def *, nir_def *) = NULL;
+
+   switch (mode) {
+   case AC_NIR_RESOLVE_AVERAGE:
+      alu = nir_fadd;
+      break;
+   case AC_NIR_RESOLVE_SAMPLE_ZERO:
+      return samples[0];
+   case AC_NIR_RESOLVE_FMIN:
+      alu = nir_fmin;
+      break;
+   case AC_NIR_RESOLVE_FMAX:
+      alu = nir_fmax;
+      break;
+   case AC_NIR_RESOLVE_SMIN:
+      alu = nir_imin;
+      break;
+   case AC_NIR_RESOLVE_SMAX:
+      alu = nir_imax;
+      break;
+   case AC_NIR_RESOLVE_UMIN:
+      alu = nir_umin;
+      break;
+   case AC_NIR_RESOLVE_UMAX:
+      alu = nir_umax;
+      break;
+   }
+
+   /* This computes the sum/min/max of each pair independently, and then the sum/min/max of
+    * the resulting pairs, and so on, to get better instruction-level parallelism.
     */
    if (num_samples == 16) {
       for (unsigned i = 0; i < 8; i++)
-         samples[i] = nir_fadd(b, samples[i * 2], samples[i * 2 + 1]);
+         samples[i] = alu(b, samples[i * 2], samples[i * 2 + 1]);
    }
    if (num_samples >= 8) {
       for (unsigned i = 0; i < 4; i++)
-         samples[i] = nir_fadd(b, samples[i * 2], samples[i * 2 + 1]);
+         samples[i] = alu(b, samples[i * 2], samples[i * 2 + 1]);
    }
    if (num_samples >= 4) {
       for (unsigned i = 0; i < 2; i++)
-         samples[i] = nir_fadd(b, samples[i * 2], samples[i * 2 + 1]);
+         samples[i] = alu(b, samples[i * 2], samples[i * 2 + 1]);
    }
    if (num_samples >= 2)
-      samples[0] = nir_fadd(b, samples[0], samples[1]);
+      samples[0] = alu(b, samples[0], samples[1]);
 
-   return nir_fmul_imm(b, samples[0], 1.0 / num_samples); /* average the sum */
+   if (mode == AC_NIR_RESOLVE_AVERAGE)
+      return nir_fmul_imm(b, samples[0], 1.0 / num_samples); /* average the sum */
+   else
+      return samples[0];
 }
 
 void
@@ -600,6 +631,16 @@ align_load_store_size(enum amd_gfx_level gfx_level, unsigned size, bool uses_sme
 }
 
 bool
+ac_nir_can_increase_load_size(uint32_t align_mul, uint32_t align_offset, unsigned old_size,
+                              unsigned new_size)
+{
+   /* The page size should be at least 4096. */
+   uint32_t mul = MIN2(align_mul, 4096);
+   unsigned end = align_offset + old_size;
+   return (new_size - old_size) <= (align(end, mul) - end);
+}
+
+bool
 ac_nir_mem_vectorize_callback(unsigned align_mul, unsigned align_offset, unsigned bit_size,
                               unsigned num_components, int64_t hole_size, nir_intrinsic_instr *low,
                               nir_intrinsic_instr *high, void *data)
@@ -663,6 +704,13 @@ ac_nir_mem_vectorize_callback(unsigned align_mul, unsigned align_offset, unsigne
       return false;
    }
 
+   /* There are no 8<->16 packing ALU opcodes, so these vectorizations can create a lot of ALU. */
+   unsigned old_bit_size =
+      is_store ? (low->src[low->intrinsic == nir_intrinsic_store_deref ? 1 : 0].ssa->bit_size)
+               : low->def.bit_size;
+   if (bit_size < 32 && old_bit_size < 32 && bit_size != old_bit_size)
+      return false;
+
    /* Align the size to what the hw supports. */
    unsigned unaligned_new_size = num_components * bit_size;
    unsigned aligned_new_size = nir_round_up_components(num_components) * bit_size;
@@ -694,10 +742,8 @@ ac_nir_mem_vectorize_callback(unsigned align_mul, unsigned align_offset, unsigne
           */
          uint32_t resource_align = low->intrinsic == nir_intrinsic_load_global_constant ||
                                    low->intrinsic == nir_intrinsic_load_global ? NIR_ALIGN_MUL_MAX : 4;
-         uint32_t page_size = 4096;
-         uint32_t mul = MIN3(align_mul, page_size, resource_align);
-         unsigned end = (align_offset + unaligned_new_size / 8u);
-         if ((aligned_new_size - unaligned_new_size) / 8u > (align(end, mul) - end))
+         if (!ac_nir_can_increase_load_size(MIN2(align_mul, resource_align), align_offset,
+                                            unaligned_new_size / 8u, aligned_new_size / 8u))
             return false;
       }
 
@@ -1019,11 +1065,36 @@ ac_nir_repack_invocations_in_workgroup(nir_builder *b, nir_def **input_bool,
 }
 
 uint8_t
-ac_nir_lower_phis_to_scalar_cb(const nir_instr *instr, const void *_)
+ac_nir_lower_phis_to_scalar_cb(const nir_instr *instr, const void *_compiler_info)
 {
+   const struct ac_compiler_info *compiler_info = _compiler_info;
+
    nir_phi_instr *phi = nir_instr_as_phi(instr);
    if (phi->def.bit_size == 1 || phi->def.bit_size >= 32)
       return 1;
+
+   /* Split phis that use unpacked D16 results, otherwise they create movs. */
+   if (compiler_info && compiler_info->has_unpacked_d16 && phi->def.bit_size == 16) {
+      nir_foreach_phi_src(src, phi) {
+         nir_scalar scalar = nir_scalar_resolved(src->src.ssa, 0);
+
+         if (nir_scalar_is_tex(scalar)) {
+            return 1;
+         } else if (nir_scalar_is_intrinsic(scalar)) {
+            nir_intrinsic_instr *intrin = nir_scalar_as_intrinsic(scalar);
+
+            switch (intrin->intrinsic) {
+            case nir_intrinsic_image_load: return 1;
+            case nir_intrinsic_load_buffer_amd:
+               if (nir_intrinsic_access(intrin) & ACCESS_USES_FORMAT_AMD)
+                  return 1;
+               break;
+            default:
+               break;
+            }
+         }
+      }
+   }
 
    return 32 / phi->def.bit_size;
 }
@@ -1170,4 +1241,51 @@ ac_nir_opt_vectorize_cb(const nir_instr *instr, const void *data)
    }
 
    return target_width;
+}
+
+bool
+ac_nir_opt_16bit_tex_image(nir_shader *shader, enum amd_gfx_level gfx_level)
+{
+   /* Optimize types of image_sample sources and destinations.
+    *
+    * The image_sample sources bit sizes are:
+    *   nir_tex_src_coord:       a16 ? 16 : 32
+    *   nir_tex_src_comparator:  32
+    *   nir_tex_src_offset:      32
+    *   nir_tex_src_bias:        a16 ? 16 : 32
+    *   nir_tex_src_lod:         a16 ? 16 : 32
+    *   nir_tex_src_min_lod:     a16 ? 16 : 32
+    *   nir_tex_src_ms_index:    a16 ? 16 : 32
+    *   nir_tex_src_ddx:         has_g16 ? (g16 ? 16 : 32) : (a16 ? 16 : 32)
+    *   nir_tex_src_ddy:         has_g16 ? (g16 ? 16 : 32) : (a16 ? 16 : 32)
+    *
+    * We only use a16/g16 if all of the affected sources are 16bit.
+    */
+   assert(gfx_level >= GFX8);
+   bool separate_g16 = gfx_level >= GFX10;
+   bool has_a16 = gfx_level >= GFX9;
+   struct nir_opt_tex_srcs_options opt_srcs_options[] = {
+      {
+         .sampler_dims = ~(BITFIELD_BIT(GLSL_SAMPLER_DIM_CUBE) | BITFIELD_BIT(GLSL_SAMPLER_DIM_BUF)),
+         .src_types = (1 << nir_tex_src_coord) | (1 << nir_tex_src_lod) | (1 << nir_tex_src_bias) |
+                        (1 << nir_tex_src_min_lod) | (1 << nir_tex_src_ms_index) |
+                        (separate_g16 ? 0 : (1 << nir_tex_src_ddx) | (1 << nir_tex_src_ddy)),
+      },
+      {
+         .sampler_dims = ~BITFIELD_BIT(GLSL_SAMPLER_DIM_CUBE),
+         .src_types = (1 << nir_tex_src_ddx) | (1 << nir_tex_src_ddy),
+      },
+   };
+   struct nir_opt_16bit_tex_image_options opt_16bit_options = {
+      .rounding_mode = nir_rounding_mode_undef,
+      .opt_tex_dest_types = nir_type_float | nir_type_int | nir_type_uint,
+      .opt_image_dest_types = nir_type_float | nir_type_int | nir_type_uint,
+      .integer_dest_saturates = true,
+      .opt_image_store_data = true,
+      .opt_image_srcs = has_a16,
+      .opt_srcs_options_count = has_a16 ? (separate_g16 ? 2 : 1) : 0,
+      .opt_srcs_options = opt_srcs_options,
+   };
+
+   return nir_opt_16bit_tex_image(shader, &opt_16bit_options);
 }

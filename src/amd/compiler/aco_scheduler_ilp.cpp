@@ -13,9 +13,10 @@
 
 /*
  * This pass implements a simple forward list-scheduler which works on a small
- * partial DAG of 16 nodes at any time. Only ALU instructions are scheduled
- * entirely freely. Memory load instructions must be kept in-order and any other
- * instruction must not be re-scheduled at all.
+ * partial DAG of 32 nodes at any time. Only ALU instructions are scheduled
+ * entirely freely. Memory instructions must be kept in-order with each other,
+ * but may cross independent ALU. Other non-reorderable instructions retain
+ * dependencies on preceding ALU.
  *
  * The main goal of this scheduler is to create more memory clauses, schedule
  * memory loads early, and to improve ALU instruction level parallelism.
@@ -24,8 +25,8 @@
 namespace aco {
 namespace {
 
-constexpr unsigned num_nodes = 16;
-using mask_t = uint16_t;
+constexpr unsigned num_nodes = 32;
+using mask_t = uint32_t;
 static_assert(std::numeric_limits<mask_t>::digits >= num_nodes);
 
 struct VOPDInfo {
@@ -47,28 +48,32 @@ struct VOPDInfo {
 
 struct InstrInfo {
    Instruction* instr;
-   int16_t wait_cycles;          /* estimated remaining cycles until instruction can be issued. */
    mask_t dependency_mask;       /* bitmask of nodes which have to be scheduled before this node. */
    mask_t write_for_read_mask;   /* bitmask of nodes in the DAG that have a RaW dependency. */
+   int16_t wait_cycles;          /* estimated remaining cycles until instruction can be issued. */
+   uint8_t num_dependents;       /* Number of nodes that depend on this node, transitively. */
    uint8_t next_non_reorderable; /* index of next non-reorderable instruction node after this one. */
-};
-
-struct RegisterInfo {
-   mask_t read_mask; /* bitmask of nodes which have to be scheduled before the next write. */
-   uint16_t latency
-      : 11; /* estimated outstanding latency of last register write outside the DAG. */
-   uint16_t direct_dependency : 4;     /* node that has to be scheduled before any other access. */
-   uint16_t has_direct_dependency : 1; /* whether there is an unscheduled direct dependency. */
 };
 
 struct SchedILPContext {
    Program* program;
    bool is_vopd = false;
+   bool is_merge_block = false;
    InstrInfo nodes[num_nodes];
-   RegisterInfo regs[512];
+   struct {
+      /* Register accesses which must precede the next write. */
+      mask_t read_mask[512];
+      /* Last writer in the DAG, or UINT8_MAX if there is none. */
+      uint8_t direct_dependency[512];
+      /* Ready cycles for register writes outside the DAG. */
+      uint32_t ready_cycle[512];
+   } regs;
+   uint32_t cycle = 0;
+   /* Valid ready cycles may remain marked after they expire. */
    BITSET_DECLARE(reg_has_latency, 512) = { 0 };
    mask_t non_reorder_mask = 0; /* bitmask of instruction nodes which should not be reordered. */
    mask_t active_mask = 0;      /* bitmask of valid instruction nodes. */
+   uint8_t ordering_dependency = UINT8_MAX;  /* Index of latest fully ordered ILP instruction. */
    uint8_t next_non_reorderable = UINT8_MAX; /* index of next node which should not be reordered. */
    uint8_t last_non_reorderable = UINT8_MAX; /* index of last node which should not be reordered. */
    bool potential_partial_clause; /* indicates that last_non_reorderable is the last instruction in
@@ -82,6 +87,14 @@ struct SchedILPContext {
    mask_t vopd_odd_mask = 0;
    mask_t vopd_even_mask = 0;
 };
+
+int
+get_register_latency(const SchedILPContext& ctx, unsigned reg)
+{
+   if (!BITSET_TEST(ctx.reg_has_latency, reg) || ctx.regs.ready_cycle[reg] <= ctx.cycle)
+      return 0;
+   return ctx.regs.ready_cycle[reg] - ctx.cycle;
+}
 
 /**
  * Returns true for side-effect free SALU and VALU instructions.
@@ -511,11 +524,15 @@ get_cycle_info_with_mem_latency(const SchedILPContext& ctx, const Instruction* c
 bool
 is_memory_instr(const Instruction* const instr)
 {
+   /* Clock reads are code-motion barriers despite using the SMEM format. */
+   if (instr->opcode == aco_opcode::s_memtime || instr->opcode == aco_opcode::s_memrealtime)
+      return false;
+
    /* For memory instructions, we allow to reorder them with ALU if it helps
     * to form larger clauses or to increase def-use distances.
     */
-   return instr->isVMEM() || instr->isFlatLike() || instr->isSMEM() || instr->accessesLDS() ||
-          instr->isEXP();
+   return instr->isVMEM() || instr->isFlatLike() || instr->isSMEM() || instr->isDS() ||
+          instr->isLDSDIR() || instr->isEXP();
 }
 
 constexpr unsigned max_sgpr = 128;
@@ -527,6 +544,7 @@ add_entry(SchedILPContext& ctx, Instruction* const instr, const uint32_t idx)
    InstrInfo& entry = ctx.nodes[idx];
    entry.instr = instr;
    entry.wait_cycles = 0;
+   entry.num_dependents = 0;
    entry.write_for_read_mask = 0;
    const mask_t mask = BITFIELD_BIT(idx);
    bool reorder = can_reorder(instr);
@@ -551,17 +569,16 @@ add_entry(SchedILPContext& ctx, Instruction* const instr, const uint32_t idx)
       }
 
       for (unsigned i = 0; i < op.size(); i++) {
-         RegisterInfo& reg_info = ctx.regs[reg + i];
-
          /* Add register reads. */
-         reg_info.read_mask |= mask;
+         ctx.regs.read_mask[reg + i] |= mask;
 
-         if (reg_info.has_direct_dependency) {
+         unsigned direct_dependency = ctx.regs.direct_dependency[reg + i];
+         if (direct_dependency != UINT8_MAX) {
             /* A previous dependency is still part of the DAG. */
-            ctx.nodes[ctx.regs[reg].direct_dependency].write_for_read_mask |= mask;
-            entry.dependency_mask |= BITFIELD_BIT(reg_info.direct_dependency);
-         } else if (BITSET_TEST(ctx.reg_has_latency, reg + i)) {
-            entry.wait_cycles = MAX2(entry.wait_cycles, reg_info.latency);
+            ctx.nodes[direct_dependency].write_for_read_mask |= mask;
+            entry.dependency_mask |= BITFIELD_BIT(direct_dependency);
+         } else {
+            entry.wait_cycles = MAX2(entry.wait_cycles, get_register_latency(ctx, reg + i));
          }
       }
    }
@@ -569,35 +586,37 @@ add_entry(SchedILPContext& ctx, Instruction* const instr, const uint32_t idx)
    /* Check if this instructions reads implicit registers. */
    if (needs_exec_mask(instr)) {
       for (unsigned reg = exec_lo; reg <= exec_hi; reg++) {
-         if (ctx.regs[reg].has_direct_dependency) {
-            entry.dependency_mask |= BITFIELD_BIT(ctx.regs[reg].direct_dependency);
-            ctx.nodes[ctx.regs[reg].direct_dependency].write_for_read_mask |= mask;
+         if (ctx.regs.direct_dependency[reg] != UINT8_MAX) {
+            entry.dependency_mask |= BITFIELD_BIT(ctx.regs.direct_dependency[reg]);
+            ctx.nodes[ctx.regs.direct_dependency[reg]].write_for_read_mask |= mask;
          }
-         ctx.regs[reg].read_mask |= mask;
+         ctx.regs.read_mask[reg] |= mask;
       }
    }
    if (ctx.program->gfx_level < GFX10 && instr->isScratch()) {
       for (unsigned reg = flat_scr_lo; reg <= flat_scr_hi; reg++) {
-         if (ctx.regs[reg].has_direct_dependency) {
-            entry.dependency_mask |= BITFIELD_BIT(ctx.regs[reg].direct_dependency);
-            ctx.nodes[ctx.regs[reg].direct_dependency].write_for_read_mask |= mask;
+         if (ctx.regs.direct_dependency[reg] != UINT8_MAX) {
+            entry.dependency_mask |= BITFIELD_BIT(ctx.regs.direct_dependency[reg]);
+            ctx.nodes[ctx.regs.direct_dependency[reg]].write_for_read_mask |= mask;
          }
-         ctx.regs[reg].read_mask |= mask;
+         ctx.regs.read_mask[reg] |= mask;
       }
    }
 
    mask_t write_dep_mask = 0;
    for (const Definition& def : instr->definitions) {
+      if (def.physReg() == sgpr_null)
+         continue;
+
       for (unsigned i = 0; i < def.size(); i++) {
-         RegisterInfo& reg_info = ctx.regs[def.physReg().reg() + i];
+         unsigned reg = def.physReg().reg() + i;
 
          /* Add all previous register reads and writes to the dependencies. */
-         write_dep_mask |= reg_info.read_mask;
-         reg_info.read_mask = mask;
+         write_dep_mask |= ctx.regs.read_mask[reg];
+         ctx.regs.read_mask[reg] = mask;
 
          /* This register write is a direct dependency for all following reads. */
-         reg_info.has_direct_dependency = 1;
-         reg_info.direct_dependency = idx;
+         ctx.regs.direct_dependency[reg] = idx;
       }
    }
 
@@ -614,10 +633,11 @@ add_entry(SchedILPContext& ctx, Instruction* const instr, const uint32_t idx)
       entry.next_non_reorderable = UINT8_MAX;
 
       /* Just don't reorder these at all. */
-      if (!is_memory_instr(instr) || instr->definitions.empty() ||
-          get_sync_info(instr).semantics & semantic_volatile || ctx.is_vopd) {
+      if (!is_memory_instr(instr) || ctx.is_vopd) {
          /* Add all previous instructions as dependencies. */
          entry.dependency_mask = ctx.active_mask & ~ctx.non_reorder_mask;
+         if (!ctx.is_vopd)
+            ctx.ordering_dependency = idx;
       }
 
       /* Remove non-reorderable instructions from dependencies, since WaR dependencies can interfere
@@ -626,20 +646,24 @@ add_entry(SchedILPContext& ctx, Instruction* const instr, const uint32_t idx)
        * dependencies. */
       write_dep_mask &= ~ctx.non_reorder_mask;
       ctx.potential_partial_clause = true;
-   } else if (ctx.last_non_reorderable != UINT8_MAX) {
-      ctx.potential_partial_clause = false;
+   } else {
+      /* Preserve implicit effects of fully ordered instructions, e.g. calls. */
+      if (ctx.ordering_dependency != UINT8_MAX)
+         entry.dependency_mask |= BITFIELD_BIT(ctx.ordering_dependency);
+      if (ctx.last_non_reorderable != UINT8_MAX)
+         ctx.potential_partial_clause = false;
    }
 
    entry.dependency_mask |= write_dep_mask;
    entry.dependency_mask &= ~mask;
 
-   for (unsigned i = 0; i < num_nodes; i++) {
-      if (!ctx.nodes[i].instr || i == idx)
-         continue;
-
-      /* Add transitive dependencies. */
-      if (entry.dependency_mask & BITFIELD_BIT(i))
-         entry.dependency_mask |= ctx.nodes[i].dependency_mask;
+   /* Existing dependency masks already include transitive dependencies. */
+   u_foreach_bit (i, entry.dependency_mask)
+      entry.dependency_mask |= ctx.nodes[i].dependency_mask;
+   if (!ctx.is_vopd) {
+      /* Dependents cannot be removed before their prerequisites, so no decrement is needed. */
+      u_foreach_bit (i, entry.dependency_mask)
+         ctx.nodes[i].num_dependents++;
    }
 }
 
@@ -648,6 +672,8 @@ remove_entry(SchedILPContext& ctx, const Instruction* const instr, const uint32_
 {
    const mask_t mask = ~BITFIELD_BIT(idx);
    ctx.active_mask &= mask;
+   if (ctx.ordering_dependency == idx)
+      ctx.ordering_dependency = UINT8_MAX;
 
    int latency = 0;
    int stall = 1;
@@ -661,15 +687,7 @@ remove_entry(SchedILPContext& ctx, const Instruction* const instr, const uint32_
          stall += ctx.nodes[idx].wait_cycles;
       }
 
-      unsigned i;
-      BITSET_FOREACH_SET (i, ctx.reg_has_latency, 512) {
-         if (ctx.regs[i].latency <= stall) {
-            ctx.regs[i].latency = 0;
-            BITSET_CLEAR(ctx.reg_has_latency, i);
-         } else {
-            ctx.regs[i].latency -= stall;
-         }
-      }
+      ctx.cycle += stall;
    }
 
    for (const Operand& op : instr->operands) {
@@ -677,33 +695,32 @@ remove_entry(SchedILPContext& ctx, const Instruction* const instr, const uint32_
       if (reg >= max_sgpr && reg != scc && reg < min_vgpr)
          continue;
 
-      for (unsigned i = 0; i < op.size(); i++) {
-         RegisterInfo& reg_info = ctx.regs[reg + i];
-         reg_info.read_mask &= mask;
-      }
+      for (unsigned i = 0; i < op.size(); i++)
+         ctx.regs.read_mask[reg + i] &= mask;
    }
    if (needs_exec_mask(instr)) {
-      ctx.regs[exec_lo].read_mask &= mask;
-      ctx.regs[exec_hi].read_mask &= mask;
+      ctx.regs.read_mask[exec_lo] &= mask;
+      ctx.regs.read_mask[exec_hi] &= mask;
    }
    if (ctx.program->gfx_level < GFX10 && instr->isScratch()) {
-      ctx.regs[flat_scr_lo].read_mask &= mask;
-      ctx.regs[flat_scr_hi].read_mask &= mask;
+      ctx.regs.read_mask[flat_scr_lo] &= mask;
+      ctx.regs.read_mask[flat_scr_hi] &= mask;
    }
 
    for (const Definition& def : instr->definitions) {
+      if (def.physReg() == sgpr_null)
+         continue;
+
       for (unsigned i = 0; i < def.size(); i++) {
          unsigned reg = def.physReg().reg() + i;
-         ctx.regs[reg].read_mask &= mask;
-         if (ctx.regs[reg].has_direct_dependency && ctx.regs[reg].direct_dependency == idx) {
-            ctx.regs[reg].has_direct_dependency = false;
+         ctx.regs.read_mask[reg] &= mask;
+         if (ctx.regs.direct_dependency[reg] == idx) {
+            ctx.regs.direct_dependency[reg] = UINT8_MAX;
             if (!ctx.is_vopd) {
                /* Do MAX2() so that the latency from both predecessors of a merge block are
                 * considered. */
-               if (BITSET_TEST(ctx.reg_has_latency, reg))
-                  ctx.regs[reg].latency = MAX2(ctx.regs[reg].latency, latency);
-               else
-                  ctx.regs[reg].latency = latency;
+               int remaining = get_register_latency(ctx, reg);
+               ctx.regs.ready_cycle[reg] = ctx.cycle + MAX2(remaining, latency);
                BITSET_SET(ctx.reg_has_latency, reg);
             }
          }
@@ -765,6 +782,50 @@ collect_clause_dependencies(const SchedILPContext& ctx, const uint8_t next, mask
    return dependencies;
 }
 
+/* Select a dependency-free candidate, optionally requiring it to be ready. */
+unsigned
+select_candidate_ilp(const SchedILPContext& ctx, mask_t mask, int32_t max_wait_cycles = INT32_MAX)
+{
+   /* VINTRP(gfx6-10.3) can be handled like alu, but switching between VINTRP and other
+    * alu has a cost. So if the previous instr was VINTRP, try to keep selecting VINTRP.
+    */
+   bool prefer_vintrp = ctx.prev_info.instr && ctx.prev_info.instr->isVINTRP();
+
+   /* Minimize stalls. Among ready candidates, prefer those with more dependents,
+    * then those that have been ready longest.
+    */
+   unsigned idx = -1u;
+   bool idx_vintrp = false;
+   int32_t wait_cycles = INT32_MAX;
+   unsigned num_dependents = 0;
+   u_foreach_bit (i, mask) {
+      const InstrInfo& candidate = ctx.nodes[i];
+
+      /* Check if the candidate has pending dependencies. */
+      if (candidate.dependency_mask || candidate.wait_cycles > max_wait_cycles)
+         continue;
+
+      bool is_vintrp = prefer_vintrp && candidate.instr->isVINTRP();
+      bool better;
+      if (is_vintrp != idx_vintrp)
+         better = is_vintrp;
+      else if (candidate.wait_cycles <= 0 && wait_cycles <= 0 &&
+               candidate.num_dependents != num_dependents)
+         better = candidate.num_dependents > num_dependents;
+      else
+         better = candidate.wait_cycles < wait_cycles;
+
+      if (idx == -1u || better) {
+         idx = i;
+         idx_vintrp = is_vintrp;
+         wait_cycles = candidate.wait_cycles;
+         num_dependents = candidate.num_dependents;
+      }
+   }
+
+   return idx;
+}
+
 /**
  * Returns the index of the next instruction to be selected.
  */
@@ -784,39 +845,25 @@ select_instruction_ilp(const SchedILPContext& ctx)
       mask = collect_clause_dependencies(ctx, ctx.next_non_reorderable, 0);
    }
 
-   /* VINTRP(gfx6-10.3) can be handled like alu, but switching between VINTRP and other
-    * alu has a cost. So if the previous instr was VINTRP, try to keep selecting VINTRP.
-    */
-   bool prefer_vintrp = ctx.prev_info.instr && ctx.prev_info.instr->isVINTRP();
+   unsigned idx = select_candidate_ilp(ctx, mask);
 
-   /* Select the instruction with lowest wait_cycles of all candidates. */
-   unsigned idx = -1u;
-   bool idx_vintrp = false;
-   int32_t wait_cycles = INT32_MAX;
-   u_foreach_bit (i, mask) {
-      const InstrInfo& candidate = ctx.nodes[i];
-
-      /* Check if the candidate has pending dependencies. */
-      if (candidate.dependency_mask)
-         continue;
-
-      bool is_vintrp = prefer_vintrp && candidate.instr->isVINTRP();
-
-      if (idx == -1u || (is_vintrp && !idx_vintrp) ||
-          (is_vintrp == idx_vintrp && candidate.wait_cycles < wait_cycles)) {
-         idx = i;
-         idx_vintrp = is_vintrp;
-         wait_cycles = candidate.wait_cycles;
-      }
+   if (idx == -1u) {
+      /* The next non-reorderable instruction must have no dependencies. */
+      idx = ctx.next_non_reorderable;
+      assert(idx != UINT8_MAX && ctx.nodes[idx].dependency_mask == 0);
    }
 
-   if (idx != -1u)
+   /* Fill a longer wait for a memory clause with independent ALU that is ready
+    * or needs at most two cycles. At merges, avoid filling short waits: the
+    * apparent readiness of live-ins may miss loads from another predecessor.
+    */
+   int min_wait_cycles = ctx.is_merge_block ? 32 : ctx.program->gfx_level < GFX10 ? 4 : 2;
+   if (ctx.nodes[idx].wait_cycles <= min_wait_cycles)
       return idx;
 
-   /* Select the next non-reorderable instruction. (it must have no dependencies) */
-   assert(ctx.next_non_reorderable != UINT8_MAX);
-   assert(ctx.nodes[ctx.next_non_reorderable].dependency_mask == 0);
-   return ctx.next_non_reorderable;
+   mask_t ready_mask = ctx.active_mask & ~ctx.non_reorder_mask & ~mask;
+   unsigned ready = select_candidate_ilp(ctx, ready_mask, 2);
+   return ready != -1u ? ready : idx;
 }
 
 bool
@@ -1026,10 +1073,21 @@ void
 schedule_ilp(Program* program)
 {
    SchedILPContext ctx = {program};
+   std::fill_n(ctx.regs.direct_dependency, ARRAY_SIZE(ctx.regs.direct_dependency), UINT8_MAX);
+
+   /* Match the pending prolog-load latency used by the statistics estimator. */
+   for (const Definition& def : program->args_pending_vmem) {
+      for (unsigned i = 0; i < def.size(); i++) {
+         unsigned reg = def.physReg().reg() + i;
+         ctx.regs.ready_cycle[reg] = 320;
+         BITSET_SET(ctx.reg_has_latency, reg);
+      }
+   }
 
    for (Block& block : program->blocks) {
       if (block.instructions.empty())
          continue;
+      ctx.is_merge_block = block.linear_preds.size() > 1;
       auto it = block.instructions.begin();
       auto insert_it = block.instructions.begin();
       do_schedule(ctx, insert_it, it, block.instructions.begin(), block.instructions.end());
@@ -1046,6 +1104,7 @@ schedule_vopd(Program* program)
       return;
 
    SchedILPContext ctx = {program};
+   std::fill_n(ctx.regs.direct_dependency, ARRAY_SIZE(ctx.regs.direct_dependency), UINT8_MAX);
    ctx.is_vopd = true;
 
    for (Block& block : program->blocks) {

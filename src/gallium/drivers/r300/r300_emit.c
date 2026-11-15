@@ -236,6 +236,14 @@ uint32_t pack_float24(float f)
     }
     /* Handle exponent, bias of 63 */
     exponent += 62;
+    /* FP24 has no subnormals. Flush values below 2^-62 to zero instead
+     * of letting the exponent underflow into the sign and exponent bits.
+     */
+    if (exponent <= 0)
+        return 0;
+    /* Clamp overflowing values to the largest finite FP24 value. */
+    if (exponent >= 127)
+        return float24 | 0x7effff;
     float24 |= (exponent << 16);
     /* Kill 7 LSB of mantissa */
     float24 |= (u.u & 0x7FFFFF) >> 7;
@@ -705,7 +713,6 @@ void r300_emit_query_start(struct r300_context *r300, unsigned size, void*state)
         (struct pipe_framebuffer_state *)r300->fb_state.state;
     struct r300_surface *surf = NULL;
     bool use_dummy_z = false;
-    unsigned dwords = 4;
     CS_LOCALS(r300);
 
     if (!query)
@@ -723,11 +730,7 @@ void r300_emit_query_start(struct r300_context *r300, unsigned size, void*state)
         }
     }
 
-    if (use_dummy_z) {
-        dwords += 10;
-    }
-
-    BEGIN_CS(dwords);
+    BEGIN_CS(4 + (use_dummy_z ? 10 : 0));
     if (r300->screen->caps.family == CHIP_RV530) {
         OUT_CS_REG(RV530_FG_ZBREG_DEST, RV530_FG_ZBREG_DEST_PIPE_SELECT_ALL);
     } else {
@@ -1300,10 +1303,11 @@ void r300_emit_vs_constants(struct r300_context* r300,
         if (buf->remap_table){
             uint32_t *data = buf->ptr;
             for (i = 0; i < count; i++) {
-                uint32_t constant[4];
+                uint32_t constant[4] = {0};
                 for (unsigned chan = 0; chan < 4; chan++) {
-                    constant[chan] = data[buf->remap_table[i].index[chan] * 4 +
-                                           buf->remap_table[i].swizzle[chan]];
+                    unsigned swizzle = buf->remap_table[i].swizzle[chan];
+                    if (swizzle != RC_SWIZZLE_UNUSED)
+                        constant[chan] = data[buf->remap_table[i].index[chan] * 4 + swizzle];
                 }
                 OUT_CS_TABLE(constant, 4);
             }

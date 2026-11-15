@@ -98,7 +98,7 @@ get_vopd_opy_start(const Instruction* instr)
 uint32_t
 reg(asm_context& ctx, PhysReg reg)
 {
-   if (ctx.gfx_level >= GFX11) {
+   if (ctx.gfx_level < GFX11) {
       if (reg == m0)
          return sgpr_null.reg();
       else if (reg == sgpr_null)
@@ -791,7 +791,7 @@ emit_mimg_instruction(asm_context& ctx, std::vector<uint32_t>& out, const Instru
    }
    encoding |= (0x1F & (reg(ctx, instr->operands[0]) >> 2)) << 16; /* T# (resource) */
 
-   assert(!mimg.d16 || ctx.gfx_level >= GFX9);
+   assert(!mimg.d16 || ctx.gfx_level >= GFX8);
    if (ctx.gfx_level >= GFX11) {
       if (!instr->operands[1].isUndefined())
          encoding |= (0x1F & (reg(ctx, instr->operands[1]) >> 2)) << 26; /* sampler */
@@ -1275,6 +1275,8 @@ emit_instruction(asm_context& ctx, std::vector<uint32_t>& out, Instruction* inst
       assert(instr->operands[0].isConstant());
       uint32_t index = instr->operands[0].constantValue();
       ctx.program->debug_info[index].offset = out.size() * 4;
+      return;
+   } else if (instr->opcode == aco_opcode::p_end_with_regs) {
       return;
    }
 

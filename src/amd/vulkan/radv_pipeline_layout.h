@@ -34,10 +34,14 @@ struct radv_pipeline_layout {
 VK_DEFINE_NONDISP_HANDLE_CASTS(radv_pipeline_layout, base, VkPipelineLayout, VK_OBJECT_TYPE_PIPELINE_LAYOUT)
 
 void radv_pipeline_layout_init(struct radv_device *device, struct radv_pipeline_layout *layout, bool independent_sets);
+void radv_pipeline_layout_init_from_info(struct radv_device *device, struct radv_pipeline_layout *layout,
+                                         const VkPipelineLayoutCreateInfo *pCreateInfo);
 void radv_pipeline_layout_finish(struct radv_device *device, struct radv_pipeline_layout *layout);
 
 void radv_pipeline_layout_add_set(struct radv_pipeline_layout *layout, uint32_t set_idx,
                                   struct radv_descriptor_set_layout *set_layout);
 void radv_pipeline_layout_hash(struct radv_pipeline_layout *layout);
+
+void radv_pipeline_layout_merge(struct radv_pipeline_layout *dst, const struct radv_pipeline_layout *src);
 
 #endif /* RADV_PIPELINE_LAYOUT_H */

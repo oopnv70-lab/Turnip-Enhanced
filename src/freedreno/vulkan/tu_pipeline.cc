@@ -2366,6 +2366,9 @@ tu_emit_program_state(struct tu_cs *sub_cs,
                               &shaders[i]->const_state,
                               variants[i]);
 
+      if (shaders[i]->const_state.num_bindless_base_addresses)
+         prog->uses_bindless_base_addrs = true;
+
       struct tu_push_constant_range *push_consts =
          &shaders[i]->const_state.push_consts;
       if (push_consts->type == IR3_PUSH_CONSTS_SHARED ||
@@ -2866,6 +2869,8 @@ template <chip CHIP>
 static unsigned
 tu6_scissor_size(struct tu_device *dev, const struct vk_viewport_state *vp)
 {
+   if (vp->scissor_count == 0)
+      return 0;
    return 1 + vp->scissor_count * 2;
 }
 
@@ -2873,6 +2878,9 @@ template <chip CHIP>
 void
 tu6_emit_scissor(struct tu_cs *cs, const struct vk_viewport_state *vp)
 {
+   if (vp->scissor_count == 0)
+      return;
+
    tu_cs_emit_pkt4(cs, GRAS_SC_SCREEN_SCISSOR_TL(CHIP, 0).reg, vp->scissor_count * 2);
 
    for (uint32_t i = 0; i < vp->scissor_count; i++) {
@@ -2995,6 +3003,8 @@ tu6_emit_scissor_fdm(struct tu_cs *cs, struct tu_cmd_buffer *cmd,
       state.vp.scissor_count = cmd->state.max_fdm_layers;
    unsigned size = TU_CALLX(cmd->device, tu6_scissor_size)(cmd->device, &state.vp);
    tu_cs_begin_sub_stream(&cmd->sub_cs, size, cs);
+   if (size == 0)
+      return;
    tu_create_fdm_bin_patchpoint(cmd, cs, size, TU_FDM_NONE, fdm_apply_scissors,
                                 state);
 }
@@ -5123,6 +5133,79 @@ fail:
    return result;
 }
 
+VkResult
+tu_compute_pipeline_create_from_nir(struct tu_device *dev,
+                                    struct tu_pipeline_layout *layout,
+                                    VkPipelineCreateFlags2KHR flags,
+                                    const VkAllocationCallbacks *alloc,
+                                    nir_shader *nir,
+                                    struct tu_compute_pipeline **out_pipeline)
+{
+   (void) flags;
+   struct tu_pipeline_layout empty_layout = {};
+   if (layout == NULL)
+      layout = &empty_layout;
+
+   struct tu_compute_pipeline *pipeline = static_cast<struct tu_compute_pipeline *>(
+      vk_object_zalloc(&dev->vk, alloc, sizeof(*pipeline), VK_OBJECT_TYPE_PIPELINE));
+   if (!pipeline)
+      return VK_ERROR_OUT_OF_HOST_MEMORY;
+
+   pipeline->base.type = TU_PIPELINE_COMPUTE;
+   pipeline->base.executables_mem_ctx = ralloc_context(NULL);
+   util_dynarray_init(&pipeline->base.executables, pipeline->base.executables_mem_ctx);
+   pipeline->base.active_stages = VK_SHADER_STAGE_COMPUTE_BIT;
+
+   struct tu_shader_key key = {};
+   struct ir3_shader_key ir3_key = {};
+   struct tu_shader_info info = {};
+
+   struct blob blob;
+   blob_init(&blob);
+   nir_serialize(&blob, nir, true);
+   unsigned char pipeline_blake3[BLAKE3_KEY_LEN];
+   _mesa_blake3_compute(blob.data, blob.size, pipeline_blake3);
+   blob_finish(&blob);
+
+   tu_lower_nir(dev, nir, &key, &ir3_key, &info);
+
+   struct tu_shader *shader = NULL;
+   const struct ir3_shader_variant *v = NULL;
+   VkResult result = tu_shader_create(dev, &shader, nir, &key, &info, &ir3_key,
+                                      pipeline_blake3, sizeof(pipeline_blake3),
+                                      layout, false);
+   if (result != VK_SUCCESS)
+      goto fail;
+
+   pipeline->base.active_desc_sets = shader->active_desc_sets;
+
+   v = shader->variant;
+   tu_pipeline_set_linkage(&pipeline->base.program.link[MESA_SHADER_COMPUTE],
+                           &shader->const_state, v);
+
+   result = tu_pipeline_allocate_cs(dev, &pipeline->base, layout, NULL, v);
+   if (result != VK_SUCCESS) {
+      vk_pipeline_cache_object_unref(&dev->vk, &shader->base);
+      shader = NULL;
+      goto fail;
+   }
+
+   for (int i = 0; i < 3; i++)
+      pipeline->local_size[i] = v->local_size[i];
+   pipeline->instrlen = v->instrlen;
+   pipeline->base.shaders[MESA_SHADER_COMPUTE] = shader;
+
+   *out_pipeline = pipeline;
+   return VK_SUCCESS;
+
+fail:
+   if (shader)
+      vk_pipeline_cache_object_unref(&dev->vk, &shader->base);
+   ralloc_free(pipeline->base.executables_mem_ctx);
+   vk_object_free(&dev->vk, alloc, pipeline);
+   return result;
+}
+
 template <chip CHIP>
 VKAPI_ATTR VkResult VKAPI_CALL
 tu_CreateComputePipelines(VkDevice device,
@@ -5173,6 +5256,9 @@ tu_DestroyPipeline(VkDevice _device,
       return;
 
    TU_RMV(resource_destroy, dev, pipeline);
+
+   if (pipeline->rt)
+      tu_ray_tracing_pipeline_destroy(dev, pipeline->rt);
 
    tu_pipeline_finish(pipeline, dev, pAllocator);
    vk_object_free(&dev->vk, pAllocator, pipeline);

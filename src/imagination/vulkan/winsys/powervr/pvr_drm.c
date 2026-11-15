@@ -43,6 +43,39 @@
 #include "vk_drm_syncobj.h"
 #include "vk_log.h"
 
+#define PVR_DRM_VERSION_MAJOR_SHIFT    20
+#define PVR_DRM_VERSION_MINOR_SHIFT    10
+#define PVR_DRM_VERSION_PATCH_SHIFT    0
+
+#define PVR_DRM_VERSION_MAJOR_MASK     UINT32_C(0xFFF00000)
+#define PVR_DRM_VERSION_MINOR_MASK     UINT32_C(0x000FFC00)
+#define PVR_DRM_VERSION_PATCH_MASK     UINT32_C(0x000003FF)
+
+/**
+ * Packs the drm version.
+ *
+ * The packed layout is as follows:
+ *
+ * \verbatim
+ *    +--------+--------+--------+
+ *    | 31..20 | 19..10 | 9..0   |
+ *    +========+========+========+
+ *    | MAJOR  | MINOR  | PATCH  |
+ *    +--------+--------+--------+
+ * \endverbatim
+ *
+ */
+
+#define PVR_DRM_VERSION_PACK(major, minor, patch) \
+   ((((major) << PVR_DRM_VERSION_MAJOR_SHIFT) & PVR_DRM_VERSION_MAJOR_MASK) | \
+    (((minor) << PVR_DRM_VERSION_MINOR_SHIFT) & PVR_DRM_VERSION_MINOR_MASK) | \
+    (((patch) << PVR_DRM_VERSION_PATCH_SHIFT) & PVR_DRM_VERSION_PATCH_MASK))
+
+#define PVR_DRM_VERSION_VALID(major, minor, patch) \
+   ((((major) & ~(PVR_DRM_VERSION_MAJOR_MASK >> PVR_DRM_VERSION_MAJOR_SHIFT)) == 0) && \
+    (((minor) & ~(PVR_DRM_VERSION_MINOR_MASK >> PVR_DRM_VERSION_MINOR_SHIFT)) == 0) && \
+    (((patch) & ~(PVR_DRM_VERSION_PATCH_MASK >> PVR_DRM_VERSION_PATCH_SHIFT)) == 0))
+
 static void pvr_drm_finish_heaps(struct pvr_drm_winsys *const drm_ws)
 {
    if (!pvr_winsys_helper_winsys_heap_finish(
@@ -119,6 +152,41 @@ pvr_u32_in_array(const uint32_t *array, const size_t len, const uint32_t val)
    }
 
    return false;
+}
+
+static VkResult pvr_drm_get_fw_info(struct pvr_drm_winsys *drm_ws,
+                                    struct pvr_device_fw_info *fw_info)
+{
+   /* Default to oldest firmware version when FW info dev query is unsupported. */
+   struct drm_pvr_dev_query_fw_info query_fw_info = {
+      .major_version = 1,
+      .minor_version = 0,
+   };
+
+   VkResult result = VK_SUCCESS;
+
+   if (drm_ws->drm_version >= PVR_DRM_VERSION_PACK(1, 1, 0)) {
+      struct drm_pvr_ioctl_dev_query_args args = {
+         .type = DRM_PVR_DEV_QUERY_FW_INFO_GET,
+         .size = sizeof(query_fw_info),
+         .pointer = (__u64)&query_fw_info
+      };
+
+      result = pvr_ioctl(drm_ws->base.render_fd,
+                         DRM_IOCTL_PVR_DEV_QUERY,
+                         &args,
+                         VK_ERROR_INITIALIZATION_FAILED);
+      if (result != VK_SUCCESS)
+         return result;
+   }
+
+   assert(PVR_FW_VERSION_VALID(query_fw_info.major_version,
+                               query_fw_info.minor_version));
+
+   fw_info->fw_version =
+      PVR_FW_VERSION_PACK(query_fw_info.major_version, query_fw_info.minor_version);
+
+   return result;
 }
 
 static VkResult pvr_drm_override_quirks(struct pvr_drm_winsys *drm_ws,
@@ -273,6 +341,27 @@ out:
 }
 
 static VkResult
+pvr_drm_override_features(struct pvr_drm_winsys *drm_ws,
+                          struct pvr_device_info *dev_info,
+                          const struct pvr_device_fw_info *fw_info)
+{
+   VkResult result = VK_SUCCESS;
+
+   /* GS RTA support requires support in the FW */
+   uint32_t fw_gs_rta_support_min_version = PVR_FW_VERSION_PACK(1, 1);
+   if (PVR_HAS_FEATURE(dev_info, gs_rta_support) &&
+       fw_info->fw_version < fw_gs_rta_support_min_version) {
+      mesa_logw("Missing FW support for GS RTA support, feature disabled. "
+                "Upgrade to a newer FW version. Min Required %d.%d",
+                PVR_FW_VERSION_UNPACK_MAJOR(fw_gs_rta_support_min_version),
+                PVR_FW_VERSION_UNPACK_MINOR(fw_gs_rta_support_min_version));
+      dev_info->features.has_gs_rta_support = false;
+   }
+
+   return result;
+}
+
+static VkResult
 pvr_drm_get_runtime_info(struct pvr_drm_winsys *drm_ws,
                          struct drm_pvr_dev_query_runtime_info *const value)
 {
@@ -336,6 +425,20 @@ pvr_drm_winsys_device_info_init(struct pvr_winsys *ws,
    result = pvr_drm_override_enhancements(drm_ws, dev_info);
    if (result != VK_SUCCESS) {
       mesa_logw("Failed to get enhancements for this GPU\n");
+      goto err_out;
+   }
+
+   result = pvr_drm_get_fw_info(drm_ws, &runtime_info->fw_info);
+   if (result != VK_SUCCESS) {
+      mesa_logw("Failed to check FW feature support for this GPU\n");
+      goto err_out;
+   }
+
+   result = pvr_drm_override_features(drm_ws,
+                                      dev_info,
+                                      &runtime_info->fw_info);
+   if (result != VK_SUCCESS) {
+      mesa_logw("Failed to check FW feature support for this GPU");
       goto err_out;
    }
 
@@ -677,6 +780,7 @@ err_pvr_drm_heap_finish_all_heaps:
 
 VkResult pvr_drm_winsys_create(const int render_fd,
                                const int display_fd,
+                               drmVersionPtr version,
                                const VkAllocationCallbacks *alloc,
                                struct pvr_winsys **const ws_out)
 {
@@ -694,6 +798,14 @@ VkResult pvr_drm_winsys_create(const int render_fd,
       result = vk_error(NULL, VK_ERROR_OUT_OF_HOST_MEMORY);
       goto err_out;
    }
+
+   assert(PVR_DRM_VERSION_VALID(version->version_major,
+                                version->version_minor,
+                                version->version_patchlevel));
+
+   drm_ws->drm_version = PVR_DRM_VERSION_PACK(version->version_major,
+                                              version->version_minor,
+                                              version->version_patchlevel);
 
    drm_ws->base.ops = &drm_winsys_ops;
    drm_ws->base.render_fd = render_fd;

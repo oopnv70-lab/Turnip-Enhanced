@@ -251,15 +251,14 @@ nir_shader_add_variable(nir_shader *shader, nir_variable *var)
    case nir_var_system_value:
    case nir_var_mem_push_const:
    case nir_var_mem_constant:
-   case nir_var_shader_call_data:
+   case nir_var_shader_call_data_in:
+   case nir_var_shader_call_data_out:
    case nir_var_ray_hit_attrib:
    case nir_var_mem_task_payload:
    case nir_var_mem_node_payload:
    case nir_var_mem_node_payload_in:
    case nir_var_mem_global:
-   case nir_var_mem_pixel_local_in:
-   case nir_var_mem_pixel_local_out:
-   case nir_var_mem_pixel_local_inout:
+   case nir_var_mem_pixel_local:
    case nir_var_resource_heap:
    case nir_var_sampler_heap:
       break;
@@ -938,7 +937,8 @@ nir_cmat_call_op_params(nir_cmat_call_op op, nir_function *callee)
 }
 
 nir_cmat_call_instr *
-nir_cmat_call_instr_create(nir_shader *shader, nir_cmat_call_op op, nir_function *callee)
+nir_cmat_call_instr_create(nir_shader *shader, nir_cmat_call_op op, nir_function *callee,
+			   nir_function *decode_vec_fn)
 {
    const unsigned num_params = nir_cmat_call_op_params(op, callee);
    nir_cmat_call_instr *instr =
@@ -946,6 +946,7 @@ nir_cmat_call_instr_create(nir_shader *shader, nir_cmat_call_op op, nir_function
                        sizeof(nir_cmat_call_instr) + sizeof(nir_src) * num_params);
 
    instr->callee = callee;
+   instr->decode_vec_fn = decode_vec_fn;
    instr->op = op;
    instr->num_params = num_params;
    for (unsigned i = 0; i < num_params; i++)
@@ -3551,7 +3552,8 @@ nir_tex_instr_result_size(const nir_tex_instr *instr)
       return 1;
 
    case nir_texop_descriptor_amd:
-      return instr->sampler_dim == GLSL_SAMPLER_DIM_BUF ? 4 : 8;
+      /* Variable number of components: 4 or 8. */
+      return 0;
 
    case nir_texop_sampler_descriptor_amd:
       return 4;

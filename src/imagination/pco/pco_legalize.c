@@ -657,6 +657,26 @@ static bool legalize_pseudo_post_ra(pco_instr *instr)
       return true;
    }
 
+   case PCO_OP_COMP: {
+      pco_builder b =
+         pco_builder_create(instr->parent_func, pco_cursor_before_instr(instr));
+
+      pco_ref dest = instr->dest[0];
+      pco_ref src = instr->src[0];
+
+      unsigned chan = pco_ref_get_imm(instr->src[1]);
+      assert(chan < pco_ref_get_chans(src));
+
+      /* Select the component/channel. */
+      src = pco_ref_chans(src, 1u);
+      src = pco_ref_offset(src, chan);
+
+      pco_mbyp(&b, dest, src);
+
+      pco_instr_delete(instr);
+      return true;
+   }
+
    default:
       break;
    }
@@ -896,6 +916,35 @@ static bool try_legalize_ditr_fence(pco_instr *instr)
 }
 
 /**
+ * \brief Insert fences before mutex release ops if required.
+ *
+ * \param[in,out] instr PCO instr.
+ * \return True if progress was made.
+ */
+static bool try_legalize_mutex_fence(pco_instr *instr)
+{
+   if (instr->op != PCO_OP_MUTEX)
+      return false;
+
+   /* Only on release ops. */
+   if (pco_instr_get_mutex_op(instr) == PCO_MUTEX_OP_LOCK)
+      return false;
+
+   pco_builder b =
+      pco_builder_create(instr->parent_func, pco_cursor_before_instr(instr));
+
+   /* TODO: only insert if local memory ops were performed?
+    *
+    * Fine for the time being since the cost of a fence is negligible compared
+    * to the runtime cost of a mutex op and the compile-time cost of iterating
+    * backwards to find local memory ops.
+    */
+   pco_fence(&b);
+
+   return true;
+}
+
+/**
  * \brief Try to legalizes an instruction.
  *
  * \param[in,out] instr PCO instr.
@@ -907,6 +956,7 @@ static bool try_legalize(pco_instr *instr)
    bool progress = false;
 
    progress |= try_legalize_large_hwreg_offsets(instr, info);
+   progress |= try_legalize_mutex_fence(instr);
    progress |= try_legalize_ditr_fence(instr);
 
    return progress;

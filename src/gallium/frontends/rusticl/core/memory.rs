@@ -17,11 +17,13 @@ use crate::impl_cl_type_trait_base;
 use crate::perf_warning;
 
 use mesa_rust::pipe::context::*;
+use mesa_rust::pipe::fence::FenceFd;
 use mesa_rust::pipe::resource::*;
 use mesa_rust::pipe::screen::ResourceType;
 use mesa_rust::pipe::transfer::*;
 use mesa_rust_gen::*;
 use mesa_rust_util::conversion::*;
+use mesa_rust_util::properties::MultiValProperties;
 use mesa_rust_util::properties::Properties;
 use mesa_rust_util::ptr::AllocSize;
 use mesa_rust_util::ptr::TrackedPointers;
@@ -629,9 +631,10 @@ pub struct MemBase {
     pub mem_type: cl_mem_object_type,
     pub flags: cl_mem_flags,
     pub size: usize,
-    pub props: Properties<cl_mem_properties>,
+    pub props: MultiValProperties<cl_mem_properties>,
     pub cbs: Mutex<Vec<MemCB>>,
     pub gl_obj: Option<GLObject>,
+    pub imported: bool,
     alloc: Allocation,
 }
 
@@ -778,7 +781,7 @@ fn sw_copy(
 ) {
     let pixel_size = pixel_size as usize;
     for z in 0..region[2] {
-        if src_row_pitch == dst_row_pitch && region[1] * pixel_size == src_row_pitch {
+        if src_row_pitch == dst_row_pitch && region[0] * pixel_size == src_row_pitch {
             unsafe {
                 ptr::copy(
                     src.byte_add(
@@ -816,12 +819,10 @@ impl MemBase {
         flags: cl_mem_flags,
         size: usize,
         mut host_ptr: *mut c_void,
-        props: Properties<cl_mem_properties>,
+        props: MultiValProperties<cl_mem_properties>,
+        handle: Option<FenceFd>,
     ) -> CLResult<Arc<Buffer>> {
-        let bda = props
-            .get(&CL_MEM_DEVICE_PRIVATE_ADDRESS_EXT.into())
-            .copied()
-            == Some(CL_TRUE.into());
+        let bda = props.get(CL_MEM_DEVICE_PRIVATE_ADDRESS_EXT.into()) == Some(&[CL_TRUE.into()]);
 
         // if it's a SVM host ptr, we just use the already allocated resource if it exists, because
         // this is actually mandated by the spec. The size requirement will be checked inside the
@@ -839,10 +840,14 @@ impl MemBase {
             .then(|| context.get_svm_alloc(host_ptr as usize))
             .flatten();
 
+        let imported = handle.is_some();
         let alloc = if let Some((svm_ptr, ref svm_alloc)) = svm {
             // SAFETY: svm_ptr is the base of the allocation host_ptr points into.
             let offset = unsafe { host_ptr.byte_offset_from(svm_ptr) } as usize;
             Allocation::new_svm(Arc::clone(svm_alloc), offset)
+        } else if let Some(handle) = handle {
+            let buffer = context.import_dma_buf_buffer(handle, size)?;
+            Allocation::new(buffer, 0, ptr::null_mut())
         } else {
             let res_type = if flags.are_any_bits_set(CL_MEM_ALLOC_HOST_PTR) {
                 ResourceType::Staging
@@ -901,6 +906,7 @@ impl MemBase {
                 props: props,
                 gl_obj: None,
                 cbs: Mutex::new(Vec::new()),
+                imported: imported,
                 alloc: alloc,
             },
             address: addresses,
@@ -935,9 +941,10 @@ impl MemBase {
                 mem_type: CL_MEM_OBJECT_BUFFER,
                 flags: flags,
                 size: size,
-                props: Properties::default(),
+                props: MultiValProperties::default(),
                 gl_obj: None,
                 cbs: Mutex::new(Vec::new()),
+                imported: parent.imported,
                 alloc: Allocation::new_sub(Mem::Buffer(parent), offset),
             },
             address: address,
@@ -953,7 +960,8 @@ impl MemBase {
         mut image_desc: cl_image_desc,
         image_elem_size: u8,
         mut host_ptr: *mut c_void,
-        props: Properties<cl_mem_properties>,
+        props: MultiValProperties<cl_mem_properties>,
+        handle: Option<FenceFd>,
     ) -> CLResult<Arc<Image>> {
         // we have to sanitize the image_desc a little for internal use
         let api_image_desc = image_desc;
@@ -977,8 +985,12 @@ impl MemBase {
             ResourceType::Normal
         };
 
+        let imported = handle.is_some();
         let alloc = if let Some(parent) = parent {
             Allocation::new_sub(parent, 0)
+        } else if let Some(handle) = handle {
+            let image = context.import_dma_buf_image(handle, &image_desc, image_format)?;
+            Allocation::new(image, 0, ptr::null_mut())
         } else {
             let mut texture = context.create_texture(
                 &image_desc,
@@ -1019,6 +1031,7 @@ impl MemBase {
                 props: props,
                 gl_obj: None,
                 cbs: Mutex::new(Vec::new()),
+                imported: imported,
                 alloc: alloc,
             },
             image_format: *image_format,
@@ -1116,12 +1129,15 @@ impl MemBase {
             mem_type: mem_type,
             flags: flags,
             size: gl_mem_props.size(),
-            props: Properties::default(),
+            props: MultiValProperties::default(),
             gl_obj: Some(GLObject {
                 props: export_in,
                 shadow_map: shadow_map,
             }),
             cbs: Mutex::new(Vec::new()),
+            // We set this to false for GL imported resources, because they have different API
+            // semantics.
+            imported: false,
             alloc: Allocation::new(texture, gl_mem_props.offset as usize, ptr::null_mut()),
         };
 

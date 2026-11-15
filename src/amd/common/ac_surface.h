@@ -223,6 +223,12 @@ struct gfx9_meta_equation {
    } u;
 };
 
+typedef struct {
+   uint16_t width;
+   uint8_t height;
+   uint8_t depth;
+} ac_block_extent;
+
 struct gfx12_hiz_layout {
    uint64_t offset;
    uint32_t size;
@@ -231,6 +237,7 @@ struct gfx12_hiz_layout {
    uint16_t height_in_tiles;
    uint8_t swizzle_mode;
    uint8_t alignment_log2;
+   ac_block_extent block256B_extent;
    struct {
       uint32_t offset;
       uint32_t size;
@@ -323,12 +330,6 @@ struct gfx9_surf_layout {
       } zs;
    };
 };
-
-typedef struct {
-   uint16_t width;
-   uint8_t height;
-   uint8_t depth;
-} ac_block_extent;
 
 struct radeon_surf {
    /* Format properties. */
@@ -630,6 +631,9 @@ bool ac_surface_supports_dcc_image_stores(enum amd_gfx_level gfx_level,
 
 void ac_compute_surface_modifier(const struct radeon_info *info, struct radeon_surf *surf,
                                  unsigned samples);
+
+bool ac_surface_is_meta_pipe_misaligned(const struct radeon_info *info, unsigned bpe,
+                                        unsigned num_samples, unsigned num_layers, bool is_depth);
 
 #ifdef __cplusplus
 }

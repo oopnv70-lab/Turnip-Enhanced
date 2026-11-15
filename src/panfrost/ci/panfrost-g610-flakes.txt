@@ -21,7 +21,6 @@ dEQP-VK.api.image_clearing.core.clear_color_image.2d.optimal.remaining_array_lay
 dEQP-VK.api.image_clearing.dedicated_allocation.clear_color_image.2d.linear.remaining_array_layers_twostep.a2b10g10r10_sint_pack32_33x128
 
 dEQP-VK.binding_model.buffer_device_address.set3.depth3.basessbo.load.nostore.single.std140.frag
-dEQP-VK.binding_model.mutable_descriptor.single.switches.acceleration_structure_khr_uniform_texel_buffer.update_write.no_source.no_source.pool_no_types.pre_update.no_array.rgen
 dEQP-VK.binding_model.shader_access.primary_cmd_buf.bind.sampler_immutable.fragment.multiple_descriptor_sets.multiple_discontiguous_descriptors.1d_array_base_slice
 dEQP-VK.binding_model.shader_access.primary_cmd_buf.bind.with_template.sampler_immutable.tess_eval.multiple_arbitrary_descriptors.2d
 dEQP-VK.binding_model.shader_access.secondary_cmd_buf.bind.sampler_immutable.vertex_fragment.single_descriptor.1d_base_mip
@@ -157,11 +156,8 @@ dEQP-VK.pipeline.monolithic.sampler.view_type.1d_array.format.r5g6b5_unorm_pack1
 dEQP-VK.pipeline.pipeline_library.blend.format.a2b10g10r10_unorm_pack32.states.color_sas_sa_min_alpha_sa_sas_sub-color_1mda_dc_max_alpha_1mdc_sa_add-color_1mdc_cc_min_alpha_1mcc_dc_max-color_da_z_rsub_alpha_1mda_cc_sub
 dEQP-VK.pipeline.pipeline_library.depth.nocolor.format.d24_unorm_s8_uint.compare_ops.triangle_list_always_greater_less_always
 dEQP-VK.pipeline.pipeline_library.stencil.format.d24_unorm_s8_uint.states.fail_keep.pass_wrap.dfail_keep.comp_not_equal
-dEQP-VK.pipeline.pipeline_library.stencil.nocolor.format.d24_unorm_s8_uint.states.fail_decw.pass_incc.dfail_zero.comp_greater_or_equal
 dEQP-VK.pipeline.pipeline_library.stencil.nocolor.format.d24_unorm_s8_uint.states.fail_incc.pass_decc.dfail_zero.comp_never
-dEQP-VK.pipeline.pipeline_library.stencil.nocolor.format.d24_unorm_s8_uint.states.fail_incc.pass_repl.dfail_repl.comp_less
 dEQP-VK.pipeline.pipeline_library.stencil.nocolor.format.d24_unorm_s8_uint.states.fail_wrap.pass_inv.dfail_wrap.comp_less
-dEQP-VK.pipeline.pipeline_library.stencil.nocolor.format.d24_unorm_s8_uint.states.fail_zero.pass_inv.dfail_inv.comp_greater_or_equal
 
 dEQP-VK.renderpass.dedicated_allocation.formats.r16_unorm.input.load.store.draw_use_input_aspect
 dEQP-VK.renderpass.dedicated_allocation.formats.r16g16_uint.input.load.dont_care.draw
@@ -216,6 +212,16 @@ spec@ext_framebuffer_multisample@accuracy all_samples color small depthstencil
 # See Mesa bug #15880 ("panfrost: incomplete glCopyPixels() with feedback loop")
 spec@!opengl 1.4@copy-pixels
 
-# uprev Piglit in Mesa
-KHR-GLES31.core.draw_indirect.advanced-twoPass-transformFeedback-elements
+# VKCTS 1.4.6.2 -> 1.4.7.0 uprev
+dEQP-VK.renderpasses.dynamic_rendering.primary_cmd_buff.local_read.max_remapped_attachments_with_gap_write_read
 
+# flakes every now and then
+dEQP-VK.wsi.wayland.incremental_present.scale_none.fifo.rotate_180.post_multiplied.reference
+dEQP-VK.wsi.xcb.maintenance1.present_modes.heterogenous.fifo_relaxed_fifo_immediate
+dEQP-VK.wsi.xcb.maintenance1.present_modes.heterogenous.fifo_relaxed_mailbox_fifo_relaxed
+dEQP-VK.wsi.xcb.maintenance1.scaling.resize_window.immediate.one_to_one.min_min.same_size_and_aspect
+dEQP-VK.image.host_image_copy.draw_r16_unorm_d16_unorm.host_transition.image_to_memory.general_general.depth_stencil_read_only_optimal.optimal.0_1_0.53x61
+
+shaders@glsl-uniform-interstage-limits@subdivide 5- statechanges
+spec@oes_egl_image_external_essl3@oes_egl_image_external_essl3
+spec@oes_egl_image_external_essl3@oes_egl_image_external_essl3@oes_egl_image_external_essl3_imageStore

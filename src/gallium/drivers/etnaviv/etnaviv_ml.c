@@ -489,7 +489,6 @@ lower_operations(struct etna_ml_subgraph *subgraph,
             break;
          }
          case PIPE_ML_OPERATION_TYPE_SUBTRACT: {
-            struct etna_operation *operation = calloc(1, sizeof(*operation));
             etna_ml_lower_add(subgraph, poperation, operation);
             operation->input_tensors[0] = input_tensors[0];
             operation->input_tensors[1] = input_tensors[1];
@@ -616,7 +615,8 @@ count_tensors(const struct pipe_ml_operation *poperations,
          break;
       case PIPE_ML_OPERATION_TYPE_FULLY_CONNECTED:
          tensor_count = MAX2(tensor_count, poperation->fcon.weight_tensor->index);
-         tensor_count = MAX2(tensor_count, poperation->fcon.bias_tensor->index);
+         if (poperation->fcon.bias_tensor)
+            tensor_count = MAX2(tensor_count, poperation->fcon.bias_tensor->index);
          break;
       case PIPE_ML_OPERATION_TYPE_PAD:
       case PIPE_ML_OPERATION_TYPE_SUBTRACT:
@@ -669,8 +669,10 @@ etna_ml_operation_supported(struct pipe_ml_device *pdevice,
          struct pipe_tensor *bias_tensor = operation->conv.bias_tensor;
          struct pipe_tensor *output_tensor = operation->output_tensors[0];
 
-         // Dilation and per-axis quantization not yet implemented
-         if (tensor_quantization_supported(input_tensor) &&
+         // Dilation, per-axis quantization and missing biases not yet
+         // implemented
+         if (bias_tensor &&
+             tensor_quantization_supported(input_tensor) &&
              tensor_quantization_supported(weight_tensor) &&
              tensor_quantization_supported(bias_tensor) &&
              tensor_quantization_supported(output_tensor) &&
@@ -711,12 +713,12 @@ etna_ml_operation_supported(struct pipe_ml_device *pdevice,
          break;
       }
       case PIPE_ML_OPERATION_TYPE_PAD: {
-         supported = operation->pad.before_x <= 2 &&
-                     operation->pad.after_x <= 2 &&
-                     operation->pad.before_y <= 2 &&
-                     operation->pad.after_y <= 2 &&
-                     operation->pad.before_z <= 2 &&
-                     operation->pad.after_z <= 2;
+         supported = operation->pad.before_x <= 3 &&
+                     operation->pad.after_x <= 3 &&
+                     operation->pad.before_y <= 3 &&
+                     operation->pad.after_y <= 3 &&
+                     operation->pad.before_z <= 3 &&
+                     operation->pad.after_z <= 3;
          break;
       }
       case PIPE_ML_OPERATION_TYPE_FULLY_CONNECTED: {

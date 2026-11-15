@@ -20,6 +20,7 @@ amd_register_files = [
   '../registers/gfx10-rsrc.json',
   '../registers/gfx11-rsrc.json',
   '../registers/gfx12-rsrc.json',
+  '../registers/gfx13-rsrc.json',
   '../registers/registers-manually-defined.json',
 ]
 
@@ -85,7 +86,7 @@ gfx10_format_table_c = custom_target(
   'gfx10_format_table.c',
   input : files(
     'gfx10_format_table.py',
-    '../../util/format/u_format.yaml', '../registers/gfx10-rsrc.json', '../registers/gfx11-rsrc.json'
+    '../../util/format/u_format.yaml', '../registers/gfx10-rsrc.json', '../registers/gfx11-rsrc.json', '../registers/gfx13-rsrc.json'
   ),
   output : 'gfx10_format_table.c',
   command : [prog_python, '@INPUT@'],

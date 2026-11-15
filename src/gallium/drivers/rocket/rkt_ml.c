@@ -289,8 +289,9 @@ rkt_ml_operation_supported(struct pipe_ml_device *pdevice,
       struct pipe_tensor *bias_tensor = operation->conv.bias_tensor;
       struct pipe_tensor *output_tensor = operation->output_tensors[0];
 
-      // Dilation and per-axis quantization not yet implemented
-      if (tensor_quantization_supported(input_tensor) &&
+      // Dilation, per-axis quantization and missing biases not yet implemented
+      if (bias_tensor &&
+          tensor_quantization_supported(input_tensor) &&
           tensor_quantization_supported(weight_tensor) &&
           tensor_quantization_supported(bias_tensor) &&
           tensor_quantization_supported(output_tensor) &&
@@ -567,20 +568,23 @@ rkt_ml_subgraph_invoke(struct pipe_context *pcontext,
    util_dynarray_foreach (&subgraph->operations, struct rkt_operation,
                           operation) {
       unsigned num_inputs = operation->add_tensor != -1 ? 2 : 1;
-      uint32_t *in_bo_handles = calloc(num_inputs, sizeof(uint32_t));
-      uint32_t *out_bo_handles = malloc(sizeof(uint32_t));
-
-      in_bo_handles[0] = rkt_get_tensor(subgraph, operation->input_index)->handle;
-
-      if (operation->add_tensor != -1)
-         in_bo_handles[1] =
-            rkt_get_tensor(subgraph, operation->add_tensor)->handle;
-
-      out_bo_handles[0] =
+      uint32_t input_handle =
+         rkt_get_tensor(subgraph, operation->input_index)->handle;
+      uint32_t add_handle =
+         operation->add_tensor != -1
+            ? rkt_get_tensor(subgraph, operation->add_tensor)->handle : 0;
+      uint32_t output_handle =
          rkt_get_tensor(subgraph, operation->output_index)->handle;
 
       if (operation->reuse_weights_cbuf) {
          /* Submit all tasks to the same core, so weights can be reused */
+         uint32_t *in_bo_handles = calloc(num_inputs, sizeof(uint32_t));
+         uint32_t *out_bo_handles = malloc(sizeof(uint32_t));
+         in_bo_handles[0] = input_handle;
+         if (operation->add_tensor != -1)
+            in_bo_handles[1] = add_handle;
+         out_bo_handles[0] = output_handle;
+
          unsigned num_tasks =
             util_dynarray_num_elements(&operation->tasks, struct split_task);
          struct drm_rocket_task *tasks = calloc(num_tasks, sizeof(*tasks));
@@ -602,6 +606,13 @@ rkt_ml_subgraph_invoke(struct pipe_context *pcontext,
       } else {
          /* Spread tasks among cores, for parallelism */
          util_dynarray_foreach (&operation->tasks, struct split_task, task) {
+            uint32_t *in_bo_handles = calloc(num_inputs, sizeof(uint32_t));
+            uint32_t *out_bo_handles = malloc(sizeof(uint32_t));
+            in_bo_handles[0] = input_handle;
+            if (operation->add_tensor != -1)
+               in_bo_handles[1] = add_handle;
+            out_bo_handles[0] = output_handle;
+
             struct drm_rocket_task *ktask = calloc(1, sizeof(*ktask));
             ktask->regcmd = task->regcfg_addr;
             ktask->regcmd_count = task->regcfg_amount;

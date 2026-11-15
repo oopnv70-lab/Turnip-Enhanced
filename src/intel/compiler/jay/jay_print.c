@@ -112,13 +112,17 @@ jay_print_def(FILE *fp,
       if (has_index)
          fprintf(fp, "(");
 
-      fprintf(fp, "%s%u%s", file, def.reg, def.hi ? "h" : "");
+      fprintf(fp, "%s%u", file, def.reg);
       if (len > 1) {
          fprintf(fp, ":%s%u", file, def.reg + len - 1);
       }
 
       if (has_index)
          fprintf(fp, ")");
+   }
+
+   if (def.size != JAY_SIZE_32) {
+      fprintf(fp, "ₕ");
    }
 }
 

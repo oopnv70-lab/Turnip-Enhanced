@@ -224,6 +224,9 @@ panfrost_get_fresh_render_batch(struct panfrost_context *ctx,
    struct panfrost_batch *batch;
 
    batch = find_best_render_batch(ctx);
+   if (!batch)
+      return NULL;
+
    panfrost_dirty_state_all(ctx);
 
    /* We only need to submit and get a fresh batch if there is no
@@ -233,6 +236,8 @@ panfrost_get_fresh_render_batch(struct panfrost_context *ctx,
       perf_debug(ctx, "Flushing the current FBO due to: %s", reason);
       panfrost_batch_submit(ctx, batch);
       batch = find_best_render_batch(ctx);
+      if (!batch)
+         return NULL;
    }
 
    ctx->batch[PANFROST_BATCH_RENDER] = batch;
@@ -312,12 +317,9 @@ panfrost_batch_get_bo_access(struct panfrost_batch *batch, unsigned handle)
 {
    unsigned size = util_dynarray_num_elements(&batch->bos, pan_bo_access);
 
-   if (handle >= size) {
-      unsigned grow = handle + 1 - size;
-
-      memset(util_dynarray_grow(&batch->bos, pan_bo_access, grow), 0,
-             grow * sizeof(pan_bo_access));
-   }
+   if (handle >= size &&
+       !util_dynarray_grow_zero(&batch->bos, pan_bo_access, handle + 1 - size))
+      return NULL;
 
    return util_dynarray_element(&batch->bos, pan_bo_access, handle);
 }

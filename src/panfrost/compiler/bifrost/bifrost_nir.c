@@ -155,9 +155,6 @@ bi_vectorize_filter(const nir_instr *instr, const void *data)
    case nir_op_bany_inequal8:
    case nir_op_bany_inequal16:
       return 1;
-   case nir_op_pack_uvec2_to_uint:
-   case nir_op_pack_uvec4_to_uint:
-      return 0;
    case nir_op_fexp2:
    case nir_op_flog2:
    case nir_op_fpow:
@@ -311,6 +308,8 @@ static void
 bi_optimize_late(nir_shader *nir, unsigned arch,
                 const struct pan_shader_info *info)
 {
+   bool use_kraid = bi_use_kraid(nir, arch);
+
    NIR_PASS(_, nir, nir_opt_shrink_stores, false /* shrink_image_store */);
    bi_optimize_loop(nir, arch, false /* allow_copies */);
 
@@ -336,9 +335,12 @@ bi_optimize_late(nir_shader *nir, unsigned arch,
    /* Algebraic can materialize instructions with a bit_size that we need to lower */
    NIR_PASS(_, nir, nir_lower_bit_size, bi_lower_bit_size,
             &(struct lower_bit_size_opts) {
-               .use_kraid = bi_use_kraid(nir, arch),
+               .use_kraid = use_kraid,
                .arch = arch,
             });
+
+   if (use_kraid)
+      NIR_PASS(_, nir, pan_nir_lower_trig);
 
    /* We need to cleanup after each iteration of late algebraic
     * optimizations, since otherwise NIR can produce weird edge cases
@@ -371,7 +373,7 @@ bi_optimize_late(nir_shader *nir, unsigned arch,
    while (late_algebraic_progress) {
       late_algebraic_progress = false;
       NIR_PASS(late_algebraic_progress, nir, bifrost_nir_lower_algebraic_late,
-               arch, bi_use_kraid(nir, arch));
+               arch, use_kraid);
       late_algebraic |= late_algebraic_progress;
    }
 
@@ -484,14 +486,25 @@ bi_lower_subgroups(nir_builder *b, nir_intrinsic_instr *intr, void *data)
       break;
 
    case nir_intrinsic_load_num_subgroups: {
-      uint32_t subgroup_size = pan_subgroup_size(arch);
-      assert(!b->shader->info.workgroup_size_variable);
-      uint32_t workgroup_size =
-         b->shader->info.workgroup_size[0] *
-         b->shader->info.workgroup_size[1] *
-         b->shader->info.workgroup_size[2];
-      uint32_t num_subgroups = DIV_ROUND_UP(workgroup_size, subgroup_size);
-      val = nir_imm_int(b, num_subgroups);
+      unsigned subgroup_size = pan_subgroup_size(arch);
+      nir_def *local_size = nir_load_workgroup_size(b);
+      /* workgroup_size.x * workgroup_size.y * workgroup_size.z */
+      nir_def *workgroup_size =
+         nir_imul(b,
+            nir_imul(b,
+               nir_channel(b, local_size, 0),
+               nir_channel(b, local_size, 1)),
+            nir_channel(b, local_size, 2));
+      /*
+       * DIV_ROUND_UP(workgroup_size, subgroup_size). subgroup_size is a power
+       * of two, so nir_udiv_imm lowers the division to a right shift. Using the
+       * runtime workgroup size (like load_subgroup_id above) keeps this correct
+       * for kernels with a variable local size.
+       */
+      nir_def *num_subgroups =
+         nir_udiv_imm(b, nir_iadd_imm(b, workgroup_size, subgroup_size - 1),
+                      subgroup_size);
+      val = num_subgroups;
       break;
    }
 

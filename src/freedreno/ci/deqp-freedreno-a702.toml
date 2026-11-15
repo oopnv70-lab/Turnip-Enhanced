@@ -161,5 +161,3 @@ IR3_SHADER_DEBUG = "spillall"
 piglit_folder = "/piglit"
 profile = "cl"
 process_isolation = true
-  [piglit.env]
-  RUSTICL_ENABLE = "msm"

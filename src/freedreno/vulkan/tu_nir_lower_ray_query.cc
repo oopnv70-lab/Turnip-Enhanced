@@ -9,6 +9,7 @@
 #include "nir/nir_deref.h"
 
 #include "bvh/tu_bvh_defines.h"
+#include "tu_ray_traversal.h"
 #include "tu_shader.h"
 
 enum rq_intersection_var_index {
@@ -21,6 +22,8 @@ enum rq_intersection_var_index {
    rq_intersection_sbt_offset,
    rq_intersection_barycentrics,
    rq_intersection_t,
+   rq_intersection_bvh_base,
+   rq_intersection_node,
 };
 
 static const glsl_type *
@@ -38,6 +41,12 @@ get_rq_intersection_type(void)
       FIELD(glsl_uint_type(), sbt_offset)
       FIELD(glsl_vec2_type(), barycentrics)
       FIELD(glsl_float_type(), t)
+      /* The leaf node address at which the intersection was found.  This is
+       * needed by VK_KHR_ray_tracing_position_fetch to read the triangle
+       * vertices back out of the acceleration structure.
+       */
+      FIELD(glsl_uvec2_type(), bvh_base)
+      FIELD(glsl_uint_type(), node)
 #undef FIELD
    };
 
@@ -277,6 +286,8 @@ load_tlas(nir_builder *b, nir_def *tlas,
       return nir_load_global_offset(
          b, components, 32, nir_pack_64_2x32(b, tlas),
          nir_iadd_imm(b, nir_imul_imm(b, index, AS_RECORD_SIZE), offset),
+         .access = static_cast<gl_access_qualifier>(
+                      ACCESS_NON_WRITEABLE | ACCESS_CAN_REORDER | access),
          /* The required alignment of the
           * user-specified base from the Vulkan spec.
           */
@@ -493,6 +504,27 @@ lower_rq_load(nir_builder *b, struct hash_table *ht, nir_intrinsic_instr *intr)
       return rqi_load(b, intersection, primitive_id);
    case nir_ray_query_value_intersection_t:
       return rqi_load(b, intersection, t);
+   case nir_ray_query_value_intersection_triangle_vertex_positions: {
+      /* VK_KHR_ray_tracing_position_fetch.  The acceleration structure
+       * builder stores the uncompressed triangle vertices in every leaf, so
+       * this is a plain global load from the leaf descriptor.
+       */
+      nir_def *bvh_base = rqi_load(b, intersection, bvh_base);
+      nir_def *node = rqi_load(b, intersection, node);
+      const uint32_t offset = offsetof(struct tu_leaf_node, coords) +
+                              column * 3 * sizeof(float);
+      nir_def *node_offset =
+         nir_iadd_imm(b, nir_imul_imm(b, node, sizeof(struct tu_leaf_node)),
+                      offset);
+      nir_def *addr = nir_iadd(b, nir_pack_64_2x32(b, bvh_base),
+                               nir_u2u64(b, node_offset));
+      return nir_load_global(b, 3, 32, addr,
+                             .access = static_cast<gl_access_qualifier>(
+                                          ACCESS_NON_WRITEABLE |
+                                          ACCESS_CAN_REORDER),
+                             .align_mul = sizeof(struct tu_leaf_node),
+                             .align_offset = offset);
+   }
    case nir_ray_query_value_intersection_type: {
       nir_def *intersection_type =
          nir_iand_imm(b, nir_ishr_imm(b, rqi_load(b, intersection, type_flags),
@@ -530,11 +562,7 @@ lower_rq_load(nir_builder *b, struct hash_table *ht, nir_intrinsic_instr *intr)
    return NULL;
 }
 
-/* For the initialization of instance_bottom_node. Explicitly different than
- * VK_BVH_INVALID_NODE or any real node, to ensure we never exit an instance
- * when we're not in one.
- */
-#define TU_BVH_NO_INSTANCE_ROOT 0xfffffffeu
+#define TU_BVH_NO_INSTANCE_ROOT TU_RAY_BVH_NO_INSTANCE_ROOT
 
 static nir_def *
 nir_build_vec3_mat_mult(nir_builder *b, nir_def *vec, nir_def *matrix[], bool translation)
@@ -551,16 +579,6 @@ nir_build_vec3_mat_mult(nir_builder *b, nir_def *vec, nir_def *matrix[], bool tr
       }
    }
    return nir_vec(b, result_components, 3);
-}
-
-static nir_def *
-fetch_parent_node(nir_builder *b, nir_def *bvh, nir_def *node)
-{
-   nir_def *offset = nir_iadd_imm(b, nir_imul_imm(b, node, 4), 4);
-
-   return nir_load_global(
-      b, 1, 32, nir_isub(b, nir_pack_64_2x32(b, bvh), nir_u2u64(b, offset)),
-      .align_mul = 4);
 }
 
 static nir_def *
@@ -617,7 +635,7 @@ build_ray_traversal(nir_builder *b, nir_deref_instr *rq,
             nir_def *prev = rq_load(b, rq, previous_node);
             nir_def *bvh_addr = rq_load(b, rq, bvh_base);
 
-            nir_def *parent = fetch_parent_node(b, bvh_addr, prev);
+            nir_def *parent = tu_ray_fetch_parent_node(b, bvh_addr, prev);
             nir_push_if(b, nir_ieq_imm(b, parent, VK_BVH_INVALID_NODE));
             {
                nir_store_var(b, incomplete, nir_imm_false(b), 0x1);
@@ -658,6 +676,13 @@ build_ray_traversal(nir_builder *b, nir_deref_instr *rq,
                nir_store_deref(b, stack_deref,
                                nir_vec2(b, nir_undef(b, 1, 32), children),
                                0x2);
+               /* The entry still has children left.  Put it back on the
+                * stack: stack_ptr was decremented above to address the
+                * popped entry, so increment it again after updating the
+                * entry in place.  Without this the next pop would skip the
+                * remaining siblings.
+                */
+               rq_store(b, rq, stack_ptr, nir_iadd_imm(b, stack_ptr, 1), 1);
             }
             nir_pop_if(b, NULL);
 
@@ -808,10 +833,14 @@ build_ray_traversal(nir_builder *b, nir_deref_instr *rq,
             nir_def *geometry_id_ptr = nir_iadd(b, nir_pack_64_2x32(b, bvh_base),
                                                 offset);
             nir_def *geometry_id = nir_load_global(
-               b, 1, 32, geometry_id_ptr, .access = ACCESS_NON_WRITEABLE,
+               b, 1, 32, geometry_id_ptr,
+               .access = static_cast<gl_access_qualifier>(
+                            ACCESS_NON_WRITEABLE | ACCESS_CAN_REORDER),
                .align_mul = sizeof(struct tu_leaf_node),
                .align_offset = offsetof(struct tu_leaf_node, geometry_id));
             rqi_store(b, candidate, geometry_id, geometry_id, 1);
+            rqi_store(b, candidate, bvh_base, bvh_base, 0x3);
+            rqi_store(b, candidate, node, bvh_node, 0x1);
 
             nir_push_if(b, nir_test_mask(b, intersection_flags,
                                          TU_INTERSECTION_TYPE_AABB));

@@ -319,6 +319,8 @@ typedef enum {
 } nir_tensor_view_fields;
 
 #define NIR_TENSOR_VIEW_MAX_PERMUTATIONS 5
+/* maximum value of V in the tensor decode vector spec */
+#define NIR_CMAT_VECTOR_DECODE_MAX_V 8
 
 /**
  * tensor load cmat call information.
@@ -529,7 +531,7 @@ typedef struct nir_variable {
        *
        * :c:struct:`nir_variable_mode`
        */
-      unsigned mode : 26;
+      unsigned mode : 22;
 
       /* A temporary for passes to store information. Used, for example, to
        * replace an unordered set with an ordered util_dynarray.
@@ -2071,6 +2073,8 @@ typedef struct nir_cmat_call_instr {
    nir_cmat_call_op op;
 
    nir_function *callee;
+   nir_function *decode_vec_fn;
+
    int const_index[NIR_CMAT_CALL_MAX_CONST_INDEX];
 
    unsigned num_params;
@@ -2085,14 +2089,14 @@ static inline nir_cmat_reduce nir_cmat_call_reduce_flags(nir_cmat_call_instr *ca
 static inline struct nir_cmat_tensor_load nir_cmat_call_tensor_load_info(nir_cmat_call_instr *call)
 {
    struct nir_cmat_tensor_load tl;
-   STATIC_ASSERT(sizeof(call->const_index[NIR_CMAT_CALL_LAYOUT_OFFSET]) * 3 == sizeof(tl));
+   STATIC_ASSERT(sizeof(call->const_index[NIR_CMAT_CALL_LAYOUT_OFFSET]) * 3 >= sizeof(tl));
    memcpy(&tl, &call->const_index[NIR_CMAT_CALL_LAYOUT_OFFSET], sizeof(tl));
    return tl;
 }
 
 static inline void nir_cmat_call_set_tensor_load_info(nir_cmat_call_instr *call, struct nir_cmat_tensor_load tl)
 {
-   STATIC_ASSERT(sizeof(call->const_index[NIR_CMAT_CALL_LAYOUT_OFFSET]) * 3 == sizeof(tl));
+   STATIC_ASSERT(sizeof(call->const_index[NIR_CMAT_CALL_LAYOUT_OFFSET]) * 3 >= sizeof(tl));
    memcpy(&call->const_index[NIR_CMAT_CALL_LAYOUT_OFFSET], &tl, sizeof(tl));
 }
 
@@ -3537,6 +3541,13 @@ nir_alu_src_comp_get_uint(nir_alu_src src, unsigned comp, uint64_t *value)
    return false;
 }
 
+static inline double
+nir_alu_src_comp_as_float(nir_alu_src src, unsigned comp)
+{
+   nir_scalar scalar = nir_scalar_resolved(src.src.ssa, src.swizzle[comp]);
+   return nir_scalar_as_float(scalar);
+}
+
 typedef struct nir_binding {
    bool success;
 
@@ -4273,9 +4284,17 @@ nir_cf_list_is_empty_block(struct exec_list *cf_list)
    return false;
 }
 
+typedef enum ENUM_PACKED nir_parameter_mode {
+   nir_parameter_in = 0,
+   nir_parameter_out,
+   nir_parameter_inout,
+} nir_parameter_mode;
+
 typedef struct nir_parameter {
    uint8_t num_components;
    uint8_t bit_size;
+
+   nir_parameter_mode mode;
 
    /* True if this parameter is a deref used for returning values */
    bool is_return;
@@ -4287,8 +4306,6 @@ typedef struct nir_parameter {
     * otherwise.
     */
    bool is_uniform;
-
-   nir_variable_mode mode;
 
    /* Drivers may optionally stash flags here describing the parameter.
     * For example, this might encode whether the driver expects the value
@@ -4706,7 +4723,8 @@ nir_call_instr *nir_call_instr_create(nir_shader *shader,
 int nir_cmat_call_op_params(nir_cmat_call_op op, nir_function *callee);
 nir_cmat_call_instr *nir_cmat_call_instr_create(nir_shader *shader,
                                                 nir_cmat_call_op op,
-                                                nir_function *callee);
+                                                nir_function *callee,
+                                                nir_function *decode_vec_fn);
 
 /** Creates a NIR texture instruction */
 nir_tex_instr *nir_tex_instr_create(nir_shader *shader, unsigned num_srcs);
@@ -5700,6 +5718,23 @@ bool nir_propagate_invariant(nir_shader *shader, bool invariant_prim);
 void nir_lower_var_copy_instr(nir_intrinsic_instr *copy, nir_shader *shader);
 void nir_lower_deref_copy_instr(nir_builder *b,
                                 nir_intrinsic_instr *copy);
+struct nir_lower_var_copies_options {
+   /**
+    * Variable modes for which wildcard array copies may be lowered to loops.
+    * Both source and destination deref modes must be contained in this mask.
+    */
+   nir_variable_mode loop_array_copy_modes;
+
+   /**
+    * This is not the final call to the pass.  It will not mark
+    * var_copies_lowered in the shader.
+    */
+   bool early_lowering;
+};
+
+bool nir_lower_var_copies_with_options(
+   nir_shader *shader,
+   const struct nir_lower_var_copies_options *options);
 bool nir_lower_var_copies(nir_shader *shader);
 
 bool nir_opt_memcpy(nir_shader *shader);
@@ -5730,8 +5765,6 @@ bool nir_lower_indirect_var_derefs_to_if_else_trees(nir_shader *shader,
                                                     const struct set *vars);
 
 bool nir_lower_locals_to_regs(nir_shader *shader, uint8_t bool_bitsize);
-
-bool nir_downgrade_pls_vars(nir_shader *shader);
 
 bool nir_lower_io_vars_to_temporaries(nir_shader *shader,
                                       nir_function_impl *entrypoint,
@@ -6738,6 +6771,12 @@ typedef struct nir_lower_idiv_options {
     * division lowering
     */
    bool allow_fp16;
+
+   /* Correct 32-bit udiv in fp32.  For hardware where umul_high
+    * expands and frcp/ffma are one instruction.  Reciprocal nudged
+    * down 8 ulp.  Holds for rcp error in [-128, +8] ulp.
+    */
+   bool fp32_udiv_correction;
 } nir_lower_idiv_options;
 
 bool nir_lower_idiv(nir_shader *shader, const nir_lower_idiv_options *options);
@@ -7246,7 +7285,10 @@ typedef enum {
     * This is true for backends using nir_opt_preamble even if there's no scalar
     * ALU, since non-divergence is a decent proxy for uniformity.
     */
-   nir_reassociate_scalar_math = (1 << 1),
+   nir_reassociate_scalar_int_math   = (1 << 1),
+   nir_reassociate_scalar_float_math = (1 << 2),
+   nir_reassociate_scalar_math       = nir_reassociate_scalar_int_math |
+                                       nir_reassociate_scalar_float_math,
 } nir_reassociate_options;
 
 bool nir_opt_reassociate(nir_shader *shader, nir_reassociate_options opts);
@@ -7692,11 +7734,13 @@ struct nir_calc_tensor_info {
    uint32_t col_imm_offset;
    uint8_t view_permutations[NIR_TENSOR_VIEW_MAX_PERMUTATIONS];
    bool view_has_dims;
+   bool use_vec_decode;
    struct glsl_cmat_description desc;
    nir_tensor_clamp_mode clamp_mode;
    nir_if *clipped_if;
    nir_def *do_clamp;
    nir_function *decode_fnptr;
+   nir_function *decode_vec_fnptr;
 };
 
 void nir_calc_tensor_derefs_init(nir_builder *b, struct nir_calc_tensor_info *info,

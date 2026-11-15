@@ -362,12 +362,12 @@ ac_build_gfx10_fmask_descriptor(const enum amd_gfx_level gfx_level, const struct
              S_00A004_FORMAT_GFX10(format) |
              S_00A004_WIDTH_LO(state->width - 1);
    desc[2] = S_00A008_WIDTH_HI((state->width - 1) >> 2) |
-             S_00A008_HEIGHT(state->height - 1) |
+             S_00A008_HEIGHT_GFX10(state->height - 1) |
              S_00A008_RESOURCE_LEVEL(1);
-   desc[3] = S_00A00C_DST_SEL_X(V_008F1C_SQ_SEL_X) |
-             S_00A00C_DST_SEL_Y(V_008F1C_SQ_SEL_X) |
-             S_00A00C_DST_SEL_Z(V_008F1C_SQ_SEL_X) |
-             S_00A00C_DST_SEL_W(V_008F1C_SQ_SEL_X) |
+   desc[3] = S_00A00C_DST_SEL_X_GFX10(V_008F1C_SQ_SEL_X) |
+             S_00A00C_DST_SEL_Y_GFX10(V_008F1C_SQ_SEL_X) |
+             S_00A00C_DST_SEL_Z_GFX10(V_008F1C_SQ_SEL_X) |
+             S_00A00C_DST_SEL_W_GFX10(V_008F1C_SQ_SEL_X) |
              S_00A00C_SW_MODE(surf->u.gfx9.color.fmask_swizzle_mode) |
              S_00A00C_TYPE(state->type);
    desc[4] = S_00A010_DEPTH_GFX10(state->last_layer) | S_00A010_BASE_ARRAY(state->first_layer);
@@ -490,7 +490,10 @@ ac_get_gfx10_img_format(const enum amd_gfx_level gfx_level, const struct ac_text
 
    if (desc->colorspace == UTIL_FORMAT_COLORSPACE_ZS &&
        state->gfx10.upgraded_depth && !util_format_has_stencil(desc)) {
-      if (gfx_level >= GFX11) {
+      if (gfx_level >= GFX13) {
+         assert(img_format == V_008F10_GFX13_FORMAT_32_FLOAT);
+         img_format = V_008F10_GFX13_FORMAT_32_FLOAT_CLAMP;
+      } else if (gfx_level >= GFX11) {
          assert(img_format == V_008F0C_GFX11_FORMAT_32_FLOAT);
          img_format = V_008F0C_GFX11_FORMAT_32_FLOAT_CLAMP;
       } else {
@@ -519,12 +522,12 @@ ac_build_gfx10_texture_descriptor(const struct radeon_info *info, const struct a
    desc[1] = S_00A004_FORMAT_GFX10(img_format) |
              S_00A004_WIDTH_LO(state->width - 1);
    desc[2] = S_00A008_WIDTH_HI((state->width - 1) >> 2) |
-             S_00A008_HEIGHT(state->height - 1) |
+             S_00A008_HEIGHT_GFX10(state->height - 1) |
              S_00A008_RESOURCE_LEVEL(info->compiler_info.has_desc_resource_level);
-   desc[3] = S_00A00C_DST_SEL_X(ac_map_swizzle(state->swizzle[0])) |
-             S_00A00C_DST_SEL_Y(ac_map_swizzle(state->swizzle[1])) |
-             S_00A00C_DST_SEL_Z(ac_map_swizzle(state->swizzle[2])) |
-             S_00A00C_DST_SEL_W(ac_map_swizzle(state->swizzle[3])) |
+   desc[3] = S_00A00C_DST_SEL_X_GFX10(ac_map_swizzle(state->swizzle[0])) |
+             S_00A00C_DST_SEL_Y_GFX10(ac_map_swizzle(state->swizzle[1])) |
+             S_00A00C_DST_SEL_Z_GFX10(ac_map_swizzle(state->swizzle[2])) |
+             S_00A00C_DST_SEL_W_GFX10(ac_map_swizzle(state->swizzle[3])) |
              S_00A00C_BASE_LEVEL(num_samples > 1 ? 0 : state->first_level) |
              S_00A00C_LAST_LEVEL_GFX10(field_last_level) |
              S_00A00C_BC_SWIZZLE(ac_border_color_swizzle(fmt_desc)) |
@@ -540,7 +543,7 @@ ac_build_gfx10_texture_descriptor(const struct radeon_info *info, const struct a
     * In SRV mode, BASE_ARRAY is ignored and DEPTH is the last slice of mipmap level 0.
     * In UAV mode, BASE_ARRAY is the first slice and DEPTH is the last slice of the bound level.
     */
-   desc[5] = S_00A014_ARRAY_PITCH(state->gfx10.uav3d) | S_00A014_PERF_MOD(4);
+   desc[5] = S_00A014_ARRAY_PITCH(state->gfx10.uav3d) | S_00A014_PERF_MOD_GFX10(4);
    desc[6] = 0;
    desc[7] = 0;
 
@@ -582,32 +585,48 @@ ac_build_gfx12_texture_descriptor(const struct radeon_info *info, const struct a
       max_mip = nbc_view->num_levels - 1;
 
    desc[0] = 0;
-   desc[1] = S_00A004_MAX_MIP_GFX12(max_mip) |
-             S_00A004_FORMAT_GFX12(img_format) |
-             S_00A004_BASE_LEVEL(state->num_samples > 1 ? 0 : state->first_level) |
-             S_00A004_WIDTH_LO(state->width - 1);
-   desc[2] = S_00A008_WIDTH_HI((state->width - 1) >> 2) |
-             S_00A008_HEIGHT(state->height - 1);
-   desc[3] = S_00A00C_DST_SEL_X(ac_map_swizzle(state->swizzle[0])) |
-             S_00A00C_DST_SEL_Y(ac_map_swizzle(state->swizzle[1])) |
-             S_00A00C_DST_SEL_Z(ac_map_swizzle(state->swizzle[2])) |
-             S_00A00C_DST_SEL_W(ac_map_swizzle(state->swizzle[3])) |
-             S_00A00C_NO_EDGE_CLAMP(no_edge_clamp) |
-             S_00A00C_LAST_LEVEL_GFX12(field_last_level) |
-             S_00A00C_BC_SWIZZLE(ac_border_color_swizzle(fmt_desc)) |
-             S_00A00C_TYPE(state->type);
-
+   if (info->gfx_level >= GFX13) {
+      desc[1] = S_00A004_MAX_MIP_GFX13(max_mip) |
+                S_00A004_FORMAT_GFX13(img_format) |
+                S_00A004_BASE_LEVEL_GFX13(state->num_samples > 1 ? 0 : state->first_level);
+      desc[2] = S_00A008_WIDTH(state->width - 1) |
+                S_00A008_HEIGHT_GFX13(state->height - 1);
+      desc[3] = S_00A00C_DST_SEL_X_GFX13(ac_map_swizzle(state->swizzle[0])) |
+                S_00A00C_DST_SEL_Y_GFX13(ac_map_swizzle(state->swizzle[1])) |
+                S_00A00C_DST_SEL_Z_GFX13(ac_map_swizzle(state->swizzle[2])) |
+                S_00A00C_DST_SEL_W_GFX13(ac_map_swizzle(state->swizzle[3])) |
+                S_00A00C_NO_EDGE_CLAMP_GFX13(no_edge_clamp);
+      desc[5] = S_00A014_UAV3D_GFX13(state->gfx10.uav3d) |
+                S_00A014_PERF_MOD_GFX13(4) |
+                S_00A014_MIN_LOD_LO_GFX13(min_lod_clamped);
+      desc[6] = S_00A018_MIN_LOD_HI(min_lod_clamped >> 9);
+   } else {
+      desc[1] = S_00A004_MAX_MIP_GFX12(max_mip) |
+                S_00A004_FORMAT_GFX12(img_format) |
+                S_00A004_BASE_LEVEL_GFX12(state->num_samples > 1 ? 0 : state->first_level) |
+                S_00A004_WIDTH_LO(state->width - 1);
+      desc[2] = S_00A008_WIDTH_HI((state->width - 1) >> 2) |
+                S_00A008_HEIGHT_GFX10(state->height - 1);
+      desc[3] = S_00A00C_DST_SEL_X_GFX10(ac_map_swizzle(state->swizzle[0])) |
+                S_00A00C_DST_SEL_Y_GFX10(ac_map_swizzle(state->swizzle[1])) |
+                S_00A00C_DST_SEL_Z_GFX10(ac_map_swizzle(state->swizzle[2])) |
+                S_00A00C_DST_SEL_W_GFX10(ac_map_swizzle(state->swizzle[3])) |
+                S_00A00C_NO_EDGE_CLAMP_GFX12(no_edge_clamp);
+      desc[5] = S_00A014_UAV3D_GFX12(state->gfx10.uav3d) |
+                S_00A014_PERF_MOD_GFX10(4) |
+                S_00A014_MIN_LOD_LO_GFX12(min_lod_clamped);
+      desc[6] = S_00A018_MIN_LOD_HI(min_lod_clamped >> 6);
+   }
+   desc[3] |= S_00A00C_LAST_LEVEL_GFX12(field_last_level) |
+              S_00A00C_BC_SWIZZLE(ac_border_color_swizzle(fmt_desc)) |
+              S_00A00C_TYPE(state->type);
    /* Depth is the the last accessible layer on gfx9+. The hw doesn't need
     * to know the total number of layers.
     */
    desc[4] = S_00A010_DEPTH_GFX12(state->depth) |
              S_00A010_BASE_ARRAY(state->first_layer);
-   desc[5] = S_00A014_UAV3D(state->gfx10.uav3d) |
-             S_00A014_PERF_MOD(4) |
-             S_00A014_MIN_LOD_LO_GFX12(min_lod_clamped);
-   desc[6] = S_00A018_MAX_UNCOMPRESSED_BLOCK_SIZE(1 /*256B*/) |
-             S_00A018_MAX_COMPRESSED_BLOCK_SIZE(surf->u.gfx9.color.dcc.max_compressed_block_size) |
-             S_00A018_MIN_LOD_HI(min_lod_clamped >> 6);
+   desc[6] |= S_00A018_MAX_UNCOMPRESSED_BLOCK_SIZE(1 /*256B*/) |
+              S_00A018_MAX_COMPRESSED_BLOCK_SIZE(surf->u.gfx9.color.dcc.max_compressed_block_size);
    desc[7] = 0;
 }
 
@@ -802,6 +821,8 @@ ac_set_mutable_tex_desc_fields(const struct radeon_info *info, const struct ac_m
 void
 ac_set_buf_desc_word3(const enum amd_gfx_level gfx_level, const struct ac_buffer_state *state, uint32_t *rsrc_word3)
 {
+   assert(gfx_level < GFX13);
+
    *rsrc_word3 = S_008F0C_DST_SEL_X(ac_map_swizzle(state->swizzle[0])) |
                  S_008F0C_DST_SEL_Y(ac_map_swizzle(state->swizzle[1])) |
                  S_008F0C_DST_SEL_Z(ac_map_swizzle(state->swizzle[2])) |
@@ -834,12 +855,12 @@ ac_set_buf_desc_word3(const enum amd_gfx_level gfx_level, const struct ac_buffer
        */
       *rsrc_word3 |= (gfx_level >= GFX12 ? S_008F0C_FORMAT_GFX12(fmt->img_format) :
                                            S_008F0C_FORMAT_GFX10(fmt->img_format)) |
-                     S_008F0C_OOB_SELECT(state->gfx10_oob_select) |
+                     S_008F0C_OOB_SELECT_GFX10(state->gfx10_oob_select) |
                      S_008F0C_RESOURCE_LEVEL(state->has_desc_resource_level);
 
       if (gfx_level >= GFX12) {
-         *rsrc_word3 |= S_008F0C_COMPRESSION_EN(state->gfx12.compression_en) |
-                        S_008F0C_WRITE_COMPRESS_ENABLE(state->gfx12.write_compress_enable);
+         *rsrc_word3 |= S_008F0C_COMPRESSION_EN_GFX12(state->gfx12.compression_en) |
+                        S_008F0C_WRITE_COMPRESS_ENABLE_GFX12(state->gfx12.write_compress_enable);
       }
    } else {
       const struct util_format_description * desc =  util_format_description(state->format);
@@ -856,29 +877,61 @@ ac_set_buf_desc_word3(const enum amd_gfx_level gfx_level, const struct ac_buffer
    }
 }
 
+void ac_set_buf_desc_word4(const enum amd_gfx_level gfx_level, const struct ac_buffer_state *state, uint32_t * rsrc_word4)
+{
+   assert(gfx_level >= GFX13);
+   *rsrc_word4 = S_008F10_DST_SEL_X(ac_map_swizzle(state->swizzle[0])) |
+                 S_008F10_DST_SEL_Y(ac_map_swizzle(state->swizzle[1])) |
+                 S_008F10_DST_SEL_Z(ac_map_swizzle(state->swizzle[2])) |
+                 S_008F10_DST_SEL_W(ac_map_swizzle(state->swizzle[3]));
+
+   const struct gfx10_format *fmt = &ac_get_gfx10_format_table(gfx_level)[state->format];
+   *rsrc_word4 |= S_008F10_FORMAT(fmt->img_format);
+}
+
 void
 ac_build_buffer_descriptor(const enum amd_gfx_level gfx_level, const struct ac_buffer_state *state, uint32_t desc[4])
 {
-   uint32_t rsrc_word1 = S_008F04_BASE_ADDRESS_HI(state->va >> 32) | S_008F04_STRIDE(state->stride);
+   uint32_t rsrc_word1;
+   uint32_t rsrc_word2;
    uint32_t rsrc_word3;
+   if (gfx_level >= GFX13) {
+      assert(state->swizzle_enable == 0 || state->swizzle_enable == 3);
+      uint64_t num_records = state->size;
+      rsrc_word1 = S_008F04_BASE_ADDRESS_HI(state->va >> 32) | S_008F04_NUM_RECORDS_1(num_records);
+      rsrc_word2 = num_records >> 7;
+      rsrc_word3 = S_008F0C_NUM_RECORDS_3(num_records >> 39) |
+                   S_008F0C_WRITE_COMPRESS_ENABLE_GFX13(state->gfx12.write_compress_enable) |
+                   S_008F0C_COMPRESSION_EN_GFX13(state->gfx12.compression_en) |
+                   S_008F0C_STRIDE(state->stride) |
+                   /* 0: swizzle disabled
+                    * 1: swizzle enabled using the attribute ring layout */
+                   S_008F0C_SWIZZLE_ENABLE(state->swizzle_enable == 3 ? 1 : 0) |
+                   /* 0: oob = total_offset + payload > numRecords
+                    * 1: oob = total_offset + payload > numRecords || offset + payload > stride */
+                   S_008F0C_OOB_SELECT_GFX13((state->gfx10_oob_select == 0) ? 1 : 0);
+   } else {
+      rsrc_word1 = S_008F04_BASE_ADDRESS_HI(state->va >> 32) | S_008F04_STRIDE(state->stride);
+      rsrc_word2 = state->size;
+      ac_set_buf_desc_word3(gfx_level, state, &rsrc_word3);
+   }
 
    if (gfx_level >= GFX11) {
-      rsrc_word1 |= S_008F04_SWIZZLE_ENABLE_GFX11(state->swizzle_enable);
+      if (gfx_level < GFX13)
+         rsrc_word1 |= S_008F04_SWIZZLE_ENABLE_GFX11(state->swizzle_enable);
    } else {
       rsrc_word1 |= S_008F04_SWIZZLE_ENABLE_GFX6(state->swizzle_enable);
    }
 
-   ac_set_buf_desc_word3(gfx_level, state, &rsrc_word3);
-
    desc[0] = state->va;
    desc[1] = rsrc_word1;
-   desc[2] = state->size;
+   desc[2] = rsrc_word2;
    desc[3] = rsrc_word3;
 }
 
 void
 ac_build_raw_buffer_descriptor(const enum amd_gfx_level gfx_level, bool has_desc_resource_level,
-                               uint64_t va, uint32_t size, uint32_t desc[4])
+                               uint64_t va, uint64_t size, uint32_t desc[4])
 {
    const struct ac_buffer_state ac_state = {
       .va = va,
@@ -896,7 +949,7 @@ ac_build_raw_buffer_descriptor(const enum amd_gfx_level gfx_level, bool has_desc
 
 void
 ac_build_attr_ring_descriptor(const enum amd_gfx_level gfx_level, bool has_desc_resource_level,
-                              uint64_t va, uint32_t size, uint32_t stride, uint32_t desc[4])
+                              uint64_t va, uint64_t size, uint32_t stride, uint32_t desc[4])
 {
    assert(gfx_level >= GFX11);
 
@@ -915,6 +968,18 @@ ac_build_attr_ring_descriptor(const enum amd_gfx_level gfx_level, bool has_desc_
    };
 
    ac_build_buffer_descriptor(gfx_level, &ac_state, desc);
+}
+
+uint64_t
+ac_get_buffer_num_records(const enum amd_gfx_level gfx_level, const uint32_t desc[4])
+{
+   if (gfx_level >= GFX13) {
+      /* GFX13 has NUM_RECORDS across WORD1/WORD2/WORD3. */
+      return (uint64_t)G_008F04_NUM_RECORDS_1(desc[1]) | ((uint64_t)desc[2] << 7) |
+             ((uint64_t)G_008F0C_NUM_RECORDS_3(desc[3]) << 39);
+   } else {
+      return desc[2];
+   }
 }
 
 static void
@@ -1606,21 +1671,21 @@ ac_build_gfx12_hiz_descriptor(const struct ac_gfx12_hiz_state *state, uint32_t d
    desc[1] = S_00A004_BASE_ADDRESS_HI(va >> 40) |
              S_00A004_MAX_MIP_GFX12(max_mip) |
              S_00A004_FORMAT_GFX12(V_00A004_GFX11_FORMAT_32_UINT) |
-             S_00A004_BASE_LEVEL(state->num_samples > 1 ? 0 : state->first_level) |
+             S_00A004_BASE_LEVEL_GFX12(state->num_samples > 1 ? 0 : state->first_level) |
              S_00A004_WIDTH_LO(width - 1);
    desc[2] = S_00A008_WIDTH_HI((width - 1) >> 2) |
-             S_00A008_HEIGHT(height - 1);
-   desc[3] = S_00A00C_DST_SEL_X(V_008F0C_SQ_SEL_X) |
-             S_00A00C_DST_SEL_Y(V_008F0C_SQ_SEL_0) |
-             S_00A00C_DST_SEL_Z(V_008F0C_SQ_SEL_0) |
-             S_00A00C_DST_SEL_W(V_008F0C_SQ_SEL_1) |
+             S_00A008_HEIGHT_GFX10(height - 1);
+   desc[3] = S_00A00C_DST_SEL_X_GFX10(V_008F0C_SQ_SEL_X) |
+             S_00A00C_DST_SEL_Y_GFX10(V_008F0C_SQ_SEL_0) |
+             S_00A00C_DST_SEL_Z_GFX10(V_008F0C_SQ_SEL_0) |
+             S_00A00C_DST_SEL_W_GFX10(V_008F0C_SQ_SEL_1) |
              S_00A00C_LAST_LEVEL_GFX12(field_last_level) |
              S_00A00C_BC_SWIZZLE(V_00A00C_BC_SWIZZLE_XYZW) |
              S_00A00C_TYPE(state->type) |
              S_00A00C_SW_MODE(surf->u.gfx9.zs.hiz.swizzle_mode);
    desc[4] = S_00A010_DEPTH_GFX12(state->last_layer) |
              S_00A010_BASE_ARRAY(state->first_layer);
-   desc[5] = S_00A014_PERF_MOD(4);
+   desc[5] = S_00A014_PERF_MOD_GFX10(4);
    desc[6] = S_00A018_MAX_UNCOMPRESSED_BLOCK_SIZE(1 /*256B*/) |
              S_00A018_MAX_COMPRESSED_BLOCK_SIZE(0) |
              S_00A018_COMPRESSION_EN(1) |

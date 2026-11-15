@@ -14,12 +14,12 @@
 #include "radv_image.h"
 #include "radv_physical_device.h"
 
-#if DETECT_OS_ANDROID
+#ifdef VK_USE_PLATFORM_ANDROID_KHR
 #include <vulkan/vk_android_native_buffer.h>
 
 #include <errno.h>
 #include <unistd.h>
-#endif /* DETECT_OS_ANDROID */
+#endif /* VK_USE_PLATFORM_ANDROID_KHR */
 
 #include "util/os_file.h"
 
@@ -30,7 +30,7 @@
 
 #define RADV_ANDROID_MAX_PLANES 4
 
-#if DETECT_OS_ANDROID
+#ifdef VK_USE_PLATFORM_ANDROID_KHR
 
 static VkResult
 radv_gralloc_import_memory(VkDevice device_h, const VkNativeBufferANDROID *gralloc_info,
@@ -238,7 +238,7 @@ restore_create_info:
    return result;
 }
 
-#endif /* DETECT_OS_ANDROID */
+#endif /* VK_USE_PLATFORM_ANDROID_KHR */
 
 #if RADV_SUPPORT_ANDROID_HARDWARE_BUFFER
 
@@ -448,8 +448,8 @@ radv_GetAndroidHardwareBufferPropertiesANDROID(VkDevice device_h, const struct A
    if (dma_buf < 0)
       return VK_ERROR_INVALID_EXTERNAL_HANDLE;
 
-   /* All memory types. */
-   uint32_t memory_types = (1u << pdev->memory_properties.memoryTypeCount) - 1;
+   /* All allowed memory types. */
+   uint32_t memory_types = dev->memory_types_allowed;
 
    pProperties->allocationSize = lseek(dma_buf, 0, SEEK_END);
    pProperties->memoryTypeBits = memory_types & ~pdev->memory_types_32bit;

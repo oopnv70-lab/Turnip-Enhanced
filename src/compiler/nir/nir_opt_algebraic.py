@@ -190,8 +190,13 @@ optimizations = [
    (('imul', a, '#b(is_neg_power_of_two)'), ('ineg', ('ishl', a, ('find_lsb', ('iabs', b)))), '!options->lower_bitops'),
    (('ishl', a, '#b'), ('imul', a, ('ishl', 1, b)), 'options->lower_bitops'),
 
+   # Only do this when there is no support for imad32 and if imul_2x32_64 also
+   # gets lowered as otherwise this optimization will actually hurt. It won't
+   # be able to beat a 3 instruction sequence (or 2 with zero high/low bits in
+   # the constant).
    (('imul@64', a, '#b(is_bitcount2)'), ('iadd', ('ishl', a, ('ufind_msb', b)), ('ishl', a, ('find_lsb', b))),
-    '!options->lower_bitops && (options->lower_int64_options & (nir_lower_imul64 | nir_lower_shift64)) == nir_lower_imul64'),
+    '!options->lower_bitops && !options->has_imad32 && ' +
+    '(options->lower_int64_options & (nir_lower_imul64 | nir_lower_imul_2x32_64 | nir_lower_shift64)) == (nir_lower_imul64 | nir_lower_imul_2x32_64)'),
 
    (('unpack_64_2x32_split_x', ('imul_2x32_64(is_used_once)', a, b)), ('imul', a, b)),
    (('unpack_64_2x32_split_x', ('umul_2x32_64(is_used_once)', a, b)), ('imul', a, b)),
@@ -740,6 +745,10 @@ optimizations.extend([
     ('iadd', ('imul', ('iadd', a, c), d), ('imul', b, d))),
    (('ishl', ('iadd(is_used_once)', ('iadd(is_used_once)', a, '#b'), c), '#d'),
     ('iadd', ('ishl', ('iadd', a, c), d), ('ishl', b, d))),
+
+   # (d - a * b) + a * c => d + a * (c - b)
+   (('iadd', ('iadd(is_used_once)', d, ('ineg(is_used_once)', ('imul(is_used_once)', a, b))), ('imul(is_used_once)', a, c)),
+    ('iadd', d, ('imul', a, ('iadd', c, ('ineg', b))))),
 
    # Comparison simplifications
    (('inot', ('flt(is_used_once)', 'a(is_a_number)', 'b(is_a_number)')), ('fge', a, b)),
@@ -2755,13 +2764,24 @@ optimizations.extend([
     'options->lower_extract_word'),
 
     (('pack_unorm_2x16', 'v'),
-     ('pack_uvec2_to_uint',
-        ('f2u32', ('fround_even', ('fmul', ('fsat', 'v'), 65535.0)))),
-     'options->lower_pack_unorm_2x16'),
+     ('ior',
+        ('f2u32(vec2).x', ('fround_even', ('fmul', ('fsat', 'v'), 65535.0))),
+        ('ishl', ('f2u32(vec2).y', ('fround_even', ('fmul', ('fsat', 'v'), 65535.0))), 16)),
+     'options->lower_pack_unorm_2x16 && !options->vectorize_vec2_16bit'),
+
+    (('pack_unorm_2x16', 'v'),
+     ('pack_32_2x16',
+        ('f2u16', ('fround_even', ('fmul', ('fsat', 'v'), 65535.0)))),
+     'options->lower_pack_unorm_2x16 && options->vectorize_vec2_16bit'),
 
     (('pack_unorm_4x8', 'v'),
-     ('pack_uvec4_to_uint',
-        ('f2u32', ('fround_even', ('fmul', ('fsat', 'v'), 255.0)))),
+     ('ior',
+      ('ior',
+        ('f2u32(vec4).x', ('fround_even', ('fmul', ('fsat', 'v'), 255.0))),
+        ('ishl', ('f2u32(vec4).y', ('fround_even', ('fmul', ('fsat', 'v'), 255.0))), 8)),
+      ('ior',
+        ('ishl', ('f2u32(vec4).z', ('fround_even', ('fmul', ('fsat', 'v'), 255.0))), 16),
+        ('ishl', ('f2u32(vec4).w', ('fround_even', ('fmul', ('fsat', 'v'), 255.0))), 24))),
      'options->lower_pack_unorm_4x8 && !options->has_pack_32_4x8'),
 
     (('pack_unorm_4x8', 'v'),
@@ -2770,13 +2790,24 @@ optimizations.extend([
      'options->lower_pack_unorm_4x8 && options->has_pack_32_4x8'),
 
     (('pack_snorm_2x16', 'v'),
-     ('pack_uvec2_to_uint',
-        ('f2i32', ('fround_even', ('fmul', ('fmin', 1.0, ('fmax', -1.0, 'v')), 32767.0)))),
-     'options->lower_pack_snorm_2x16'),
+     ('ior',
+        ('extract_u16(vec2).x', ('f2i32', ('fround_even', ('fmul', ('fmin', 1.0, ('fmax', -1.0, 'v')), 32767.0))), 0),
+        ('ishl', ('extract_u16(vec2).y', ('f2i32', ('fround_even', ('fmul', ('fmin', 1.0, ('fmax', -1.0, 'v')), 32767.0))), 0), 16)),
+     'options->lower_pack_snorm_2x16 && !options->vectorize_vec2_16bit'),
+
+    (('pack_snorm_2x16', 'v'),
+     ('pack_32_2x16',
+        ('f2i16', ('fround_even', ('fmul', ('fmin', 1.0, ('fmax', -1.0, 'v')), 32767.0)))),
+     'options->lower_pack_snorm_2x16 && options->vectorize_vec2_16bit'),
 
     (('pack_snorm_4x8', 'v'),
-     ('pack_uvec4_to_uint',
-        ('f2i32', ('fround_even', ('fmul', ('fmin', 1.0, ('fmax', -1.0, 'v')), 127.0)))),
+     ('ior',
+      ('ior',
+        ('extract_u8(vec4).x', ('f2i32', ('fround_even', ('fmul', ('fmin', 1.0, ('fmax', -1.0, 'v')), 127.0))), 0),
+        ('ishl', ('extract_u8(vec4).y', ('f2i32', ('fround_even', ('fmul', ('fmin', 1.0, ('fmax', -1.0, 'v')), 127.0))), 0), 8)),
+      ('ior',
+        ('ishl', ('extract_u8(vec4).z', ('f2i32', ('fround_even', ('fmul', ('fmin', 1.0, ('fmax', -1.0, 'v')), 127.0))), 0), 16),
+        ('ishl', ('extract_u8(vec4).w', ('f2i32', ('fround_even', ('fmul', ('fmin', 1.0, ('fmax', -1.0, 'v')), 127.0))), 0), 24))),
      'options->lower_pack_snorm_4x8 && !options->has_pack_32_4x8'),
 
     (('pack_snorm_4x8', 'v'),

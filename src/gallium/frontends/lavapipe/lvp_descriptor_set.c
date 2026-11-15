@@ -108,9 +108,6 @@ VKAPI_ATTR VkResult VKAPI_CALL lvp_CreateDescriptorSetLayout(
    VK_FROM_HANDLE(lvp_device, device, _device);
    struct lvp_descriptor_set_layout *set_layout;
 
-   const VkMutableDescriptorTypeCreateInfoEXT *mutable_info =
-      vk_find_struct_const(pCreateInfo->pNext, MUTABLE_DESCRIPTOR_TYPE_CREATE_INFO_EXT);
-
    assert(pCreateInfo->sType == VK_STRUCTURE_TYPE_DESCRIPTOR_SET_LAYOUT_CREATE_INFO);
    uint32_t num_bindings = 0;
    uint32_t immutable_sampler_count = 0;
@@ -150,14 +147,15 @@ VKAPI_ATTR VkResult VKAPI_CALL lvp_CreateDescriptorSetLayout(
    set_layout->shader_stages = 0;
    set_layout->size = 0;
 
-   VkDescriptorSetLayoutBinding *bindings = NULL;
-   VkResult result = vk_create_sorted_bindings(pCreateInfo->pBindings,
-                                               pCreateInfo->bindingCount,
-                                               &bindings, NULL, NULL);
+   struct vk_sorted_bindings *sorted;
+   VkResult result =
+      vk_create_sorted_bindings(&device->vk, pCreateInfo, pAllocator, &sorted);
    if (result != VK_SUCCESS) {
       vk_descriptor_set_layout_unref(&device->vk, &set_layout->vk);
       return vk_error(device, result);
    }
+
+   const VkDescriptorSetLayoutBinding *bindings = sorted->bindings;
 
    uint32_t uniform_block_size = 0;
 
@@ -206,9 +204,9 @@ VKAPI_ATTR VkResult VKAPI_CALL lvp_CreateDescriptorSetLayout(
       set_layout->binding[b].max_plane_count = max_plane_count;
 
       uint32_t descriptor_size = lvp_get_descriptor_size(binding->descriptorType);
-      if (binding->descriptorType == VK_DESCRIPTOR_TYPE_MUTABLE_EXT && mutable_info) {
+      if (binding->descriptorType == VK_DESCRIPTOR_TYPE_MUTABLE_EXT) {
          descriptor_size = 0;
-         const VkMutableDescriptorTypeListEXT *type_list = &mutable_info->pMutableDescriptorTypeLists[j];
+         const VkMutableDescriptorTypeListEXT *type_list = &sorted->mutable_type_lists[j];
          for (uint32_t k = 0; k < type_list->descriptorTypeCount; k++)
             descriptor_size = MAX2(descriptor_size, lvp_get_descriptor_size(type_list->pDescriptorTypes[k]));
       }
@@ -228,7 +226,7 @@ VKAPI_ATTR VkResult VKAPI_CALL lvp_CreateDescriptorSetLayout(
    for (uint32_t i = 0; i < pCreateInfo->bindingCount; i++)
       set_layout->binding[i].uniform_block_offset += set_layout->size;
 
-   free(bindings);
+   vk_destroy_sorted_bindings(&device->vk, pAllocator, sorted);
 
    set_layout->dynamic_offset_count = dynamic_offset_count;
 

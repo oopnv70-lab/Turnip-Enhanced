@@ -1664,6 +1664,10 @@ write_cmat_call(write_ctx *ctx, const nir_cmat_call_instr *call)
    else
       blob_write_uint32(ctx->blob, 0);
 
+   if (call->decode_vec_fn)
+      blob_write_uint32(ctx->blob, write_lookup_object(ctx, call->decode_vec_fn));
+   else
+      blob_write_uint32(ctx->blob, 0);
    blob_write_uint32(ctx->blob, call->op);
 
    for (unsigned i = 0; i < call->num_params; i++)
@@ -1680,8 +1684,13 @@ read_cmat_call(read_ctx *ctx)
    nir_function *callee = NULL;
    if (callee_int)
       callee = read_lookup_object(ctx, callee_int);
+   uint32_t decode_int = blob_read_uint32(ctx->blob);
+   nir_function *decode_vec_fn = NULL;
+   if (decode_int)
+      decode_vec_fn = read_lookup_object(ctx, decode_int);
    nir_cmat_call_op op = blob_read_uint32(ctx->blob);
-   nir_cmat_call_instr *call = nir_cmat_call_instr_create(ctx->nir, op, callee);
+
+   nir_cmat_call_instr *call = nir_cmat_call_instr_create(ctx->nir, op, callee, decode_vec_fn);
 
    for (unsigned i = 0; i < call->num_params; i++)
       read_src(ctx, &call->params[i]);
@@ -2120,7 +2129,7 @@ write_function(write_ctx *ctx, const nir_function *fxn)
          blob_write_string(ctx->blob, fxn->params[i].name);
 
       encode_type_to_blob(ctx->blob, fxn->params[i].type);
-      blob_write_uint32(ctx->blob, encode_deref_modes(fxn->params[i].mode));
+      blob_write_uint32(ctx->blob, fxn->params[i].mode);
       blob_write_uint32(ctx->blob, fxn->params[i].driver_attributes);
    }
 
@@ -2171,7 +2180,7 @@ read_function(read_ctx *ctx)
       fxn->params[i].is_return = val & (1u << 17);
       fxn->params[i].is_uniform = val & (1u << 18);
       fxn->params[i].type = decode_type_from_blob(ctx->blob);
-      fxn->params[i].mode = decode_deref_modes(blob_read_uint32(ctx->blob));
+      fxn->params[i].mode = blob_read_uint32(ctx->blob);
       fxn->params[i].driver_attributes = blob_read_uint32(ctx->blob);
    }
 

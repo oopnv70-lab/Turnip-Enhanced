@@ -17,10 +17,10 @@ use crate::ssa_value::{AllocSSA, SSAValueAllocator};
 use crate::swizzle::{AsmSwizzleWiden, SwizzleByte, SwizzleWord};
 use acorn::Acorn;
 use compiler::cfg::CFGBuilder;
-use compiler::enum_as_u8::EnumAsU8;
 use compiler::float16::F16;
 use kraid_hw_runner::{HwError, InvocationInfo, TestRunner};
 use mesa_util::bitview::BitViewable;
+use mesa_util::enum_as_u8::EnumAsU8;
 use rustc_hash::FxBuildHasher;
 
 /// Enables libpanfrost_decode logs for debugging purposes.
@@ -776,7 +776,7 @@ fn test_copy_warp() {
     // only copies the first half
     const HALF_READ_SIZE: usize = READ_SIZE / 2;
     for i in 0..data.len() {
-        data[i] = (i as u8) * 4 + 1;
+        data[i] = (i * 4 + 1) as u8;
     }
     data[READ_SIZE..].fill(0);
     let case = bin.with_data_raw(&mut data, 4, WARP_SIZE / 2);
@@ -802,7 +802,7 @@ fn test_copy_large() {
     const READ_SIZE: usize = 4 * (2 * WARP_SIZE) as usize;
     let mut data = [0u8; READ_SIZE * 2];
     for i in 0..READ_SIZE {
-        data[i] = (i as u8) * 4 + 1;
+        data[i] = (i * 4 + 1) as u8;
     }
     let case = bin.with_data_raw(&mut data, 4, 2 * WARP_SIZE);
 
@@ -1538,6 +1538,23 @@ fn test_op_fadd_lscale() {
 }
 
 #[test]
+fn test_op_fcos_table() {
+    let mut a = Acorn::new();
+    let rng = |_, _| match a.get_u32() % 4 {
+        0 => a.get_u32(),
+        1 => F32_CURATED[(a.get_u32() as usize) % F32_CURATED.len()].to_bits(),
+        _ => (a.get_u32() & 0x7F) | 0x49400000,
+    };
+
+    let op = OpFCosTable {
+        dst: DstRef::None.into(),
+        src: 0_u32.into(),
+        offset: false,
+    };
+    test_foldable_op_with(op, Precision::Exact, rng);
+}
+
+#[test]
 fn test_op_flush() {
     const DATA_TYPES: &[DataType] = &[DataType::F32, DataType::V2F16];
 
@@ -1713,6 +1730,23 @@ fn test_op_frsq() {
         // Hardware has 1 ULP precision, but we have double-rounding issues
         test_foldable_op(op, Precision::Ulp(2));
     }
+}
+
+#[test]
+fn test_op_fsin_table() {
+    let mut a = Acorn::new();
+    let rng = |_, _| match a.get_u32() % 4 {
+        0 => a.get_u32(),
+        1 => F32_CURATED[(a.get_u32() as usize) % F32_CURATED.len()].to_bits(),
+        _ => (a.get_u32() & 0x7F) | 0x49400000,
+    };
+
+    let op = OpFSinTable {
+        dst: DstRef::None.into(),
+        src: 0_u32.into(),
+        offset: false,
+    };
+    test_foldable_op_with(op, Precision::Exact, rng);
 }
 
 #[test]
@@ -1893,7 +1927,7 @@ fn test_op_icmp_multi() {
                 };
                 // Accum should be 0, 1, or -1
                 let rng = |i, dt| match i {
-                    2 => (a.get_u32() % 3) - 1,
+                    2 => (a.get_u32() % 3).wrapping_sub(1),
                     _ => sample_datatype(&mut a, dt),
                 };
                 test_foldable_op_with(op, Precision::Exact, rng);
@@ -2343,53 +2377,6 @@ mod builder {
                 Precision::Ulp(3)
             };
             assert_f32_eq!(comp, res, prec, "flog2({input})");
-        }
-    }
-
-    #[test]
-    fn test_sin_cos() {
-        // Vulkan Environment for SPIR-V requires an absolute precision of 2^-11
-        // in the range [-PI, PI]
-        const RANGE: Range<f32> = -PI..PI;
-        let prec = Precision::Abs(2f32.powi(-11));
-
-        let run = RunSingleton::get();
-        let shader = {
-            let mut b = TestShaderBuilder::new(&*run.model);
-            let input = b.ld_test_data(0, 32);
-
-            let sin = b.alloc_ssa(32);
-            let cos = b.alloc_ssa(32);
-            b.fsincos_32_to(sin.into(), input.clone().into(), false);
-            b.fsincos_32_to(cos.into(), input.into(), true);
-
-            b.st_test_data(4, sin.into());
-            b.st_test_data(8, cos.into());
-
-            b.compile()
-        };
-
-        let mut data = Vec::new();
-        let mut rng = Acorn::new();
-        // Notable cases
-        for c in [0f32, PI, PI / 2.0, PI / 4.0, 2.0 * PI, f32::NAN] {
-            data.push([c.to_bits(), 0, 0]);
-        }
-        for _ in 0..1000 {
-            let x = sample_f32_range(&mut rng, RANGE);
-            data.push([x.to_bits(), 0, 0]);
-        }
-
-        let case = shader.with_data(&mut data);
-        run.execute(case);
-        for arr in data {
-            let [input, csin, ccos] = arr.map(f32::from_bits);
-            // Rust doesn't specify a precision, but Kraid tests are almost surely
-            // built with glibc, that should offer more precision what what we need
-            let (esin, ecos) = input.sin_cos();
-
-            assert_f32_eq!(esin, csin, prec, "sin({input})");
-            assert_f32_eq!(ecos, ccos, prec, "cos({input})");
         }
     }
 }

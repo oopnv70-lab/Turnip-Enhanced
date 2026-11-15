@@ -67,28 +67,26 @@ struct jay_codegen {
 };
 
 static inline gen_operand
-to_gen_operand(
-   jay_function *f, const jay_inst *I, signed idx, unsigned simd_offs, bool hi)
+to_gen_operand(jay_function *f,
+               const jay_inst *I,
+               signed idx,
+               unsigned simd_offs)
 {
    const struct intel_device_info *devinfo = f->shader->devinfo;
    bool is_dest = idx < 0;
    enum jay_type type = is_dest ? I->type : jay_src_type(I, idx);
    jay_def d = is_dest ? I->dst : I->src[idx];
-   hi |= d.hi;
 
    gen_operand R;
-   unsigned reg = d.reg, count = jay_num_values(d);
-   unsigned offset_B = 0, grf = 0;
-   assert(!hi || d.file == GPR || d.file == FLAG);
+   struct jay_register_block block = { .stride = JAY_STRIDE_4 /* default */ };
+   unsigned reg_w = d.reg, offset_B = 0, grf = 0;
 
-   if (count && (d.file == GPR || d.file == UGPR)) {
-      struct jay_register_block block =
-         jay_lookup_block(&f->shader->partition, d.reg, d.file);
-
+   if (!jay_is_null(d) && (d.file == GPR || d.file == UGPR)) {
+      block = jay_lookup_block(&f->shader->partition, reg_w, d.file);
       grf = block.start_grf;
-      reg -= block.start_gpr;
-
-      assert(reg + count <= block.len_gpr && "must not cross partitions");
+      reg_w -= block.start_gpr;
+      assert(reg_w + jay_num_regs(d) <= block.len_gpr &&
+             "must not cross partitions");
    }
 
    if (jay_is_imm(d)) {
@@ -105,11 +103,11 @@ to_gen_operand(
       R = gen_null();
    } else if (d.file == UGPR || (d.file == ACCUM && I->uniform)) {
       if (d.file == UGPR) {
-         grf += (reg / jay_ugpr_per_grf(f->shader));
-         offset_B = (reg % jay_ugpr_per_grf(f->shader)) * 4;
+         grf += (reg_w / (2 * jay_ugpr_per_grf(f->shader)));
+         offset_B = (reg_w % (2 * jay_ugpr_per_grf(f->shader))) * 2;
          R = gen_grf(grf, 0);
       } else {
-         R = gen_accumulator(reg * jay_grf_per_gpr(f->shader) / 2);
+         R = gen_accumulator(reg_w * jay_grf_per_gpr(f->shader) / 2);
       }
       R = gen_retype(gen_restride(R, 0, 1, 0), GEN_TYPE_UD);
 
@@ -124,11 +122,9 @@ to_gen_operand(
       if (jay_num_values(d) > jay_type_vector_length(type) &&
           (I->uniform || I->op == JAY_OPCODE_MOV || I->op == JAY_OPCODE_CVT)) {
          unsigned simd_width = jay_simd_width_physical(f->shader, I);
-         uint32_t type_bits = jay_type_size_bits(type);
-         unsigned stride_bits = type_bits;
 
          R = gen_byte_offset(devinfo, R,
-                             simd_offs * simd_width * stride_bits / 8);
+                             simd_offs * simd_width * jay_type_size_B(type));
       }
 
       /* Some operations have special restrictions on the destination stride,
@@ -160,39 +156,30 @@ to_gen_operand(
          }
       }
    } else if (d.file == GPR || d.file == ACCUM) {
-      struct jay_register_block block = { 0 };
-      enum jay_stride def_stride =
-         d.file == GPR ? jay_def_stride(f->shader, d) : JAY_STRIDE_4;
-      uint32_t type_bits = jay_type_size_bits(type);
-      unsigned stride_bits = jay_stride_to_bits(def_stride);
+      uint32_t type_B = jay_type_size_B(type);
+      unsigned stride_B = jay_stride_to_bits(block.stride) / 8;
       unsigned simd_width_instr = jay_simd_width_physical(f->shader, I);
-      unsigned simd_width_block = f->shader->dispatch_width;
+      unsigned simd_width_block = f->shader->dispatch_width >> block.split;
 
-      if (d.file == GPR) {
-         block = jay_lookup_block(&f->shader->partition, d.reg, d.file);
-         simd_width_block >>= block.split;
-      }
-
-      assert(!(block.split && def_stride == JAY_STRIDE_2) &&
+      assert(!(block.split && block.stride == JAY_STRIDE_2) &&
              "todo: handle this case");
       assert(simd_width_block >= simd_width_instr);
 
       unsigned subblock_grf =
          jay_grf_per_gpr_at_width(f->shader, simd_width_block);
 
-      if (def_stride == JAY_STRIDE_2) {
+      if (block.stride == JAY_STRIDE_2) {
          /* Select between lo/hi halves of the GPR */
-         grf += reg * jay_grf_per_gpr(f->shader);
-         offset_B = hi ? 2 * f->shader->dispatch_width : 0;
+         grf += (reg_w / 2) * jay_grf_per_gpr(f->shader);
+         offset_B = (reg_w & 1) * 2 * f->shader->dispatch_width;
       } else {
          /* Treat low bits as an offset in 2-byte words into the GRF */
-         unsigned r = (reg * 2) + hi;
-         unsigned mask = BITFIELD_MASK(stride_bits / 32);
-         grf += ((r & ~mask) / 2) * subblock_grf;
-         offset_B = (r & mask) * 2;
+         unsigned mask = BITFIELD_MASK(stride_B / 4);
+         grf += ((reg_w & ~mask) / 2) * subblock_grf;
+         offset_B = (reg_w & mask) * 2;
       }
 
-      R = d.file == GPR ? gen_grf(grf, 0) : gen_accumulator(grf / 2);
+      R = d.file == GPR ? gen_grf(grf, 0) : gen_accumulator(grf);
       R = gen_restride(R, 1, 1, 0);
 
       /* SIMD split multiplication always uses acc0, so skip the usual SIMD
@@ -207,19 +194,19 @@ to_gen_operand(
       unsigned offs_in_subblock_lanes = simd_offs_lanes % simd_width_block;
       unsigned subblock_idx = simd_offs_lanes / simd_width_block;
 
-      unsigned grf_size_B = jay_ugpr_per_grf(f->shader) * 4;
-      unsigned subblock_B = block.len_gpr * subblock_grf * grf_size_B;
+      unsigned grf_size_B = jay_grf_size_B(f->shader);
+      unsigned subblock_B = (block.len_gpr / 2) * subblock_grf * grf_size_B;
       unsigned subblock_offs_B = subblock_idx * subblock_B;
-      unsigned local_offs_B = offs_in_subblock_lanes * (stride_bits / 8);
+      unsigned local_offs_B = offs_in_subblock_lanes * stride_B;
 
       R = gen_byte_offset(devinfo, R, subblock_offs_B + local_offs_B);
 
-      if (stride_bits == (type_bits * 4)) {
+      if (stride_B == (type_B * 4)) {
          R = gen_restride(R, 8, 2, 4);
-      } else if (stride_bits == (type_bits * 2)) {
+      } else if (stride_B == (type_B * 2)) {
          R = gen_restride(R, 4, 2, 2);
       } else {
-         assert(stride_bits == type_bits);
+         assert(stride_B == type_B);
       }
 
       /* Broadcast is equivalent to <8, 8, 1> for SIMD1 instructions. Use that
@@ -234,9 +221,7 @@ to_gen_operand(
        * SIMD1 instructions and are never SIMD split.
        */
       assert(simd_offs == 0 || idx >= 0);
-      unsigned flag_B = jay_type_size_bits(jay_flag_type(f)) / 8;
-      unsigned offs_B = (d.reg * flag_B) + (hi ? 2 : 0);
-      R = gen_flag(offs_B / 2);
+      R = gen_flag(d.reg);
    } else if (d.file == J_ADDRESS) {
       R = gen_address(d.reg);
    } else if (d.file == J_ARF && jay_base_index(d) == GEN_ARF_STATE) {
@@ -392,16 +377,15 @@ emit(struct jay_codegen *jc,
    }
 
    if (pred) {
-      unsigned reg = pred->reg * jay_phys_flag_per_virt(f->shader);
-      gen->flag_nr = reg / 2;
-      gen->flag_subnr = reg % 2;
+      gen->flag_nr = pred->reg / 2;
+      gen->flag_subnr = pred->reg % 2;
    }
 
    gen->opcode = jay_to_gen_opcodes[I->op].op;
-   gen->dst = to_gen_operand(f, I, -1, I->simd_offs, false);
+   gen->dst = to_gen_operand(f, I, -1, I->simd_offs);
 
    for (unsigned i = 0; i < jay_to_gen_opcodes[I->op].num_srcs; ++i) {
-      gen->src[i] = to_gen_operand(f, I, i, I->simd_offs, false);
+      gen->src[i] = to_gen_operand(f, I, i, I->simd_offs);
    }
 
    switch (I->op) {
@@ -422,18 +406,16 @@ emit(struct jay_codegen *jc,
       break;
 
    case JAY_OPCODE_DESWIZZLE_ODD: {
-      unsigned stride = jay_ugpr_per_grf(f->shader) * 4;
       bool hi = I->simd_offs == 0 ? true : jay_deswizzle_odd_src2_hi(I);
       gen->chan_offset = 0;
       gen->src[0] =
-         gen_byte_offset(jc->devinfo,
-                         to_gen_operand(f, I, I->simd_offs, 0, false),
-                         hi ? stride : 0);
+         gen_byte_offset(jc->devinfo, to_gen_operand(f, I, I->simd_offs, 0),
+                         hi ? jay_grf_size_B(f->shader) : 0);
       break;
    }
 
    case JAY_OPCODE_DESWIZZLE_EVEN: {
-      unsigned stride = jay_ugpr_per_grf(f->shader) * 4;
+      unsigned stride = jay_grf_size_B(f->shader);
       gen->exec_size = jc->devinfo->ver < 20 ? 8 : 16;
       gen->dst = gen_byte_offset(jc->devinfo, gen->dst, stride);
       gen->src[0] = gen_byte_offset(jc->devinfo, gen->src[0],
@@ -441,32 +423,10 @@ emit(struct jay_codegen *jc,
       break;
    }
 
-   case JAY_OPCODE_CVT: {
-      unsigned index = jay_cvt_index(I);
-      bool force_hi = false;
-
-      /* We will apply a suboffset for the specific subword being converted. In
-       * the case where we have a subword (16-bit) stride, accesses to the upper
-       * half will be instead to a discontiguous GRF so we have to fix up. This
-       * affects u8->u32 conversions.
-       */
-      if (I->src[0].file == GPR) {
-         unsigned type_size_B = jay_type_size_bits(jay_cvt_src_type(I)) / 8;
-         unsigned index_B = index * type_size_B;
-         unsigned stride_B =
-            jay_stride_to_bits(jay_def_stride(f->shader, I->src[0])) / 8;
-
-         if (index_B >= stride_B) {
-            assert(stride_B == 2 && index_B <= 4 && !I->src[0].hi);
-            force_hi = true;
-            index = (index_B % stride_B) / type_size_B;
-         }
-      }
-
-      gen_operand src = to_gen_operand(f, I, 0, I->simd_offs, force_hi);
-      gen->src[0] = gen_element_offset(jc->devinfo, src, index);
+   case JAY_OPCODE_CVT:
+      gen->src[0] =
+         gen_element_offset(jc->devinfo, gen->src[0], jay_cvt_index(I));
       break;
-   }
 
    case JAY_OPCODE_SYNC:
       gen->src[0] = gen_restride(gen->src[0], 0, 1, 0);
@@ -518,11 +478,11 @@ emit(struct jay_codegen *jc,
           I->src[1].file == J_ADDRESS) &&
          "if ex_desc is not null or immediate, it must be an address register");
 
-      gen_operand ex_desc = to_gen_operand(f, I, 1, I->simd_offs, false);
+      gen_operand ex_desc = to_gen_operand(f, I, 1, I->simd_offs);
       gen->src[0] =
-         gen_retype(to_gen_operand(f, I, 2, I->simd_offs, false), GEN_TYPE_UD);
+         gen_retype(to_gen_operand(f, I, 2, I->simd_offs), GEN_TYPE_UD);
       gen->src[1] =
-         gen_retype(to_gen_operand(f, I, 3, I->simd_offs, false), GEN_TYPE_UD);
+         gen_retype(to_gen_operand(f, I, 3, I->simd_offs), GEN_TYPE_UD);
 
       gen->opcode = jay_send_check_tdr(I) ? GEN_OP_SENDC : GEN_OP_SEND;
       gen->send.eot = jay_send_eot(I);
@@ -536,16 +496,14 @@ emit(struct jay_codegen *jc,
          gen->send.desc_is_reg = true;
 
       if (ex_desc.file == GEN_IMM) {
-         assert(jay_send_ex_desc_imm(I) == 0);
          gen->send.ex_desc_imm = ex_desc.imm;
       } else {
+         uint32_t ex_imm = jay_send_ex_desc_imm(I);
          gen->send.ex_desc_is_reg = true;
          gen->send.ex_desc_subnr = ex_desc.subnr;
-         gen->send.ex_desc_imm_extra = jay_send_ex_desc_imm(I);
+         gen->send.ex_desc_imm_extra = ex_imm & INTEL_MASK(31, 12);
+         gen->send.src1_len = gen_message_ex_desc_ex_mlen(jc->devinfo, ex_imm);
       }
-
-      if (jay_send_bindless(I) || gen->send.sfid == GEN_SFID_UGM)
-         gen->send.src1_len = jay_send_ex_mlen(I) / reg_unit(jc->devinfo);
 
       break;
    }
@@ -595,7 +553,7 @@ emit(struct jay_codegen *jc,
       break;
 
    case JAY_OPCODE_ZIP:
-      gen->src[0] = to_gen_operand(f, I, I->simd_offs, 0, false);
+      gen->src[0] = to_gen_operand(f, I, I->simd_offs, 0);
       break;
 
    case JAY_OPCODE_EXTRACT_BYTE_PER_8LANES: {
@@ -743,6 +701,19 @@ jay_to_binary(jay_shader *s,
             }
 
             last = I;
+
+            /* Apply suboffsets first to avoid issues with u8->u32 strides */
+            if (I->op == JAY_OPCODE_CVT) {
+               unsigned type_size_B =
+                  jay_type_size_bits(jay_cvt_src_type(I)) / 8;
+
+               if (type_size_B < 4) {
+                  unsigned index_B = jay_cvt_index(I) * type_size_B;
+                  I->src[0].reg += index_B / 2;
+                  I->src[0].size = JAY_SIZE_16;
+                  jay_set_cvt_index(I, index_B & 1);
+               }
+            }
          }
       }
    }
@@ -873,7 +844,7 @@ jay_to_binary(jay_shader *s,
          debug_archiver_finish_file(s->archiver);
 
          FILE *bin_dump = debug_archiver_start_file(
-            s->archiver, ralloc_asprintf(s, "GEN%u/0.bin", s->dispatch_width));
+            s->archiver, ralloc_asprintf(s, "BIN%u/0", s->dispatch_width));
          fwrite(jc.output, 1, jc.output_size, bin_dump);
          debug_archiver_finish_file(s->archiver);
       }

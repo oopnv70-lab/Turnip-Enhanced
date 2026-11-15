@@ -6,7 +6,7 @@ project(
   ['c', 'cpp'],
   version : files('VERSION'),
   license : 'MIT',
-  meson_version : '>= 1.4.0',
+  meson_version : '>= 1.7.0',
   default_options : [
     'buildtype=debugoptimized',
     'b_ndebug=if-release',
@@ -501,6 +501,7 @@ with_platform_wayland = _platforms.contains('wayland')
 with_platform_haiku = _platforms.contains('haiku')
 with_platform_windows = _platforms.contains('windows')
 with_platform_macos = _platforms.contains('macos')
+with_platform_display = system_has_kms_drm and not cc.has_define('__ANDROID__')
 
 with_gfxstream_emulated_android = with_gfxstream_vk and with_platform_android and host_machine.system() == 'linux'
 if with_gfxstream_emulated_android
@@ -939,11 +940,6 @@ with_any_rust = [
 ].contains(true)
 
 if with_any_rust
-  # rust.bindgen() does not pass `--rust-target` to bindgen until 1.7.0.
-  if meson.version().version_compare('< 1.7.0')
-    error('Mesa Rust support requires Meson 1.7.0 or newer')
-  endif
-
   add_languages('rust', required: true)
   rustc = meson.get_compiler('rust')
   rust = import('rust')
@@ -980,6 +976,10 @@ if with_any_rust
     '--raw-line', '#![allow(warnings)]',
     # Required for bindgen 0.71.1
     '--raw-line', '#![allow(unsafe_op_in_unsafe_fn)]',
+  ]
+
+  bindgen_c_args = [
+    '-DMESA_BINDGEN=1'
   ]
 
   rust_global_args = [
@@ -1158,57 +1158,85 @@ python_version_req = '>= 3.10'
 python_exec_list = ['python3.16', 'python3.15', 'python3.14', 'python3.13',
                     'python3.12', 'python3.11', 'python3.10', 'python3', 'python']
 
+# Tuples of version required for that module, and optional condition without
+# which the module is not required. If any version will do, use the special
+# version ''.
+python_required_modules = {
+  'docutils': { 'version': '', 'required_if': get_option('html-docs').enabled() },
+  'hawkmoth': { 'version': '0.16', 'required_if': get_option('html-docs').enabled() },
+  'mako': { 'version': '0.8', 'required_if': true },
+  'pycparser': { 'version': '2.20', 'required_if': with_gallium_etnaviv },
+  'sphinx': { 'version': '', 'required_if': get_option('html-docs').enabled() },
+  'yaml': { 'version': '', 'required_if': true },
+}
+
+any_python_found = false
 foreach p : python_exec_list
   prog_python = find_program(p, required : false, version : python_version_req)
   if not prog_python.found()
     continue
   endif
 
-  has_mako = run_command(
+  any_python_found = true
+
+  has_version_module = run_command(
     prog_python, '-c',
     '''
-import sys
-
 try:
-    try:
-        from packaging.version import Version
-    except:
-        from distutils.version import StrictVersion as Version
+    from packaging.version import Version
 except:
-    sys.exit(2)
-
-try:
-    import mako
-except:
-    sys.exit(1)
-
-if Version(mako.__version__) < Version("0.8.0"):
-    sys.exit(1)
+    from distutils.version import StrictVersion as Version
 ''', check: false)
-  if has_mako.returncode() != 0
+  if has_version_module.returncode() != 0
     continue
   endif
 
-  has_yaml = run_command(prog_python, '-c', 'import yaml', check: false)
-  if has_yaml.returncode() != 0
+  missing_modules = []
+  foreach module_name, module : python_required_modules
+    if not module['required_if']
+      continue
+    endif
+    if module['version'] == ''
+      if run_command(prog_python, '-c', 'import '+ module_name, check: false).returncode() != 0
+        missing_modules += module_name
+      endif
+    else
+      if run_command(prog_python, '-c', '''
+try:
+    from packaging.version import Version
+except:
+    from distutils.version import StrictVersion as Version
+
+import @0@
+assert Version(@0@.__version__) >= Version("@1@")
+      '''.format(module_name, module['version']), check: false).returncode() != 0
+        missing_modules += module_name + ' >= ' + module['version']
+      endif
+      # }}
+    endif
+  endforeach
+
+  if missing_modules.length() > 0
     continue
   endif
 
   break
 endforeach
 
-if not prog_python.found()
+if not any_python_found
   error('Python ' + python_version_req + ' not found')
 endif
 
-if has_mako.returncode() == 1
-  error('Python (3.x) mako module >= 0.8.0 required to build mesa.')
-elif has_mako.returncode() == 2
-  error('One of Python (3.x) packaging or distutils module is required.')
+if has_version_module.returncode() != 0
+  error('One of Python ' + python_version_req + ' packaging or distutils module is required.')
 endif
 
-if has_yaml.returncode() != 0
-  error('Python (3.x) yaml module (PyYAML) required to build mesa.')
+if missing_modules.length() > 0
+  warning('Python ' + python_version_req + ' found but is missing some required modules:')
+  foreach module : missing_modules
+    warning('- ' + module)
+  endforeach
+  error('Please install the missing modules and try again')
 endif
 
 # Support systems without ETIME (e.g. FreeBSD)
@@ -1809,6 +1837,10 @@ ld_args_bsymbolic = []
 if cc.links('int main() { return 0; }', args : '-Wl,-Bsymbolic', name : 'Bsymbolic')
   ld_args_bsymbolic += '-Wl,-Bsymbolic'
 endif
+ld_args_nodelete = []
+if cc.links('int main() { return 0; }', args : '-Wl,-z,nodelete', name : 'z nodelete')
+  ld_args_nodelete += '-Wl,-z,nodelete'
+endif
 with_ld_version_script = false
 if host_machine.system() != 'windows' and cc.links('int main() { return 0; }',
             args : '-Wl,--version-script=@0@'.format(
@@ -1863,7 +1895,7 @@ if dep_zlib.found()
   pre_args += '-DHAVE_ZLIB'
 endif
 
-if host_machine.system() == 'windows' or with_platform_android
+if not with_platform_display
   dep_display_info = null_dep
 else
   dep_display_info = dependency('libdisplay-info', version : '>= 0.1.1',
@@ -2250,7 +2282,7 @@ endif
 
 with_wayland_bind_display = with_platform_wayland and get_option('legacy-wayland').contains('bind-wayland-display')
 if with_platform_wayland
-  dep_wl_protocols = dependency('wayland-protocols', version : '>= 1.49', default_options: [ 'tests=false' ])
+  dep_wl_protocols = dependency('wayland-protocols', version : '>= 1.50', default_options: [ 'tests=false' ])
   dep_wayland_client = dependency('wayland-client', version : '>=1.18')
   dep_wayland_server = dependency('wayland-server', version : '>=1.18')
   if with_egl
@@ -2402,6 +2434,125 @@ _shader_replacement = get_option('custom-shader-replacement')
 if _shader_replacement == ''
 else
   pre_args += '-DCUSTOM_SHADER_REPLACEMENT'
+endif
+
+with_apitrace = get_option('apitrace')
+dep_apitrace = []
+# the tracer keeps pointers into the libraries with traced entry points, which
+# must not be unloaded
+ld_args_apitrace = with_apitrace and not with_platform_windows ? ['-Wl,-z,nodelete'] : []
+if with_apitrace
+  if host_machine.system() == 'darwin'
+    error('The apitrace option is not supported on this platform')
+  endif
+  if with_glx == 'xlib'
+    error('The apitrace option is not supported with xlib-based GLX')
+  endif
+  if with_platform_windows and with_egl
+    error('The apitrace option traces only WGL on Windows, build with -Degl=disabled')
+  endif
+  cmake = import('cmake')
+  apitrace_opts = cmake.subproject_options()
+  apitrace_opts.add_cmake_defines({'ENABLE_TESTS': false})
+  apitrace_opts.add_cmake_defines({'ENABLE_WAFFLE': false})
+  apitrace_opts.add_cmake_defines({'ENABLE_CLI': false})
+  apitrace_opts.add_cmake_defines({'ENABLE_GUI': false})
+  apitrace_opts.add_cmake_defines({'ENABLE_X11': with_glx == 'dri'})
+  apitrace_opts.add_cmake_defines({'ENABLE_EGL': with_egl})
+  apitrace_opts.add_cmake_defines({'CMAKE_POSITION_INDEPENDENT_CODE': true})
+  # apitrace enables LTO by default; the objects can't be linked into Mesa's
+  # non-LTO libraries (see cmake-lto-optout.patch)
+  apitrace_opts.add_cmake_defines({'CMAKE_INTERPROCEDURAL_OPTIMIZATION': false})
+  if meson.is_cross_build()
+    apitrace_opts.add_cmake_defines({
+      'CMAKE_C_FLAGS' : '',
+      'CMAKE_CXX_FLAGS' : '',
+      'CMAKE_EXE_LINKER_FLAGS' : '',
+      'CMAKE_MODULE_LINKER_FLAGS' : '',
+      'CMAKE_SHARED_LINKER_FLAGS' : '',
+      'CMAKE_DISABLE_FIND_PACKAGE_PkgConfig' : true,
+    })
+  endif
+  if with_platform_android
+    apitrace_ndk = ''
+    foreach arg : cc.cmd_array()
+      if arg.contains('/toolchains/llvm/')
+        apitrace_ndk = arg.split('/toolchains/llvm/')[0]
+      endif
+    endforeach
+    if apitrace_ndk == ''
+      error('The apitrace option needs an NDK compiler to locate the NDK')
+    endif
+    apitrace_android_abi = {
+      'aarch64' : 'arm64-v8a',
+      'arm' : 'armeabi-v7a',
+      'x86' : 'x86',
+      'x86_64' : 'x86_64',
+    }
+    apitrace_opts.add_cmake_defines({
+      'CMAKE_ANDROID_NDK' : apitrace_ndk,
+      'CMAKE_ANDROID_ARCH_ABI' : apitrace_android_abi[host_machine.cpu_family()],
+      'CMAKE_SYSTEM_VERSION' : get_option('platform-sdk-version').to_string(),
+    })
+  endif
+  apitrace_opts.set_install(false)
+  apitrace = cmake.subproject('apitrace', options: apitrace_opts)
+  pre_args += '-DHAVE_APITRACE'
+  dep_apitrace_headers = []
+  foreach t : ['gltrace_common', 'glproc']
+    dep_apitrace += apitrace.dependency(t)
+    dep_apitrace_headers += apitrace.dependency(t).partial_dependency(includes : true)
+  endforeach
+  apitrace_libs = ['glhelpers', 'trace', 'common', 'os', 'crc32c', 'snappy',
+                   'guids', 'highlight', 'zstd_seekable']
+  # apitrace builds libbacktrace only for ELF
+  if not with_platform_windows
+    apitrace_libs += 'backtrace'
+  endif
+  # apitrace uses the system Brotli when pkg-config finds it, otherwise it
+  # builds its bundled copy, which has to be linked explicitly
+  dep_brotlidec = dependency('libbrotlidec', version : '>= 1.0.7', required : false)
+  if dep_brotlidec.found()
+    dep_apitrace += dep_brotlidec
+  else
+    apitrace_libs += ['brotli_dec', 'brotli_common']
+  endif
+  foreach t : apitrace_libs
+    dep_apitrace += apitrace.dependency(t)
+  endforeach
+  # meson doesn't order users of a cmake dependency after the targets that
+  # generate its headers, so depend on glproc here; drop this and
+  # cmake-glproc-header-sources.patch once this is fixed:
+  # https://github.com/mesonbuild/meson/issues/16275
+  apitrace_glproc_h = custom_target(
+    'apitrace_glproc.h',
+    output : 'apitrace_glproc.h',
+    command : [
+      prog_python, '-c', 'import sys; open(sys.argv[1], "w").close()',
+      '@OUTPUT@',
+    ],
+    depends : apitrace.target('glproc'),
+  )
+  apitrace_gen_py = files('src/mesa/main/apitrace_gen.py')
+  apitrace_mesa_xml = files('src/mesa/glapi/glapi/gen/gl_and_es_API.xml')
+  apitrace_source_dir = meson.project_source_root() / 'subprojects' / 'apitrace'
+  apitrace_gen_args = []
+  apitrace_cpp_args = ['-DNDEBUG'] + cpp.get_supported_arguments(
+    '-Wno-sign-compare', '-fno-strict-aliasing')
+  # msvc has no gnu++17
+  apitrace_override_options = ['cpp_std=gnu++17,c++17']
+  if with_egl
+    apitrace_gen_args += '--egl'
+  endif
+  if with_glx == 'dri'
+    apitrace_gen_args += '--glx'
+    apitrace_cpp_args += '-DHAVE_X11'
+  else
+    apitrace_cpp_args += '-DEGL_NO_X11'
+  endif
+  if with_platform_windows
+    apitrace_gen_args += '--wgl'
+  endif
 endif
 
 allow_fallback_for_perfetto = get_option('allow-fallback-for').contains('perfetto')

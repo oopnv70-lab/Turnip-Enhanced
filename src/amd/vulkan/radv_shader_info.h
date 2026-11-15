@@ -210,6 +210,7 @@ struct radv_shader_info {
       uint32_t colors_written; /* Mask of outputs written */
       uint32_t spi_shader_col_format;
       uint32_t cb_shader_mask;
+      float min_sample_shading;
       uint8_t color0_written;
       bool load_provoking_vtx : 1;
       bool load_rasterization_prim : 1;
@@ -372,6 +373,9 @@ void radv_nir_shader_info_pass(const struct radv_compiler_info *compiler_info, c
                                const struct radv_graphics_state_key *gfx_state,
                                const enum radv_pipeline_type pipeline_type, bool consider_force_vrs,
                                struct radv_shader_info *info);
+
+bool radv_force_disable_vrs(enum amd_gfx_level gfx_level, const struct nir_shader *nir,
+                            const struct radv_graphics_state_key *gfx_state);
 
 void radv_get_esgs_gsvs_ring_size(const struct radv_device *device, struct radv_shader_regs *regs,
                                   const struct radv_shader_info *es_info, const struct radv_shader_info *gs_info);

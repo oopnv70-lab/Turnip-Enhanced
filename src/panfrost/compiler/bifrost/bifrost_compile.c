@@ -2666,32 +2666,6 @@ bi_emit_alu(bi_builder *b, nir_alu_instr *instr)
       return;
    }
 
-   case nir_op_pack_uvec2_to_uint: {
-      bi_index src = bi_src_index(&instr->src[0].src);
-
-      assert(sz == 32 && src_sz == 32);
-      bi_mkvec_v2i16_to(
-         b, dst, bi_half(bi_extract(b, src, instr->src[0].swizzle[0]), false),
-         bi_half(bi_extract(b, src, instr->src[0].swizzle[1]), false));
-      return;
-   }
-
-   case nir_op_pack_uvec4_to_uint: {
-      bi_index src = bi_src_index(&instr->src[0].src);
-
-      assert(sz == 32 && src_sz == 32);
-
-      bi_index srcs[4] = {
-         bi_extract(b, src, instr->src[0].swizzle[0]),
-         bi_extract(b, src, instr->src[0].swizzle[1]),
-         bi_extract(b, src, instr->src[0].swizzle[2]),
-         bi_extract(b, src, instr->src[0].swizzle[3]),
-      };
-      unsigned channels[4] = {0};
-      bi_make_vec_to(b, dst, srcs, channels, 4, 8);
-      return;
-   }
-
    case nir_op_f2f16:
    case nir_op_f2f16_rtz:
    case nir_op_f2f16_rtne: {
@@ -4215,10 +4189,8 @@ bi_pack_clauses(bi_context *ctx, struct util_dynarray *binary, unsigned offset)
     * so the size remains 0) */
    unsigned prefetch_size = BIFROST_SHADER_PREFETCH - final_clause;
 
-   if (binary->size - offset) {
-      memset(util_dynarray_grow(binary, uint8_t, prefetch_size), 0,
-             prefetch_size);
-   }
+   if (binary->size - offset)
+      util_dynarray_grow_zero(binary, uint8_t, prefetch_size);
 }
 
 static int
@@ -4501,7 +4473,6 @@ bi_compile_variant_nir(nir_shader *nir,
    }
 
    if (bifrost_debug & BIFROST_DBG_SHADERS && !skip_internal) {
-#ifdef WITH_PANFROST_DISASSEMBLE
       if (ctx->arch <= 8) {
          disassemble_bifrost(stderr, binary->data + offset,
                              binary->size - offset,
@@ -4511,7 +4482,6 @@ bi_compile_variant_nir(nir_shader *nir,
                              binary->size - offset,
                              bifrost_debug & BIFROST_DBG_VERBOSE);
       }
-#endif
 
       if (ctx->constant_pool_size_B) {
          fprintf(stderr, "constant pool (%u bytes at offset %u):\n",

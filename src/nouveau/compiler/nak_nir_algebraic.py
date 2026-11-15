@@ -55,6 +55,11 @@ algebraic_lowering = [
         ('lea_nv', a, b, s), 'nak->sm >= 70'),
     (('iadd', 'a@64', ('ishl', 'b@64', '#s@32')),
         ('lea_nv', a, b, s), 'nak->sm >= 70'),
+
+    (('fmin', ('fmax(is_used_once,nnan)', 'a(is_not_const)', '#b(is_a_number)'), '#c(fclamp_nv_neg_const)'),
+        ('fclamp_nv', a, c), 'nak->sm >= 86'),
+    (('fmax', ('fmin(is_used_once,nnan)', 'a(is_not_const)', '#b(is_a_number)'), '#c(fclamp_nv_neg_const)'),
+        ('fclamp_nv', a, b), 'nak->sm >= 86'),
 ]
 
 for f2f16 in ['f2f16', 'f2f16_rtz', 'f2f16_rtne']:
@@ -97,6 +102,11 @@ for op in ['fcos_normalized_2_pi', 'fexp2', 'flog2', 'frcp', 'frsq', 'fsin_norma
             (('f2f32(contract)', (op + '(is_used_once)', (f2f16, 'a@32'))), (op, a)),
     ]
 
+# We have a dedicated imad_2x32_64
+int64_opts = [
+    (('iadd@64', ('imul(is_only_used_by_iadd)', a, b), c), ('imad', a, b, c), 'nak->sm >= 70'),
+]
+
 def main():
     parser = argparse.ArgumentParser()
     parser.add_argument('--out', required=True, help='Output file.')
@@ -112,6 +122,12 @@ def main():
             f.write(nir_algebraic.AlgebraicPass(
                 "nak_nir_lower_algebraic_late",
                 algebraic_lowering,
+                [
+                    ("const struct nak_compiler *", "nak"),
+                ]).render())
+            f.write(nir_algebraic.AlgebraicPass(
+                "nak_nir_opt_int64",
+                int64_opts,
                 [
                     ("const struct nak_compiler *", "nak"),
                 ]).render())

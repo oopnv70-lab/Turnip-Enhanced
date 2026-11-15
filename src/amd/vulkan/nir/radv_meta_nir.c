@@ -850,7 +850,7 @@ radv_meta_nir_build_copy_vrs_htile_shader(enum amd_gfx_level gfx_level, uint32_t
    b.shader->info.workgroup_size[1] = 8;
 
    /* Get coordinates. */
-   nir_def *global_id = radv_meta_nir_get_global_ids(&b, 2);
+   nir_def *global_id = radv_meta_nir_get_global_ids(&b, 3);
 
    nir_def *addr = nir_load_push_constant(&b, 2, 32, nir_imm_int(&b, 0), .range = 8);
    nir_def *htile_va = nir_pack_64_2x32(&b, nir_channels(&b, addr, 0x3));
@@ -858,17 +858,18 @@ radv_meta_nir_build_copy_vrs_htile_shader(enum amd_gfx_level gfx_level, uint32_t
    nir_def *offset = nir_load_push_constant(&b, 2, 32, nir_imm_int(&b, 8), .range = 16);
 
    /* Multiply the coordinates by the HTILE block size. */
-   nir_def *coord = nir_iadd(&b, nir_imul_imm(&b, global_id, 8), offset);
+   nir_def *coord = nir_iadd(&b, nir_imul_imm(&b, nir_channels(&b, global_id, 0x3), 8), offset);
 
    /* Load constants. */
    nir_def *constants = nir_load_push_constant(&b, 4, 32, nir_imm_int(&b, 16), .range = 32);
    nir_def *htile_pitch = nir_channel(&b, constants, 0);
    nir_def *htile_slice_size = nir_channel(&b, constants, 1);
    nir_def *read_htile_value = nir_channel(&b, constants, 2);
-   nir_def *layer = nir_channel(&b, constants, 3);
+   nir_def *base_array_layer = nir_channel(&b, constants, 3);
 
    /* Get the HTILE addr from coordinates. */
    nir_def *zero = nir_imm_int(&b, 0);
+   nir_def *layer = nir_iadd(&b, nir_channel(&b, global_id, 2), base_array_layer);
    nir_def *htile_offset =
       ac_nir_htile_addr_from_coord(&b, gfx_level, gb_addr_config, &surf->u.gfx9.zs.htile_equation, htile_pitch,
                                    htile_slice_size, nir_channel(&b, coord, 0), nir_channel(&b, coord, 1), layer, zero);
@@ -880,7 +881,8 @@ radv_meta_nir_build_copy_vrs_htile_shader(enum amd_gfx_level gfx_level, uint32_t
    input_vrs_img->data.binding = 0;
 
    /* Load the VRS rates from the 2D image. */
-   nir_def *value = nir_txf(&b, global_id, .texture_deref = nir_build_deref_var(&b, input_vrs_img));
+   nir_def *value =
+      nir_txf(&b, nir_channels(&b, global_id, 0x3), .texture_deref = nir_build_deref_var(&b, input_vrs_img));
 
    /* Extract the X/Y rates and clamp them because the maximum supported VRS rate is 2x2 (1x1 in
     * hardware).
@@ -1553,8 +1555,9 @@ radv_meta_nir_build_copy_memory_to_image_indirect_cs(uint8_t fmt_block_width, ui
    nir_def *indirect_addr = nir_load_push_constant(&b, 1, 64, nir_imm_int(&b, 0), .base = 0, .range = 8);
    nir_def *layer = nir_load_push_constant(&b, 1, 32, nir_imm_int(&b, 0), .base = 8, .range = 4);
    nir_def *descriptor = nir_load_push_constant(&b, 4, 32, nir_imm_int(&b, 0), .base = 12, .range = 16);
-   nir_def *base_array_layer = nir_load_push_constant(&b, 1, 32, nir_imm_int(&b, 0), .base = 28, .range = 4);
-   nir_def *texel_scale = nir_load_push_constant(&b, 1, 32, nir_imm_int(&b, 0), .base = 32, .range = 4);
+   nir_def *soffset = nir_load_push_constant(&b, 1, 32, nir_imm_int(&b, 0), .base = 28, .range = 4);
+   nir_def *base_array_layer = nir_load_push_constant(&b, 1, 32, nir_imm_int(&b, 0), .base = 32, .range = 4);
+   nir_def *texel_scale = nir_load_push_constant(&b, 1, 32, nir_imm_int(&b, 0), .base = 36, .range = 4);
 
    nir_def *row_stride_B = get_row_stride_B(&b, indirect_addr, fmt_element_size_B, fmt_block_width);
    nir_def *image_stride_B = get_image_stride_B(&b, indirect_addr, row_stride_B, fmt_block_height);
@@ -1588,8 +1591,8 @@ radv_meta_nir_build_copy_memory_to_image_indirect_cs(uint8_t fmt_block_width, ui
    nir_def *coord = nir_iadd(&b, global_id, offset);
 
    nir_def *zero = nir_imm_int(&b, 0);
-   nir_def *outval = nir_load_buffer_amd(&b, 4, 32, descriptor, zero, zero, buf_coord, .access = ACCESS_USES_FORMAT_AMD,
-                                         .dest_type = nir_type_uint32);
+   nir_def *outval = nir_load_buffer_amd(&b, 4, 32, descriptor, zero, soffset, buf_coord,
+                                         .access = ACCESS_USES_FORMAT_AMD, .dest_type = nir_type_uint32);
 
    nir_def *img_coord = nir_vec4(&b, nir_channel(&b, coord, 0), nir_channel(&b, coord, 1),
                                  is_3d ? nir_channel(&b, coord, 2) : nir_undef(&b, 1, 32), nir_undef(&b, 1, 32));
@@ -1699,6 +1702,7 @@ radv_meta_nir_build_copy_memory_to_image_indirect_fs(VkImageAspectFlags aspect_m
    nir_def *indirect_addr = nir_load_push_constant(&b, 1, 64, nir_imm_int(&b, 0), .base = 16, .range = 8);
    nir_def *layer = nir_load_push_constant(&b, 1, 32, nir_imm_int(&b, 0), .base = 24, .range = 4);
    nir_def *descriptor = nir_load_push_constant(&b, 4, 32, nir_imm_int(&b, 0), .base = 28, .range = 16);
+   nir_def *soffset = nir_load_push_constant(&b, 1, 32, nir_imm_int(&b, 0), .base = 44, .range = 4);
 
    nir_def *row_stride_B = get_row_stride_B(&b, indirect_addr, fmt_element_size_B, fmt_block_width);
    nir_def *image_stride_B = get_image_stride_B(&b, indirect_addr, row_stride_B, fmt_block_height);
@@ -1726,7 +1730,7 @@ radv_meta_nir_build_copy_memory_to_image_indirect_fs(VkImageAspectFlags aspect_m
    pos_x = nir_iadd(&b, pos_x, pos_y);
 
    nir_def *zero = nir_imm_int(&b, 0);
-   nir_def *data = nir_load_buffer_amd(&b, 4, 32, descriptor, zero, zero, pos_x, .access = ACCESS_USES_FORMAT_AMD,
+   nir_def *data = nir_load_buffer_amd(&b, 4, 32, descriptor, zero, soffset, pos_x, .access = ACCESS_USES_FORMAT_AMD,
                                        .dest_type = nir_type_uint32);
 
    nir_store_var(&b, fs_output, data, output_channels);

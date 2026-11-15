@@ -24,6 +24,7 @@ struct pvr_load_op;
 /* EOT shader generation. */
 struct pvr_eot_props {
    unsigned emit_count;
+   uint32_t rta_element_stride[PVR_MAX_COLOR_ATTACHMENTS];
 
    bool shared_words;
    union {
@@ -202,9 +203,6 @@ pvr_uscgen_clear_attach_index(struct pvr_clear_attach_props *props)
    UNREACHABLE("Invalid clear attachment shader properties.");
 }
 #undef INDEX
-
-pco_shader *
-pvr_usc_zero_init_wg_mem(pco_ctx *ctx, unsigned start, unsigned count);
 
 /* SPM load shader generation. */
 struct pvr_spm_load_props {

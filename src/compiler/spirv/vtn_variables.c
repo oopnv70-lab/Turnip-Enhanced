@@ -1883,19 +1883,19 @@ vtn_storage_class_to_mode(struct vtn_builder *b,
       break;
    case SpvStorageClassCallableDataKHR:
       mode = vtn_variable_mode_call_data;
-      nir_mode = nir_var_shader_temp;
+      nir_mode = nir_var_shader_call_data_out;
       break;
    case SpvStorageClassIncomingCallableDataKHR:
       mode = vtn_variable_mode_call_data_in;
-      nir_mode = nir_var_shader_call_data;
+      nir_mode = nir_var_shader_call_data_in;
       break;
    case SpvStorageClassRayPayloadKHR:
       mode = vtn_variable_mode_ray_payload;
-      nir_mode = nir_var_shader_temp;
+      nir_mode = nir_var_shader_call_data_out;
       break;
    case SpvStorageClassIncomingRayPayloadKHR:
       mode = vtn_variable_mode_ray_payload_in;
-      nir_mode = nir_var_shader_call_data;
+      nir_mode = nir_var_shader_call_data_in;
       break;
    case SpvStorageClassHitAttributeKHR:
       mode = vtn_variable_mode_hit_attrib;

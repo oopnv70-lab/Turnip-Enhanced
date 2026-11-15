@@ -68,7 +68,7 @@
 #include "util/set.h"
 #include "util/sparse_array.h"
 #include "util/u_atomic.h"
-#if DETECT_OS_ANDROID
+#ifdef VK_USE_PLATFORM_ANDROID_KHR
 #include "util/u_gralloc/u_gralloc.h"
 #endif
 #include "util/u_vector.h"
@@ -209,6 +209,23 @@ align_down_npot_u64(uint64_t v, uint64_t a)
    return v - (v % a);
 }
 
+/*
+ * The DRIRC value anv_force_preferred_walk_order is an
+ * enum intel_compute_walk_order value + 1, so that 0 can mean "not set,
+ * use the compiled walk order".
+ *
+ * Returns the default walk_order when the DRIRC value is 0 (not set).
+ */
+static inline enum intel_compute_walk_order
+anv_compute_walk_order(unsigned force_preferred_walk_order, enum intel_compute_walk_order walk_order)
+{
+   if (force_preferred_walk_order == 0)
+      return walk_order;
+
+   assert(force_preferred_walk_order <= INTEL_WALK_ORDER_ZYX + 1);
+   return (enum intel_compute_walk_order)(force_preferred_walk_order - 1);
+}
+
 static inline union isl_color_value
 vk_to_isl_color(VkClearColorValue color)
 {
@@ -330,8 +347,8 @@ enum anv_bo_alloc_flags {
     */
    ANV_BO_ALLOC_IMPLICIT_WRITE =          (1 << 7),
 
-   /** Has an address which is visible to the client */
-   ANV_BO_ALLOC_CLIENT_VISIBLE_ADDRESS =  (1 << 8),
+   /** Has an address visible to the client for capture and replay  */
+   ANV_BO_ALLOC_CAPTURE_REPLAY =          (1 << 8),
 
    /** Align the BO's virtual address to match AUX-TT requirements */
    ANV_BO_ALLOC_AUX_TT_ALIGNED =          (1 << 9),
@@ -3199,6 +3216,7 @@ void anv_wait_for_attach(void);
 VkResult anv_queue_init(struct anv_device *device, struct anv_queue *queue,
                         const VkDeviceQueueCreateInfo *pCreateInfo,
                         uint32_t index_in_family);
+void anv_queue_drain(struct anv_queue *queue);
 void anv_queue_finish(struct anv_queue *queue);
 
 VkResult anv_queue_submit(struct vk_queue *queue,
@@ -4785,6 +4803,20 @@ struct anv_cmd_state {
    VkPipelineStageFlags2                        pending_src_stages;
    VkPipelineStageFlags2                        pending_dst_stages;
    enum anv_pipe_bits                           pending_pipe_bits;
+
+   /**
+    * Tracks whether constant cache invalidation for the fragment shader stage
+    * has been delayed.
+    *
+    * Pushed UBO ranges (3DSTATE_CONSTANT_* buffer pointers) are fetched by
+    * the front end of the pipeline, ahead of the raster/pixel stages. To
+    * avoid a barrier with the TOP waiting stages that costs us some
+    * performance, we delay the push constant invalidation for the fragment
+    * stage until we detect a fragment shader with a push range other then
+    * push constants data.
+    */
+   bool                                         deferred_constant_cache_inval;
+   unsigned                                     deferred_constant_cache_stage;
 
    /**
     * Whether the last programmed STATE_BASE_ADDRESS references
@@ -7026,6 +7058,8 @@ struct anv_vid_mem {
 #define ANV_AV1_ROWSTORE_DFLV_OFFSET (1536 * ANV_AV1_ROWSTORE_CACHE_LINE)
 #define ANV_AV1_ROWSTORE_CDEF_OFFSET (1728 * ANV_AV1_ROWSTORE_CACHE_LINE)
 
+#define ANV_H264_ROWSTORE_IPDL_OFFSET (512 * ANV_AV1_ROWSTORE_CACHE_LINE)
+
 enum anv_vid_mem_h264_types {
    ANV_VID_MEM_H264_INTRA_ROW_STORE,
    ANV_VID_MEM_H264_DEBLOCK_FILTER_ROW_STORE,
@@ -7124,8 +7158,14 @@ enum anv_vid_mem_av1_types {
    ANV_VID_MEM_AV1_DBD_BUFFER,
    ANV_VID_MEM_AV1_TILE_SIZE_STREAMOUT,
    ANV_VID_MEM_AV1_ENCODE_TILE_BITSTREAM_ACCUM,
+   ANV_VID_MEM_AV1_BRC_PAK_INSERT_OUT,
+   ANV_VID_MEM_AV1_BRC_CDF_TABLES,
+   ANV_VID_MEM_AV1_BRC_CDF_ACTIVE,
+   ANV_VID_MEM_AV1_BRC_DATA,
    ANV_VID_MEM_AV1_MAX,
 };
+
+#define ANV_AV1_CDF_TABLE_SIZE 15104
 
 /* HuC BRC session buffers, shared by the encode codecs. Based past every
  * per-codec range so they never collide in vid_mem[].
@@ -7208,6 +7248,10 @@ struct anv_video_rc_state {
    /* H.264 and H.265 rate control flag bits share the same values. */
    uint32_t rc_flags;
    uint32_t frame_counter;
+   uint32_t brc_init_frame;
+   bool brc_reset;
+   double av1_target_fullness;
+   int32_t av1_hrd_fullness;
 };
 
 struct anv_video_session {
@@ -7328,6 +7372,7 @@ anv_image_dpb_address(const struct anv_image_view *iv,
                                        iv->vk.base_array_layer + arrayLayer,
                                        0,
                                        &offset_B,
+                                       NULL,
                                        NULL,
                                        NULL);
 

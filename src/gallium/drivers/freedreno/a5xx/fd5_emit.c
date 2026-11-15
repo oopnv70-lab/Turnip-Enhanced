@@ -10,6 +10,7 @@
 #include "util/format/u_format.h"
 #include "util/u_helpers.h"
 #include "util/u_memory.h"
+#include "util/u_prim.h"
 #include "util/u_string.h"
 #include "util/u_viewport.h"
 
@@ -311,15 +312,149 @@ emit_border_color(struct fd_context *ctx, struct fd_ringbuffer *ring) assert_dt
    u_upload_unmap(fd5_ctx->border_color_uploader);
 }
 
+static struct fd_bo *
+tex_const_bo(const struct fd5_pipe_sampler_view *view)
+{
+   struct fd_resource *rsc = fd_resource(view->base.texture);
+
+   if (view->base.format == PIPE_FORMAT_X32_S8X24_UINT)
+      rsc = rsc->stencil;
+
+   return rsc->bo;
+}
+
+static void
+fill_tex_const(const struct fd5_pipe_sampler_view *view, uint32_t *d)
+{
+   enum a5xx_tile_mode tile_mode = TILE5_LINEAR;
+
+   if (view->base.texture)
+      tile_mode = fd_resource(view->base.texture)->layout.tile_mode;
+
+   d[0] = view->texconst0 | A5XX_TEX_CONST_0_TILE_MODE(tile_mode);
+   d[1] = view->texconst1;
+   d[2] = view->texconst2;
+   d[3] = view->texconst3;
+   d[4] = 0;
+   d[5] = view->texconst5;
+   memset(&d[6], 0, 6 * sizeof(*d));
+}
+
+static bool
+emit_textures_indirect(struct fd_context *ctx, struct fd_ringbuffer *ring,
+                       enum a4xx_state_block sb,
+                       struct fd_texture_stateobj *tex, int fb_read_base) assert_dt
+{
+   bool needs_border = false;
+   struct fd5_context *fd5_ctx = fd5_context(ctx);
+   struct pipe_framebuffer_state *pfb = &ctx->batch->framebuffer;
+   /* twelve-dword descriptors at a sixteen-dword stride, 64-byte aligned */
+   const unsigned tex_dwords = 16, samp_dwords = 4;
+   const unsigned fb_slots = fb_read_base >= 0 ? fb_read_base + pfb->nr_cbufs : 0;
+   const unsigned num_textures = MAX2(tex->num_textures, fb_slots);
+   const unsigned con_bytes = align(num_textures * tex_dwords * 4, 64);
+   /* at least one entry, so that TEX_SAMP points inside the buffer */
+   const unsigned samp_bytes =
+      align(MAX2(tex->num_samplers, 1) * samp_dwords * 4, 64);
+   struct pipe_resource *buf = NULL;
+   unsigned off;
+   uint32_t *ptr;
+
+   u_upload_alloc_ref(fd5_ctx->border_color_uploader, 0,
+                      con_bytes + samp_bytes, 64, &off, &buf, (void **)&ptr);
+   memset(ptr, 0, con_bytes + samp_bytes);
+
+   unsigned bcolor_offset =
+      (sb == SB4_FS_TEX) ? ctx->tex[MESA_SHADER_VERTEX].num_samplers : 0;
+
+   uint32_t *con = ptr;
+   uint32_t *samp = ptr + con_bytes / 4;
+   for (unsigned i = 0; i < tex->num_samplers; i++) {
+      static const struct fd5_sampler_stateobj dummy_sampler = {};
+      const struct fd5_sampler_stateobj *s =
+         tex->samplers[i] ? fd5_sampler_stateobj(tex->samplers[i])
+                          : &dummy_sampler;
+      uint32_t *d = samp + i * samp_dwords;
+
+      d[0] = s->texsamp0;
+      d[1] = s->texsamp1;
+      d[2] = s->texsamp2 | A5XX_TEX_SAMP_2_BCOLOR_OFFSET(bcolor_offset + i);
+      d[3] = s->texsamp3;
+      needs_border |= s->needs_border;
+   }
+
+   for (unsigned i = 0; i < tex->num_textures; i++) {
+      static const struct fd5_pipe_sampler_view dummy_view = {};
+      const struct fd5_pipe_sampler_view *view =
+         tex->textures[i] ? fd5_pipe_sampler_view(tex->textures[i])
+                          : &dummy_view;
+      uint32_t *d = con + i * tex_dwords;
+
+      fill_tex_const(view, d);
+      if (view->base.texture) {
+         struct fd_bo *tex_bo = tex_const_bo(view);
+         uint64_t iova = fd_bo_get_iova(tex_bo) + view->offset;
+
+         d[4] = (uint32_t)iova;
+         d[5] |= (uint32_t)(iova >> 32);
+         fd_ringbuffer_attach_bo(ring, tex_bo);
+      }
+   }
+
+   for (unsigned i = fb_read_base; i < fb_slots; i++) {
+      util_dynarray_append_typed(&ctx->batch->fb_read_patches,
+                                 struct fd_cs_patch,
+                                 ((struct fd_cs_patch){
+                                    .cs = con + i * tex_dwords,
+                                    .val = i - fb_read_base,
+                                 }));
+   }
+
+   struct fd_bo *bo = fd_resource(buf)->bo;
+
+   unsigned samp_reg, con_reg;
+   switch (sb) {
+   case SB4_VS_TEX:
+      samp_reg = REG_A5XX_TPL1_VS_TEX_SAMP;
+      con_reg = REG_A5XX_TPL1_VS_TEX_CONST;
+      break;
+   case SB4_FS_TEX:
+      samp_reg = REG_A5XX_TPL1_FS_TEX_SAMP;
+      con_reg = REG_A5XX_TPL1_FS_TEX_CONST;
+      break;
+   case SB4_CS_TEX:
+      samp_reg = REG_A5XX_TPL1_CS_TEX_SAMP;
+      con_reg = REG_A5XX_TPL1_CS_TEX_CONST;
+      break;
+   default:
+      UNREACHABLE("unsupported texture state block");
+   }
+
+   OUT_PKT4(ring, con_reg, 2);
+   OUT_RELOC(ring, bo, off, 0, 0);
+
+   OUT_PKT4(ring, samp_reg, 2);
+   OUT_RELOC(ring, bo, off + con_bytes, 0, 0);
+
+   u_upload_unmap(fd5_ctx->border_color_uploader);
+   pipe_resource_reference(&buf, NULL);
+
+   return needs_border;
+}
+
 static bool
 emit_textures(struct fd_context *ctx, struct fd_ringbuffer *ring,
-              enum a4xx_state_block sb,
-              struct fd_texture_stateobj *tex) assert_dt
+              enum a4xx_state_block sb, struct fd_texture_stateobj *tex,
+              int fb_read_base) assert_dt
 {
    bool needs_border = false;
    unsigned bcolor_offset =
       (sb == SB4_FS_TEX) ? ctx->tex[MESA_SHADER_VERTEX].num_samplers : 0;
    unsigned i;
+
+   /* ir3 fetches the fb with sam.s2en, which reads the table in memory */
+   if (fb_read_base >= 0)
+      return emit_textures_indirect(ctx, ring, sb, tex, fb_read_base);
 
    if (tex->num_samplers > 0) {
       /* output sampler state: */
@@ -363,32 +498,20 @@ emit_textures(struct fd_context *ctx, struct fd_ringbuffer *ring,
          const struct fd5_pipe_sampler_view *view =
             tex->textures[i] ? fd5_pipe_sampler_view(tex->textures[i])
                              : &dummy_view;
-         enum a5xx_tile_mode tile_mode = TILE5_LINEAR;
+         uint32_t d[12];
 
-         if (view->base.texture)
-            tile_mode = fd_resource(view->base.texture)->layout.tile_mode;
-
-         OUT_RING(ring,
-                  view->texconst0 | A5XX_TEX_CONST_0_TILE_MODE(tile_mode));
-         OUT_RING(ring, view->texconst1);
-         OUT_RING(ring, view->texconst2);
-         OUT_RING(ring, view->texconst3);
+         fill_tex_const(view, d);
+         for (unsigned j = 0; j < 4; j++)
+            OUT_RING(ring, d[j]);
          if (view->base.texture) {
-            struct fd_resource *rsc = fd_resource(view->base.texture);
-            if (view->base.format == PIPE_FORMAT_X32_S8X24_UINT)
-               rsc = rsc->stencil;
-            OUT_RELOC(ring, rsc->bo, view->offset,
-                      (uint64_t)view->texconst5 << 32, 0);
+            OUT_RELOC(ring, tex_const_bo(view), view->offset,
+                      (uint64_t)d[5] << 32, 0);
          } else {
-            OUT_RING(ring, 0x00000000);
-            OUT_RING(ring, view->texconst5);
+            OUT_RING(ring, d[4]);
+            OUT_RING(ring, d[5]);
          }
-         OUT_RING(ring, view->texconst6);
-         OUT_RING(ring, view->texconst7);
-         OUT_RING(ring, view->texconst8);
-         OUT_RING(ring, view->texconst9);
-         OUT_RING(ring, view->texconst10);
-         OUT_RING(ring, view->texconst11);
+         for (unsigned j = 6; j < ARRAY_SIZE(d); j++)
+            OUT_RING(ring, d[j]);
       }
    }
 
@@ -416,9 +539,11 @@ emit_ssbos(struct fd_context *ctx, struct fd_ringbuffer *ring,
 
    for (unsigned i = 0; i < count; i++) {
       struct pipe_shader_buffer *buf = &so->sb[i];
-      unsigned sz = buf->buffer_size;
+      /* As on a4xx, the size is in dwords (overflowing from WIDTH into
+       * HEIGHT), and loads and stores past it are dropped.
+       */
+      unsigned sz = DIV_ROUND_UP(buf->buffer_size, 4);
 
-      /* Unlike a6xx, SSBO size is in bytes. */
       OUT_RING(ring, A5XX_SSBO_1_0_WIDTH(sz & MASK(16)));
       OUT_RING(ring, A5XX_SSBO_1_1_HEIGHT(sz >> 16));
    }
@@ -611,13 +736,6 @@ fd5_emit_state(struct fd_context *ctx, struct fd_ringbuffer *ring,
       OUT_RING(ring, A5XX_GRAS_SC_SCREEN_SCISSOR_TL_0_X(scissor->maxx) |
                         A5XX_GRAS_SC_SCREEN_SCISSOR_TL_0_Y(scissor->maxy));
 
-      OUT_PKT4(ring, REG_A5XX_GRAS_SC_VIEWPORT_SCISSOR_TL_0, 2);
-      OUT_RING(ring, A5XX_GRAS_SC_VIEWPORT_SCISSOR_TL_0_X(scissor->minx) |
-                        A5XX_GRAS_SC_VIEWPORT_SCISSOR_TL_0_Y(scissor->miny));
-      OUT_RING(ring,
-               A5XX_GRAS_SC_VIEWPORT_SCISSOR_TL_0_X(scissor->maxx) |
-                  A5XX_GRAS_SC_VIEWPORT_SCISSOR_TL_0_Y(scissor->maxy));
-
       ctx->batch->max_scissor.minx =
          MIN2(ctx->batch->max_scissor.minx, scissor->minx);
       ctx->batch->max_scissor.miny =
@@ -640,6 +758,14 @@ fd5_emit_state(struct fd_context *ctx, struct fd_ringbuffer *ring,
       OUT_RING(ring, A5XX_GRAS_CL_VPORT_YSCALE_0(vp->scale[1]));
       OUT_RING(ring, A5XX_GRAS_CL_VPORT_ZOFFSET_0(vp->translate[2]));
       OUT_RING(ring, A5XX_GRAS_CL_VPORT_ZSCALE_0(vp->scale[2]));
+
+      /* with the clip codes ignored this scissor is what bounds the viewport */
+      struct pipe_scissor_state *vscissor = &ctx->viewport_scissor[0];
+      OUT_PKT4(ring, REG_A5XX_GRAS_SC_VIEWPORT_SCISSOR_TL_0, 2);
+      OUT_RING(ring, A5XX_GRAS_SC_VIEWPORT_SCISSOR_TL_0_X(vscissor->minx) |
+                        A5XX_GRAS_SC_VIEWPORT_SCISSOR_TL_0_Y(vscissor->miny));
+      OUT_RING(ring, A5XX_GRAS_SC_VIEWPORT_SCISSOR_TL_0_X(vscissor->maxx) |
+                        A5XX_GRAS_SC_VIEWPORT_SCISSOR_TL_0_Y(vscissor->maxy));
    }
 
    if ((dirty & (FD_DIRTY_VIEWPORT | FD_DIRTY_RASTERIZER)) &&
@@ -683,9 +809,6 @@ fd5_emit_state(struct fd_context *ctx, struct fd_ringbuffer *ring,
 
       OUT_PKT4(ring, REG_A5XX_PC_RASTER_CNTL, 1);
       OUT_RING(ring, rasterizer->pc_raster_cntl);
-
-      OUT_PKT4(ring, REG_A5XX_GRAS_CL_CNTL, 1);
-      OUT_RING(ring, rasterizer->gras_cl_clip_cntl);
    }
 
    /* note: must come after program emit.. because there is some overlap
@@ -707,6 +830,18 @@ fd5_emit_state(struct fd_context *ctx, struct fd_ringbuffer *ring,
                   A5XX_PC_PRIMITIVE_CNTL_STRIDE_IN_VPC(max_loc) |
                   COND(emit->info->primitive_restart && emit->info->index_size,
                        A5XX_PC_PRIMITIVE_CNTL_PRIMITIVE_RESTART));
+
+      enum mesa_prim prim = u_reduced_prim(emit->info->mode);
+      bool guardband = prim == MESA_PRIM_POINTS || prim == MESA_PRIM_LINES;
+
+      OUT_PKT4(ring, REG_A5XX_GRAS_CL_CNTL, 1);
+      OUT_RING(ring, rasterizer->gras_cl_clip_cntl |
+                        COND(guardband, A5XX_GRAS_CL_CNTL_VP_CLIP_CODE_IGNORE));
+
+      OUT_PKT4(ring, REG_A5XX_GRAS_CL_GUARDBAND_CLIP_ADJ, 1);
+      OUT_RING(ring, COND(guardband,
+                          A5XX_GRAS_CL_GUARDBAND_CLIP_ADJ_HORZ(ctx->guardband.x) |
+                          A5XX_GRAS_CL_GUARDBAND_CLIP_ADJ_VERT(ctx->guardband.y)));
    }
 
    if (dirty & (FD_DIRTY_FRAMEBUFFER | FD_DIRTY_RASTERIZER | FD_DIRTY_PROG)) {
@@ -747,8 +882,19 @@ fd5_emit_state(struct fd_context *ctx, struct fd_ringbuffer *ring,
    }
 
    ir3_emit_vs_consts(vp, ring, ctx, emit->info, emit->indirect, emit->draw);
-   if (!emit->binning_pass)
+   if (!emit->binning_pass) {
       ir3_emit_fs_consts(fp, ring, ctx);
+
+      if (fp->fb_read && fp->need_driver_params) {
+         const struct ir3_const_state *cs = ir3_const_state(fp);
+         const struct ir3_const_allocation *dp =
+            &cs->allocs.consts[IR3_CONST_ALLOC_DRIVER_PARAMS];
+         fd5_emit_const_bo(ring, fp, dp->offset_vec4 * 4,
+                           offsetof(struct fd5_fb_read_params, dp),
+                           dp->size_vec4 * 4,
+                           fd5_context(ctx)->fb_read_params);
+      }
+   }
 
    const struct ir3_stream_output_info *info = &vp->stream_output;
    if (info->num_outputs) {
@@ -879,20 +1025,27 @@ fd5_emit_state(struct fd_context *ctx, struct fd_ringbuffer *ring,
 
    if (reload || (ctx->dirty_shader[MESA_SHADER_VERTEX] & FD_DIRTY_SHADER_TEX)) {
       needs_border |=
-         emit_textures(ctx, ring, SB4_VS_TEX, &ctx->tex[MESA_SHADER_VERTEX]);
+         emit_textures(ctx, ring, SB4_VS_TEX, &ctx->tex[MESA_SHADER_VERTEX],
+                       -1);
       OUT_PKT4(ring, REG_A5XX_TPL1_VS_TEX_COUNT, 1);
       OUT_RING(ring, ctx->tex[MESA_SHADER_VERTEX].num_textures);
    }
 
+   if (fp->fb_read)
+      ctx->batch->gmem_reason |= FD_GMEM_FB_READ;
+
+   int fb_read_base = fp->fb_read ? fp->fb_read_base : -1;
+   unsigned fb_slots = fp->fb_read ? fp->fb_read_base + pfb->nr_cbufs : 0;
+
    if (reload || (ctx->dirty_shader[MESA_SHADER_FRAGMENT] & FD_DIRTY_SHADER_TEX)) {
-      needs_border |=
-         emit_textures(ctx, ring, SB4_FS_TEX, &ctx->tex[MESA_SHADER_FRAGMENT]);
+      needs_border |= emit_textures(ctx, ring, SB4_FS_TEX,
+                                    &ctx->tex[MESA_SHADER_FRAGMENT], fb_read_base);
    }
 
    OUT_PKT4(ring, REG_A5XX_TPL1_FS_TEX_COUNT, 1);
    OUT_RING(ring, ctx->shaderimg[MESA_SHADER_FRAGMENT].enabled_mask
                      ? ~0
-                     : ctx->tex[MESA_SHADER_FRAGMENT].num_textures);
+                     : MAX2(ctx->tex[MESA_SHADER_FRAGMENT].num_textures, fb_slots));
 
    OUT_PKT4(ring, REG_A5XX_TPL1_CS_TEX_COUNT, 1);
    OUT_RING(ring, 0);
@@ -919,7 +1072,8 @@ fd5_emit_cs_state(struct fd_context *ctx, struct fd_ringbuffer *ring,
    if (dirty & FD_DIRTY_SHADER_TEX) {
       bool needs_border = false;
       needs_border |=
-         emit_textures(ctx, ring, SB4_CS_TEX, &ctx->tex[MESA_SHADER_COMPUTE]);
+         emit_textures(ctx, ring, SB4_CS_TEX, &ctx->tex[MESA_SHADER_COMPUTE],
+                       -1);
 
       if (needs_border)
          emit_border_color(ctx, ring);
@@ -953,6 +1107,50 @@ fd5_emit_cs_state(struct fd_context *ctx, struct fd_ringbuffer *ring,
       fd5_emit_images(ctx, ring, MESA_SHADER_COMPUTE, cp);
 }
 
+static uint32_t
+fd5_sp_dbg_eco_cntl(const struct fd_screen *screen)
+{
+   switch (screen->gpu_id) {
+   case 510:
+   case 530:
+      return 0x40000800;
+   default:
+      return 0x00000800;
+   }
+}
+
+/* Workaround bits the kernel sets in hw_init, which the restore rewrites */
+static bool
+fd5_rb_dp2_clock_gating_disabled(const struct fd_screen *screen)
+{
+   switch (screen->gpu_id) {
+   case 505:
+   case 506:
+   case 508:
+   case 509:
+   case 512:
+      return true;
+   default:
+      return false;
+   }
+}
+
+static bool
+fd5_lm_load_kill_disabled(const struct fd_screen *screen)
+{
+   switch (screen->gpu_id) {
+   case 505:
+   case 506:
+   case 508:
+   case 509:
+   case 512:
+   case 540:
+      return true;
+   default:
+      return false;
+   }
+}
+
 /* emit setup at begin of new cmdstream buffer (don't rely on previous
  * state, there could have been a context switch between ioctls):
  */
@@ -960,6 +1158,7 @@ void
 fd5_emit_restore(struct fd_batch *batch, struct fd_ringbuffer *ring)
 {
    struct fd_context *ctx = batch->ctx;
+   uint32_t hbb = ctx->screen->highest_bank_bit - 13;
 
    fd5_set_render_mode(ctx, ring, BYPASS);
    fd5_cache_flush(batch, ring);
@@ -1005,10 +1204,11 @@ fd5_emit_restore(struct fd_batch *batch, struct fd_ringbuffer *ring)
    OUT_RING(ring, 0x00000000); /* UNKNOWN_E293 */
 
    OUT_PKT4(ring, REG_A5XX_RB_MODE_CNTL, 1);
-   OUT_RING(ring, 0x00000044); /* RB_MODE_CNTL */
+   OUT_RING(ring, 0x00000040 | A5XX_RB_MODE_CNTL_HIGHESTBANKBIT(hbb));
 
    OUT_PKT4(ring, REG_A5XX_RB_DBG_ECO_CNTL, 1);
-   OUT_RING(ring, 0x00100000); /* RB_DBG_ECO_CNTL */
+   OUT_RING(ring, 0x00100000 |
+            COND(fd5_rb_dp2_clock_gating_disabled(ctx->screen), BIT(9)));
 
    OUT_PKT4(ring, REG_A5XX_VFD_MODE_CNTL, 1);
    OUT_RING(ring, 0x00000000); /* VFD_MODE_CNTL */
@@ -1019,29 +1219,25 @@ fd5_emit_restore(struct fd_batch *batch, struct fd_ringbuffer *ring)
    OUT_PKT4(ring, REG_A5XX_SP_MODE_CNTL, 1);
    OUT_RING(ring, 0x0000001c); /* SP_MODE_CNTL */
 
-   if (ctx->screen->gpu_id == 540) {
-      OUT_PKT4(ring, REG_A5XX_SP_DBG_ECO_CNTL, 1);
-      OUT_RING(ring, 0x800); /* SP_DBG_ECO_CNTL */
+   OUT_PKT4(ring, REG_A5XX_SP_DBG_ECO_CNTL, 1);
+   OUT_RING(ring, fd5_sp_dbg_eco_cntl(ctx->screen));
 
+   if (ctx->screen->gpu_id == 540) {
       OUT_PKT4(ring, REG_A5XX_HLSQ_DBG_ECO_CNTL, 1);
       OUT_RING(ring, 0x0);
-
-      OUT_PKT4(ring, REG_A5XX_VPC_DBG_ECO_CNTL, 1);
-      OUT_RING(ring, 0x800400);
-   } else {
-      OUT_PKT4(ring, REG_A5XX_SP_DBG_ECO_CNTL, 1);
-      OUT_RING(ring, 0x40000800); /* SP_DBG_ECO_CNTL */
    }
 
    OUT_PKT4(ring, REG_A5XX_TPL1_MODE_CNTL, 1);
-   OUT_RING(ring, 0x00000544); /* TPL1_MODE_CNTL */
+   OUT_RING(ring, 0x00000444 | A5XX_TPL1_MODE_CNTL_HIGHESTBANKBIT(hbb));
 
    OUT_PKT4(ring, REG_A5XX_HLSQ_TIMEOUT_THRESHOLD_0, 2);
    OUT_RING(ring, 0x00000080); /* HLSQ_TIMEOUT_THRESHOLD_0 */
    OUT_RING(ring, 0x00000000); /* HLSQ_TIMEOUT_THRESHOLD_1 */
 
    OUT_PKT4(ring, REG_A5XX_VPC_DBG_ECO_CNTL, 1);
-   OUT_RING(ring, 0x00000400); /* VPC_DBG_ECO_CNTL */
+   OUT_RING(ring, A5XX_VPC_DBG_ECO_CNTL_ALLFLATOPTDIS |
+            /* referenced as LMLOADKILLDIS in msm-4.4/kgsl */
+            COND(fd5_lm_load_kill_disabled(ctx->screen), BIT(23)));
 
    OUT_PKT4(ring, REG_A5XX_HLSQ_MODE_CNTL, 1);
    OUT_RING(ring, 0x00000001); /* HLSQ_MODE_CNTL */

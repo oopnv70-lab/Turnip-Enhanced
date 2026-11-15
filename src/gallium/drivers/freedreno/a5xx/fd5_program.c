@@ -100,7 +100,6 @@ emit_stream_out(struct fd_ringbuffer *ring, const struct ir3_shader_variant *v,
                 struct ir3_shader_linkage *l)
 {
    const struct ir3_stream_output_info *strmout = &v->stream_output;
-   unsigned ncomp[PIPE_MAX_SO_BUFFERS] = {0};
    unsigned prog[align(l->max_loc, 2) / 2];
 
    memset(prog, 0, sizeof(prog));
@@ -109,8 +108,6 @@ emit_stream_out(struct fd_ringbuffer *ring, const struct ir3_shader_variant *v,
       const struct ir3_stream_output *out = &strmout->output[i];
       gl_varying_slot slot = out->location;
       unsigned idx;
-
-      ncomp[out->output_buffer] += out->num_components;
 
       /* linkage map sorted by order frag shader wants things, so
        * a bit less ideal here..
@@ -141,18 +138,18 @@ emit_stream_out(struct fd_ringbuffer *ring, const struct ir3_shader_variant *v,
    OUT_PKT7(ring, CP_CONTEXT_REG_BUNCH, 12 + (2 * ARRAY_SIZE(prog)));
    OUT_RING(ring, REG_A5XX_VPC_SO_BUF_CNTL);
    OUT_RING(ring, A5XX_VPC_SO_BUF_CNTL_ENABLE |
-                     COND(ncomp[0] > 0, A5XX_VPC_SO_BUF_CNTL_BUF0) |
-                     COND(ncomp[1] > 0, A5XX_VPC_SO_BUF_CNTL_BUF1) |
-                     COND(ncomp[2] > 0, A5XX_VPC_SO_BUF_CNTL_BUF2) |
-                     COND(ncomp[3] > 0, A5XX_VPC_SO_BUF_CNTL_BUF3));
-   OUT_RING(ring, REG_A5XX_VPC_SO_NCOMP(0));
-   OUT_RING(ring, ncomp[0]);
-   OUT_RING(ring, REG_A5XX_VPC_SO_NCOMP(1));
-   OUT_RING(ring, ncomp[1]);
-   OUT_RING(ring, REG_A5XX_VPC_SO_NCOMP(2));
-   OUT_RING(ring, ncomp[2]);
-   OUT_RING(ring, REG_A5XX_VPC_SO_NCOMP(3));
-   OUT_RING(ring, ncomp[3]);
+                     COND(strmout->stride[0] > 0, A5XX_VPC_SO_BUF_CNTL_BUF0) |
+                     COND(strmout->stride[1] > 0, A5XX_VPC_SO_BUF_CNTL_BUF1) |
+                     COND(strmout->stride[2] > 0, A5XX_VPC_SO_BUF_CNTL_BUF2) |
+                     COND(strmout->stride[3] > 0, A5XX_VPC_SO_BUF_CNTL_BUF3));
+   OUT_RING(ring, REG_A5XX_VPC_SO_BUFFER_STRIDE(0));
+   OUT_RING(ring, strmout->stride[0]);
+   OUT_RING(ring, REG_A5XX_VPC_SO_BUFFER_STRIDE(1));
+   OUT_RING(ring, strmout->stride[1]);
+   OUT_RING(ring, REG_A5XX_VPC_SO_BUFFER_STRIDE(2));
+   OUT_RING(ring, strmout->stride[2]);
+   OUT_RING(ring, REG_A5XX_VPC_SO_BUFFER_STRIDE(3));
+   OUT_RING(ring, strmout->stride[3]);
    OUT_RING(ring, REG_A5XX_VPC_SO_CNTL);
    OUT_RING(ring, A5XX_VPC_SO_CNTL_ENABLE);
    for (unsigned i = 0; i < ARRAY_SIZE(prog); i++) {
@@ -244,6 +241,14 @@ next_regid(uint32_t reg, uint32_t increment)
    else
       return regid(63, 0);
 }
+
+static void
+set_interp_mode(uint32_t *vinterp, unsigned loc,
+                enum a5xx_varying_interp_mode mode)
+{
+   vinterp[loc / 16] |= mode << ((loc % 16) * 2);
+}
+
 void
 fd5_program_emit(struct fd_context *ctx, struct fd_ringbuffer *ring,
                  struct fd5_emit *emit)
@@ -665,13 +670,19 @@ fd5_program_emit(struct fd_context *ctx, struct fd_ringbuffer *ring,
 
          uint32_t inloc = s[FS].v->inputs[j].inloc;
 
-         if (s[FS].v->inputs[j].flat ||
-             (s[FS].v->inputs[j].rasterflat && emit->rasterflat)) {
+         gl_varying_slot slot = (gl_varying_slot)s[FS].v->inputs[j].slot;
+         if (slot == VARYING_SLOT_LAYER || slot == VARYING_SLOT_VIEWPORT) {
+            if (ir3_find_output(s[VS].v, slot) < 0 && (compmask & 0x1))
+               set_interp_mode(vinterp, inloc, INTERP_ZERO);
+            else
+               set_interp_mode(vinterp, inloc, INTERP_FLAT);
+         } else if (s[FS].v->inputs[j].flat ||
+                    (s[FS].v->inputs[j].rasterflat && emit->rasterflat)) {
             uint32_t loc = inloc;
 
             for (i = 0; i < 4; i++) {
                if (compmask & (1 << i)) {
-                  vinterp[loc / 16] |= 1 << ((loc % 16) * 2);
+                  set_interp_mode(vinterp, loc, INTERP_FLAT);
                   // flatshade[loc / 32] |= 1 << (loc % 32);
                   loc++;
                }
@@ -697,13 +708,11 @@ fd5_program_emit(struct fd_context *ctx, struct fd_ringbuffer *ring,
                loc++;
             }
             if (compmask & 0x4) {
-               /* .z <- 0.0f */
-               vinterp[loc / 16] |= 0b10 << ((loc % 16) * 2);
+               set_interp_mode(vinterp, loc, INTERP_ZERO);
                loc++;
             }
             if (compmask & 0x8) {
-               /* .w <- 1.0f */
-               vinterp[loc / 16] |= 0b11 << ((loc % 16) * 2);
+               set_interp_mode(vinterp, loc, INTERP_ONE);
                loc++;
             }
          }

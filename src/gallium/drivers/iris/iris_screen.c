@@ -391,6 +391,7 @@ iris_init_screen_caps(struct iris_screen *screen)
    caps->max_stream_output_interleaved_components = IRIS_MAX_SOL_BINDINGS;
    caps->glsl_feature_level =
    caps->glsl_feature_level_compatibility = 460;
+   caps->fs_sample_variables = true;
    /* 3DSTATE_CONSTANT_XS requires the start of UBOs to be 32B aligned */
    caps->constant_buffer_offset_alignment = 32;
    caps->min_map_buffer_alignment = IRIS_MAP_BUFFER_ALIGNMENT;
@@ -773,6 +774,12 @@ iris_screen_create(int fd, const struct pipe_screen_config *config)
       driQueryOptioni(config->options, "generated_indirect_threshold");
    screen->driconf.disable_threaded_context =
       driQueryOptionb(config->options, "intel_disable_threaded_context");
+   screen->driconf.sample_d_performance =
+      driQueryOptioni(config->options, "intel_sample_d_performance");
+   screen->driconf.intel_tbimr_poly_trigger_width =
+      driQueryOptioni(config->options, "intel_tbimr_poly_trigger_width");
+   screen->driconf.intel_tbimr_poly_trigger_height =
+      driQueryOptioni(config->options, "intel_tbimr_poly_trigger_height");
 
    screen->precompile = debug_get_bool_option("shader_precompile", true);
 

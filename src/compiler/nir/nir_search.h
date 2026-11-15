@@ -134,6 +134,9 @@ typedef struct {
    /* One of nir_op or nir_search_op */
    uint16_t opcode : 13;
 
+   /* If not zero, overwrite the components of the replacement expression. */
+   uint16_t replace_num_components : 3;
+
    /* Commutative expression index.  This is assigned by opt_algebraic.py when
     * search structures are constructed and is a unique (to this structure)
     * index within the commutative operation bitfield used for searching for
@@ -158,9 +161,25 @@ typedef struct {
    int16_t cond_index;
 } nir_search_expression;
 
-struct per_op_table {
-   const uint16_t *filter;
+struct per_src_filter {
+   /* Maps an automaton state to a filtered state index for this source, or
+    * NULL if every state maps to 0.
+    */
+   const uint8_t *filter;
+   /* The size of this source's dimension in per_op_table::table.
+    * If filter != NULL, this is also the length of the filter array.
+    */
    unsigned num_filtered_states;
+};
+
+struct per_op_table {
+   /* One filter per source, giving the dimensions of the rectangular
+    * transition table. Sources may share the same filter.
+    */
+   const struct per_src_filter *srcs;
+   /* Transition table, indexed by the filtered state of each source in
+    * row-major order, or NULL if the opcode isn't used by the pass.
+    */
    const uint16_t *table;
 };
 

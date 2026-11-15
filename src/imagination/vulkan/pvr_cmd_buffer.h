@@ -453,6 +453,9 @@ struct pvr_cmd_buffer_xfb_state {
    /* Whether transform feedback is currently active for the cmd_buffer. */
    bool is_active;
 
+   /* Cached output primitive vertex count used for active XFB programs. */
+   uint32_t output_primitive_vertex_count;
+
    struct pvr_xfb_binding bindings[PVR_XFB_MAX_BUFFERS];
 
    uint32_t counter_buffer_count;
@@ -547,6 +550,9 @@ struct pvr_cmd_buffer_state {
    struct util_dynarray query_indices;
 
    uint32_t max_shared_regs;
+
+   uint64_t cond_render_buffer_addr;
+   bool cond_render_invert;
 
    /* Address of data segment for vertex attrib upload program. */
    uint32_t pds_vertex_attrib_offset;
@@ -842,6 +848,10 @@ VkResult PVR_PER_ARCH(emit_xfb_sync_state)(
    const struct pvr_program_info *pds_program_info);
 
 #   define pvr_arch_emit_xfb_sync_state PVR_PER_ARCH(emit_xfb_sync_state)
+
+VkResult PVR_PER_ARCH(validate_xfb_state)(struct pvr_cmd_buffer *cmd_buffer);
+
+#   define pvr_arch_validate_xfb_state PVR_PER_ARCH(validate_xfb_state)
 
 #endif /* PVR_PER_ARCH */
 

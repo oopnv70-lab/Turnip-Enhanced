@@ -659,6 +659,8 @@ radv_physical_device_init_mem_types(struct radv_physical_device *pdev)
          pdev->memory_types_host_visible |= BITFIELD_BIT(i);
       if (pdev->memory_flags[i] & RADEON_FLAG_ENCRYPTED)
          pdev->memory_types_protected |= BITFIELD_BIT(i);
+      if (pdev->memory_flags[i] & RADEON_FLAG_GL2_BYPASS)
+         pdev->memory_types_device_coherent |= BITFIELD_BIT(i);
    }
 }
 
@@ -680,9 +682,13 @@ radv_get_binning_settings(const struct radv_physical_device *pdev, struct radv_b
 static bool
 radv_msrtss_enabled(const struct radv_physical_device *pdev)
 {
+#ifdef VK_USE_PLATFORM_ANDROID_KHR
+   return true;
+#else
    const struct radv_instance *instance = radv_physical_device_instance(pdev);
 
-   return DETECT_OS_ANDROID || (instance->experimental_flags & RADV_EXPERIMENTAL_MSRTSS);
+   return instance->experimental_flags & RADV_EXPERIMENTAL_MSRTSS;
+#endif
 }
 
 static void
@@ -746,6 +752,7 @@ radv_physical_device_get_supported_extensions(const struct radv_physical_device 
       .KHR_maintenance9 = true,
       .KHR_maintenance10 = true,
       .KHR_maintenance11 = true,
+      .KHR_maintenance12 = true,
       .KHR_map_memory2 = true,
       .KHR_multiview = true,
       .KHR_performance_query = radv_perf_query_supported(pdev),
@@ -944,6 +951,7 @@ radv_physical_device_get_supported_extensions(const struct radv_physical_device 
       .EXT_texel_buffer_alignment = true,
       .EXT_tooling_info = true,
       .EXT_transform_feedback = true,
+      .EXT_vertex_address_binding_unrestricted = true,
       .EXT_vertex_attribute_divisor = true,
       .EXT_vertex_input_dynamic_state = !pdev->use_llvm,
       .EXT_ycbcr_2plane_444_formats = true,
@@ -968,7 +976,7 @@ radv_physical_device_get_supported_extensions(const struct radv_physical_device 
       .AMD_shader_image_load_store_lod = true,
       .AMD_shader_trinary_minmax = true,
       .AMD_texture_gather_bias_lod = pdev->info.gfx_level < GFX11,
-#if DETECT_OS_ANDROID
+#ifdef VK_USE_PLATFORM_ANDROID_KHR
       .ANDROID_external_memory_android_hardware_buffer = RADV_SUPPORT_ANDROID_HARDWARE_BUFFER,
       .ANDROID_native_buffer = true,
 #endif
@@ -982,6 +990,7 @@ radv_physical_device_get_supported_extensions(const struct radv_physical_device 
       .MESA_image_alignment_control = pdev->info.gfx_level >= GFX9,
       .NV_compute_shader_derivatives = true,
       .NV_cooperative_matrix2 = radv_cooperative_matrix2_nv_enabled(pdev),
+      .NV_cooperative_matrix_decode_vector = radv_cooperative_matrix2_nv_enabled(pdev),
       .VALVE_mutable_descriptor_type = true,
       .VALVE_shader_mixed_float_dot_product = pdev->info.compiler_info.has_accelerated_dot_product,
       .VALVE_video_encode_rgb_conversion =
@@ -1593,6 +1602,9 @@ radv_physical_device_get_features(const struct radv_physical_device *pdev, struc
       .cooperativeMatrixTensorAddressing = true,
       .cooperativeMatrixBlockLoads = true,
 
+      /* VK_NV_cooperative_matrix_decode_vector */
+      .cooperativeMatrixDecodeVector = true,
+
       /* VK_KHR_video_encode_av1 */
       .videoEncodeAV1 = true,
 
@@ -1693,6 +1705,12 @@ radv_physical_device_get_features(const struct radv_physical_device *pdev, struc
 
       /* VK_AMD_anti_lag */
       .antiLag = true,
+
+      /* VK_KHR_maintenance12 */
+      .maintenance12 = true,
+
+      /* VK_EXT_vertex_address_binding_unrestricted */
+      .vertexAddressBindingUnrestricted = true,
    };
 }
 
@@ -2292,10 +2310,10 @@ radv_get_physical_device_properties(struct radv_physical_device *pdev)
       .combinedImageSamplerDescriptorSize = radv_get_combined_image_sampler_desc_size(pdev),
       .sampledImageDescriptorSize = radv_get_sampled_image_desc_size(pdev),
       .storageImageDescriptorSize = RADV_STORAGE_IMAGE_DESC_SIZE,
-      .uniformTexelBufferDescriptorSize = RADV_BUFFER_DESC_SIZE,
-      .robustUniformTexelBufferDescriptorSize = RADV_BUFFER_DESC_SIZE,
-      .storageTexelBufferDescriptorSize = RADV_BUFFER_DESC_SIZE,
-      .robustStorageTexelBufferDescriptorSize = RADV_BUFFER_DESC_SIZE,
+      .uniformTexelBufferDescriptorSize = radv_get_texel_buffer_desc_size(pdev),
+      .robustUniformTexelBufferDescriptorSize = radv_get_texel_buffer_desc_size(pdev),
+      .storageTexelBufferDescriptorSize = radv_get_texel_buffer_desc_size(pdev),
+      .robustStorageTexelBufferDescriptorSize = radv_get_texel_buffer_desc_size(pdev),
       .uniformBufferDescriptorSize = RADV_BUFFER_DESC_SIZE,
       .robustUniformBufferDescriptorSize = RADV_BUFFER_DESC_SIZE,
       .storageBufferDescriptorSize = RADV_BUFFER_DESC_SIZE,
@@ -2402,7 +2420,7 @@ radv_get_physical_device_properties(struct radv_physical_device *pdev)
       .maxDescriptorHeapEmbeddedSamplers = 2048,
       .samplerYcbcrConversionCount = 3,
       .sparseDescriptorHeaps = false,
-      .protectedDescriptorHeaps = false,
+      .protectedDescriptorHeaps = radv_tmz_enabled(pdev),
 
       /* VK_KHR_device_fault */
       .maxDeviceFaultCount = 1,
@@ -2412,6 +2430,9 @@ radv_get_physical_device_properties(struct radv_physical_device *pdev)
 
       /* VK_EXT_shader_split_barrier */
       .splitBarrierReservedSharedMemory = 0,
+
+      /* VK_KHR_maintenance12 */
+      .maxInputAttachmentIndex = ~0,
    };
 
    struct vk_properties *p = &pdev->vk.properties;
@@ -2562,6 +2583,7 @@ static const uint32_t driconf_device_versions[] = {
    [GFX11_7] = 117,
    [GFX12] = 120,
    [GFX12_1] = 121,
+   [GFX13] = 130,
 };
 // clang-format on
 
@@ -2771,7 +2793,7 @@ radv_physical_device_try_create(struct radv_instance *instance, drmDevicePtr drm
    }
 #endif
 
-#if DETECT_OS_ANDROID
+#ifdef VK_USE_PLATFORM_ANDROID_KHR
    pdev->emulate_etc2 = !pdev->info.has_etc_support;
    pdev->emulate_astc = true;
 #else
@@ -3786,10 +3808,11 @@ radv_GetPhysicalDeviceDescriptorSizeEXT(VkPhysicalDevice physicalDevice, VkDescr
       return pdev->vk.properties.imageDescriptorSize;
    case VK_DESCRIPTOR_TYPE_STORAGE_IMAGE:
       return RADV_STORAGE_IMAGE_DESC_SIZE;
-   case VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER:
-   case VK_DESCRIPTOR_TYPE_STORAGE_BUFFER:
    case VK_DESCRIPTOR_TYPE_UNIFORM_TEXEL_BUFFER:
    case VK_DESCRIPTOR_TYPE_STORAGE_TEXEL_BUFFER:
+      return radv_get_texel_buffer_desc_size(pdev);
+   case VK_DESCRIPTOR_TYPE_UNIFORM_BUFFER:
+   case VK_DESCRIPTOR_TYPE_STORAGE_BUFFER:
    case VK_DESCRIPTOR_TYPE_ACCELERATION_STRUCTURE_KHR:
       return pdev->vk.properties.bufferDescriptorSize;
    default:

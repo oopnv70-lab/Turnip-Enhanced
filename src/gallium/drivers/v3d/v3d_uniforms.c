@@ -469,10 +469,12 @@ v3d_set_shader_uniform_dirty_flags(struct v3d_compiled_shader *shader)
                 case QUNIFORM_SPILL_OFFSET:
                 case QUNIFORM_SPILL_SIZE_PER_THREAD:
                         /* We could flag this on just the stage we're
-                         * compiling for, but it's not passed in.
+                         * compiling for, but it's not passed in. Compute
+                         * is left out, as v3d_launch_grid() always writes
+                         * its uniforms.
                          */
                         dirty |= V3D_DIRTY_FRAGTEX | V3D_DIRTY_VERTTEX |
-                                 V3D_DIRTY_GEOMTEX | V3D_DIRTY_COMPTEX;
+                                 V3D_DIRTY_GEOMTEX;
                         break;
 
                 case QUNIFORM_SSBO_OFFSET:

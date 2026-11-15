@@ -483,9 +483,12 @@ radv_patch_image_dimensions(struct radv_device *device, struct radv_image *image
    if (create_info->bo_metadata && radv_is_valid_opaque_metadata(device, create_info->bo_metadata)) {
       const struct radeon_bo_metadata *md = create_info->bo_metadata;
 
-      if (pdev->info.gfx_level >= GFX10) {
+      if (pdev->info.gfx_level >= GFX13) {
+         width = G_00A008_WIDTH(md->metadata[4]) + 1;
+         height = G_00A008_HEIGHT_GFX13(md->metadata[4]) + 1;
+      } else if (pdev->info.gfx_level >= GFX10) {
          width = G_00A004_WIDTH_LO(md->metadata[3]) + (G_00A008_WIDTH_HI(md->metadata[4]) << 2) + 1;
-         height = G_00A008_HEIGHT(md->metadata[4]) + 1;
+         height = G_00A008_HEIGHT_GFX10(md->metadata[4]) + 1;
       } else {
          width = G_008F18_WIDTH(md->metadata[4]) + 1;
          height = G_008F18_HEIGHT(md->metadata[4]) + 1;
@@ -980,8 +983,7 @@ radv_image_use_comp_to_single(const struct radv_device *device, const struct rad
 {
    const struct radv_physical_device *pdev = radv_device_physical(device);
 
-   /* comp-to-single is only available for GFX10+. */
-   if (pdev->info.gfx_level < GFX10)
+   if (!pdev->info.has_dcc_constant_encode)
       return false;
 
    /* If the image can't be fast cleared, comp-to-single can't be used. */
@@ -1108,7 +1110,6 @@ radv_image_get_first_mip_pipe_misaligned(const struct radv_device *device, const
                                          uint32_t plane_id)
 {
    const struct radv_physical_device *pdev = radv_device_physical(device);
-   const int log2_samples = util_logbase2(image->vk.samples);
    uint32_t first_mip = UINT32_MAX;
 
    /* Add a special case for mips in the metadata mip-tail for GFX11. */
@@ -1119,36 +1120,20 @@ radv_image_get_first_mip_pipe_misaligned(const struct radv_device *device, const
    }
 
    VkFormat fmt = radv_image_get_plane_format(pdev, image, plane_id);
-   int log2_bpp = util_logbase2(vk_format_get_blocksize(fmt));
-   int log2_bpp_and_samples;
+   const bool is_depth = vk_format_has_depth(image->vk.format);
+   const bool pipe_misaligned =
+      ac_surface_is_meta_pipe_misaligned(&pdev->info, vk_format_get_blocksize(fmt), image->vk.samples,
+                                         image->vk.array_layers, is_depth);
 
-   if (pdev->info.gfx_level >= GFX10_3) {
-      log2_bpp_and_samples = log2_bpp + log2_samples;
-   } else {
-      if (vk_format_has_depth(image->vk.format) && image->vk.array_layers >= 8) {
-         log2_bpp = 2;
-      }
-
-      log2_bpp_and_samples = MIN2(6, log2_bpp + log2_samples);
-   }
-
-   int num_pipes = G_0098F8_NUM_PIPES(pdev->info.gb_addr_config);
-   int overlap = MAX2(0, log2_bpp_and_samples + num_pipes - 8);
-
-   if (vk_format_has_depth(image->vk.format)) {
-      if (radv_image_is_tc_compat_htile(image) && (pdev->info.tcc_rb_non_coherent || overlap)) {
+   if (is_depth) {
+      if (radv_image_is_tc_compat_htile(image) && pipe_misaligned) {
          first_mip = 0;
       }
    } else {
-      int max_compressed_frags = G_0098F8_MAX_COMPRESSED_FRAGS(pdev->info.gb_addr_config);
-      int log2_samples_frag_diff = MAX2(0, log2_samples - max_compressed_frags);
-      int samples_overlap = MIN2(log2_samples, overlap);
-
       /* TODO: It shouldn't be necessary if the image has DCC but
        * not readable by shader.
        */
-      if ((radv_image_has_dcc(image) || radv_image_is_tc_compat_cmask(image)) &&
-          (pdev->info.tcc_rb_non_coherent || (samples_overlap > log2_samples_frag_diff))) {
+      if ((radv_image_has_dcc(image) || radv_image_is_tc_compat_cmask(image)) && pipe_misaligned) {
          first_mip = 0;
       }
    }
@@ -1225,6 +1210,23 @@ radv_image_create_layout(struct radv_device *device, struct radv_image_create_in
 
       info.width = vk_format_get_plane_width(image->vk.format, plane, info.width);
       info.height = vk_format_get_plane_height(image->vk.format, plane, info.height);
+
+      /* GFX9 has no NBC view. Pad mipmapped 2D ASTC so the pitch covers block_count << mip (6x6 mip7: 192 >> 7 = 1). */
+      if (pdev->info.gfx_level == GFX9 && plane == 0 && radv_is_format_emulated(pdev, image->vk.format) &&
+          vk_format_description(image->vk.format)->layout == UTIL_FORMAT_LAYOUT_ASTC &&
+          image->vk.image_type == VK_IMAGE_TYPE_2D && image->vk.mip_levels > 1) {
+         const unsigned bw = vk_format_get_blockwidth(image->vk.format);
+         const unsigned bh = vk_format_get_blockheight(image->vk.format);
+         const unsigned blocks_w = DIV_ROUND_UP(info.width, bw);
+         const unsigned blocks_h = DIV_ROUND_UP(info.height, bh);
+         const unsigned pad_blocks_w = util_next_power_of_two(blocks_w);
+         const unsigned pad_blocks_h = util_next_power_of_two(blocks_h);
+         if (pad_blocks_w != blocks_w || pad_blocks_h != blocks_h) {
+            info.width = pad_blocks_w * bw;
+            info.height = pad_blocks_h * bh;
+            image->planes[plane].gfx9_astc_padded = true;
+         }
+      }
 
       if (create_info.no_metadata_planes || (pdev->info.gfx_level < GFX12 && plane_count > 1)) {
          image->planes[plane].surface.flags |= RADEON_SURF_DISABLE_DCC | RADEON_SURF_NO_FMASK | RADEON_SURF_NO_HTILE;
@@ -1322,7 +1324,7 @@ radv_destroy_image(struct radv_device *device, const VkAllocationCallbacks *pAll
    if ((image->vk.create_flags & VK_IMAGE_CREATE_2_SPARSE_BINDING_BIT_KHR) && image->bindings[0].bo)
       radv_bo_destroy(device, &image->vk.base, image->bindings[0].bo);
 
-#if DETECT_OS_ANDROID
+#ifdef VK_USE_PLATFORM_ANDROID_KHR
    /* Bind-time ANB memory is allocated with the device allocator because
     * vkBindImageMemory2() has no allocation callbacks. Create-time ANB is
     * allocated with vkCreateImage()'s pAllocator and is freed by
@@ -1484,7 +1486,7 @@ radv_image_create(VkDevice _device, const struct radv_image_create_info *create_
 
    if ((image->vk.external_handle_types & VK_EXTERNAL_MEMORY_HANDLE_TYPE_ANDROID_HARDWARE_BUFFER_BIT_ANDROID) ||
        vk_image_is_android_native_buffer_alias(&image->vk)) {
-#if DETECT_OS_ANDROID
+#ifdef VK_USE_PLATFORM_ANDROID_KHR
       if (image->vk.external_handle_types & VK_EXTERNAL_MEMORY_HANDLE_TYPE_ANDROID_HARDWARE_BUFFER_BIT_ANDROID)
          image->vk.ahb_format = radv_ahb_format_for_vk_format(image->vk.format);
 #endif
@@ -1725,9 +1727,10 @@ radv_layout_fmask_compression(const struct radv_device *device, const struct rad
       return RADV_FMASK_COMPRESSION_NONE;
 
    /* Don't compress compute transfer dst because image stores ignore FMASK and it needs to be
-    * expanded before.
+    * expanded before. (compute in the sdma+compute gang identifies as TRANSFER)
     */
-   if (layout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL && (queue_mask & (1u << RADV_QUEUE_COMPUTE)))
+   if (layout == VK_IMAGE_LAYOUT_TRANSFER_DST_OPTIMAL &&
+       (queue_mask & (BITFIELD_BIT(RADV_QUEUE_COMPUTE) | BITFIELD_BIT(RADV_QUEUE_TRANSFER))))
       return RADV_FMASK_COMPRESSION_NONE;
 
    /* Compress images if TC-compat CMASK is enabled. */
@@ -1782,7 +1785,7 @@ VKAPI_ATTR VkResult VKAPI_CALL
 radv_CreateImage(VkDevice _device, const VkImageCreateInfo *pCreateInfo, const VkAllocationCallbacks *pAllocator,
                  VkImage *pImage)
 {
-#if DETECT_OS_ANDROID
+#ifdef VK_USE_PLATFORM_ANDROID_KHR
    const VkNativeBufferANDROID *gralloc_info = vk_find_struct_const(pCreateInfo->pNext, NATIVE_BUFFER_ANDROID);
 
    if (gralloc_info)
@@ -1868,7 +1871,7 @@ radv_BindImageMemory2(VkDevice _device, uint32_t bindInfoCount, const VkBindImag
       }
 #endif
 
-#if DETECT_OS_ANDROID
+#ifdef VK_USE_PLATFORM_ANDROID_KHR
       if (!mem) {
          VkDeviceMemory memory_h = VK_NULL_HANDLE;
          VkResult result = radv_android_get_wsi_memory(_device, &pBindInfos[i], &memory_h);
@@ -2001,7 +2004,7 @@ radv_GetImageSubresourceLayout2(VkDevice _device, VkImage _image, const VkImageS
       }
    }
 
-   VkSubresourceHostMemcpySizeEXT *host_memcpy_size = vk_find_struct(pLayout->pNext, SUBRESOURCE_HOST_MEMCPY_SIZE_EXT);
+   VkSubresourceHostMemcpySize *host_memcpy_size = vk_find_struct(pLayout->pNext, SUBRESOURCE_HOST_MEMCPY_SIZE);
    if (host_memcpy_size)
       host_memcpy_size->size = pLayout->subresourceLayout.size;
 }

@@ -520,7 +520,7 @@ gather_intrinsic_info(nir_intrinsic_instr *instr, nir_shader *shader)
       if (nir_intrinsic_writes_external_memory(instr))
          shader->info.writes_memory = true;
       if (shader->info.stage == MESA_SHADER_FRAGMENT &&
-          nir_deref_mode_is_one_of(deref, nir_var_any_pixel_local))
+          nir_deref_mode_is(deref, nir_var_mem_pixel_local))
          shader->info.fs.accesses_pixel_local_storage = true;
       break;
    }
@@ -803,6 +803,10 @@ gather_intrinsic_info(nir_intrinsic_instr *instr, nir_shader *shader)
    case nir_intrinsic_load_color1_amd:
       BITSET_SET(shader->info.system_values_read,
                  nir_system_value_from_intrinsic(instr->intrinsic));
+      break;
+
+   case nir_intrinsic_load_local_invocation_id_intel:
+      BITSET_SET(shader->info.system_values_read, SYSTEM_VALUE_LOCAL_INVOCATION_ID);
       break;
 
    case nir_intrinsic_is_helper_invocation:

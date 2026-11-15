@@ -407,13 +407,8 @@ visit_intrinsic(nir_intrinsic_instr *instr, struct divergence_state *state)
    case nir_intrinsic_load_multisampled_pan:
    case nir_intrinsic_load_rt_conversion_pan:
    case nir_intrinsic_subgroup_barrier_index_intel:
+   case nir_intrinsic_load_fs_meta_pco:
       is_divergent = false;
-      break;
-
-   case nir_intrinsic_load_push_data_intel:
-      is_divergent =
-         (nir_intrinsic_access(instr) & ACCESS_NON_UNIFORM) &&
-         src_divergent(instr->src[0], state);
       break;
 
    case nir_intrinsic_load_ubo_uniform_block_intel:
@@ -456,6 +451,11 @@ visit_intrinsic(nir_intrinsic_instr *instr, struct divergence_state *state)
    case nir_intrinsic_plane_eqn_origin_intel:
       /* These would be divergent if Jay supported multipolygon */
       is_divergent = false;
+      break;
+
+   case nir_intrinsic_load_local_invocation_id_intel:
+      is_divergent = nir_intrinsic_component(instr) != 2 ||
+         !(state->options & nir_divergence_uniform_local_invocation_id_z);
       break;
 
    case nir_intrinsic_decl_reg:
@@ -828,6 +828,8 @@ visit_intrinsic(nir_intrinsic_instr *instr, struct divergence_state *state)
    case nir_intrinsic_load_attr_pan:
    case nir_intrinsic_lea_attr_pan:
    case nir_intrinsic_lea_buf_pan:
+   case nir_intrinsic_fsin_table_pan:
+   case nir_intrinsic_fcos_table_pan:
    case nir_intrinsic_cubeface_pan:
    case nir_intrinsic_cube_ssel_pan:
    case nir_intrinsic_cube_tsel_pan:
@@ -882,8 +884,19 @@ visit_intrinsic(nir_intrinsic_instr *instr, struct divergence_state *state)
    case nir_intrinsic_load_viewport_z_range_kk:
    case nir_intrinsic_load_texture_scale:
    case nir_intrinsic_load_inline_data_intel:
+   case nir_intrinsic_load_push_data_intel:
    case nir_intrinsic_resource_intel:
-   case nir_intrinsic_load_push_constant: {
+   case nir_intrinsic_load_push_constant:
+   case nir_intrinsic_load_tex_state_pco:
+   case nir_intrinsic_load_smp_state_pco:
+   case nir_intrinsic_load_tex_meta_pco:
+   case nir_intrinsic_load_smp_meta_pco:
+   case nir_intrinsic_smp_pco:
+   case nir_intrinsic_smp_coeffs_pco:
+   case nir_intrinsic_smp_raw_pco:
+   case nir_intrinsic_pack_pco:
+   case nir_intrinsic_pck_prog_pco:
+   case nir_intrinsic_unpack_pco: {
       unsigned num_srcs = nir_intrinsic_infos[instr->intrinsic].num_srcs;
       for (unsigned i = 0; i < num_srcs; i++) {
          if (src_divergent(instr->src[i], state)) {
@@ -1149,6 +1162,9 @@ visit_intrinsic(nir_intrinsic_instr *instr, struct divergence_state *state)
    case nir_intrinsic_load_deref_transpose_amd:
    case nir_intrinsic_load_global_tr_amd:
    case nir_intrinsic_trace_ray_intel:
+   case nir_intrinsic_smp_write_pco:
+   case nir_intrinsic_load_instance_num_pco:
+   case nir_intrinsic_load_savmsk_vm_pco:
       is_divergent = true;
       break;
 

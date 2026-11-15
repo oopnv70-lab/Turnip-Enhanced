@@ -275,6 +275,9 @@ anv_shader_init_uuid(struct anv_physical_device *device)
    const bool lttd = device->drirc.debug.lower_terminate_to_discard;
    _mesa_blake3_update(&ctx, &lttd, sizeof(lttd));
 
+   const bool fegf = device->drirc.debug.force_exact_glsl_fma;
+   _mesa_blake3_update(&ctx, &fegf, sizeof(fegf));
+
    const bool large_wg_wa =
       device->drirc.debug.large_workgroup_non_coherent_image_workaround;
    _mesa_blake3_update(&ctx, &large_wg_wa, sizeof(large_wg_wa));
@@ -352,6 +355,7 @@ anv_shader_get_spirv_options(struct vk_physical_device *device,
 
       .workarounds = {
          .lower_terminate_to_discard = pdevice->drirc.debug.lower_terminate_to_discard,
+         .force_exact_glsl_fma = pdevice->drirc.debug.force_exact_glsl_fma,
       },
 
       .store_dxbc_dxil_hashes = true,
@@ -960,7 +964,7 @@ anv_fixup_subgroup_size(struct anv_device *device,
     */
    if (pdevice->drirc.debug.assume_full_subgroups &&
        info->uses_wide_subgroup_intrinsics &&
-       info->api_subgroup_size == BRW_SUBGROUP_SIZE &&
+       info->min_subgroup_size != info->max_subgroup_size &&
        local_size &&
        local_size % BRW_SUBGROUP_SIZE == 0) {
       info->max_subgroup_size = BRW_SUBGROUP_SIZE;
@@ -2027,7 +2031,7 @@ set_debug_archive_filename(const struct anv_shader_data *shader_data,
 static struct jay_shader_bin *
 anv_shader_compile_jay(const struct intel_device_info *devinfo, void *mem_ctx,
                        nir_shader *nir,
-                       const struct brw_compile_params *params,
+                       struct brw_compile_params *params,
                        const struct anv_shader_data *shader_data)
 {
    /* TODO: Once jay_compile_params has all we need, stop using
@@ -2046,9 +2050,12 @@ anv_shader_compile_jay(const struct intel_device_info *devinfo, void *mem_ctx,
       .fs.mue_map =
          nir->info.stage == MESA_SHADER_FRAGMENT ? params->fs.mue_map : NULL,
       .archiver = shader_data->archiver,
+      .error_str = &params->error_str,
    };
 
    struct jay_shader_bin *main_bin = jay_compile(devinfo, &jc_params);
+   if (!main_bin)
+      return NULL;
 
    /* Early return if there are not resume shaders to compile */
    if (params->bs.num_resume_shaders == 0 ||
@@ -2107,6 +2114,8 @@ anv_shader_compile_jay(const struct intel_device_info *devinfo, void *mem_ctx,
       resume_params.prog_data = &main_prog_data;
 
       resume_shader_bins[i] = jay_compile(devinfo, &resume_params);
+      if (!resume_shader_bins[i])
+         return NULL;
 
       resume_prog_data[i] = main_prog_data;
       resume_grf_used[i] = resume_prog_data[i].base.grf_used;
@@ -2479,16 +2488,18 @@ anv_shader_compile(struct vk_device *vk_device,
          struct jay_shader_bin *bin =
             anv_shader_compile_jay(devinfo, mem_ctx, nir, &params, shader_data);
 
-         shader_data->code = bin->kernel;
-         for (unsigned i = 0; i < 3; i++)
-            shader_data->stats[i] = bin->stats[i];
+         if (bin) {
+            shader_data->code = bin->kernel;
+            for (unsigned i = 0; i < 3; i++)
+               shader_data->stats[i] = bin->stats[i];
 
-         if (mesa_shader_stage_uses_workgroup(nir->info.stage)) {
-            struct brw_cs_prog_data *prog_data =
-               (struct brw_cs_prog_data *)params.prog_data;
-            prog_data->local_size[0] = nir->info.workgroup_size[0];
-            prog_data->local_size[1] = nir->info.workgroup_size[1];
-            prog_data->local_size[2] = nir->info.workgroup_size[2];
+            if (mesa_shader_stage_uses_workgroup(nir->info.stage)) {
+               struct brw_cs_prog_data *prog_data =
+                  (struct brw_cs_prog_data *)params.prog_data;
+               prog_data->local_size[0] = nir->info.workgroup_size[0];
+               prog_data->local_size[1] = nir->info.workgroup_size[1];
+               prog_data->local_size[2] = nir->info.workgroup_size[2];
+            }
          }
       } else {
          const bool has_resume_shaders =

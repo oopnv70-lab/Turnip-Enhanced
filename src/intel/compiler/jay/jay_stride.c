@@ -62,6 +62,8 @@ restrict_mixed_strides(jay_inst *I, unsigned s)
 enum jay_stride
 jay_dst_stride_minmax(jay_inst *I, bool do_max)
 {
+   assert(I->dst.file == GPR || jay_is_null(I->dst));
+
    enum jay_stride min = min_stride_for_type(I->type);
    enum jay_stride max = max_stride_for_type(I->type);
 
@@ -91,13 +93,14 @@ jay_dst_stride_minmax(jay_inst *I, bool do_max)
       return JAY_STRIDE_4;
    }
 
+   /* SLICE_REPACK assume its operands use 4-byte stride. */
+   if (I->op == JAY_OPCODE_SLICE_REPACK) {
+      return JAY_STRIDE_4;
+   }
+
    /* V/UV types are restricted */
    if (I->op == JAY_OPCODE_SHR_ODD_SUBSPANS_BY_4) {
       return JAY_STRIDE_2;
-   }
-
-   if (I->op == JAY_OPCODE_SLICE_REPACK && jay_slice_repack_unpack(I)) {
-      return JAY_STRIDE_4;
    }
 
    /* The src2 restriction quoted above effectively implies we should not stride
@@ -113,6 +116,8 @@ jay_dst_stride_minmax(jay_inst *I, bool do_max)
 enum jay_stride
 jay_src_stride_minmax(jay_inst *I, unsigned s, bool do_max)
 {
+   assert(I->src[s].file == GPR);
+
    enum jay_stride min = min_stride_for_type(jay_src_type(I, s));
    enum jay_stride max = max_stride_for_type(jay_src_type(I, s));
 
@@ -124,6 +129,11 @@ jay_src_stride_minmax(jay_inst *I, unsigned s, bool do_max)
    /* BSpec 56640: bfloat sources must be packed */
    if (jay_src_type(I, s) == JAY_TYPE_BF16) {
       return JAY_STRIDE_2;
+   }
+
+   /* SLICE_REPACK assume its operands use 4-byte stride. */
+   if (I->op == JAY_OPCODE_SLICE_REPACK) {
+      return JAY_STRIDE_4;
    }
 
    /* SENDs cannot do any regioning so force exactly the types of the sources
@@ -144,7 +154,7 @@ jay_src_stride_minmax(jay_inst *I, unsigned s, bool do_max)
       max = JAY_STRIDE_4;
    }
 
-   if (restrict_mixed_strides(I, s))
+   if (restrict_mixed_strides(I, s) && I->dst.file == GPR)
       return jay_dst_stride_minmax(I, do_max);
 
    return (do_max && !restrict_mixed_strides(I, s)) ? max : min;

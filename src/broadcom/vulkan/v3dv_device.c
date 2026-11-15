@@ -65,7 +65,7 @@
 
 #include <sys/stat.h>
 
-#if DETECT_OS_ANDROID
+#ifdef VK_USE_PLATFORM_ANDROID_KHR
 #include <vndk/hardware_buffer.h>
 #include "util/u_gralloc/u_gralloc.h"
 #endif
@@ -243,6 +243,7 @@ get_device_extensions(const struct v3dv_physical_device *device,
       .KHR_vertex_attribute_divisor         = true,
       .KHR_vulkan_memory_model              = true,
       .KHR_zero_initialize_workgroup_memory = true,
+      .ARM_rasterization_order_attachment_access = true,
       .EXT_4444_formats                     = true,
       .EXT_attachment_feedback_loop_layout  = true,
       .EXT_border_color_swizzle             = true,
@@ -273,6 +274,7 @@ get_device_extensions(const struct v3dv_physical_device *device,
       .EXT_pipeline_creation_cache_control  = true,
       .EXT_pipeline_creation_feedback       = true,
       .EXT_pipeline_robustness              = true,
+      .EXT_rasterization_order_attachment_access = true,
       .EXT_robustness2                      = true,
       .EXT_primitive_topology_list_restart  = true,
       .EXT_private_data                     = true,
@@ -293,7 +295,7 @@ get_device_extensions(const struct v3dv_physical_device *device,
       .GOOGLE_display_timing = wsi_instance_supports_google_display_timing(device->vk.instance, &v3dv_instance->drirc.options),
 #endif
    };
-#if DETECT_OS_ANDROID
+#ifdef VK_USE_PLATFORM_ANDROID_KHR
    struct u_gralloc *gralloc = vk_android_get_ugralloc();
    if (gralloc && u_gralloc_get_type(gralloc) != U_GRALLOC_TYPE_FALLBACK) {
       ext->ANDROID_external_memory_android_hardware_buffer = true;
@@ -501,6 +503,11 @@ get_features(const struct v3dv_physical_device *physical_device,
 
       /* VK_EXT_color_write_enable */
       .colorWriteEnable = true,
+
+      /* VK_EXT_rasterization_order_attachment_access */
+      .rasterizationOrderColorAttachmentAccess = true,
+      .rasterizationOrderDepthAttachmentAccess = true,
+      .rasterizationOrderStencilAttachmentAccess = true,
 
       /* VK_EXT_extended_dynamic_state */
       .extendedDynamicState = true,
@@ -864,11 +871,17 @@ compute_heap_size(struct v3dv_instance *instance)
 #endif
 }
 
+/* VkPhysicalDeviceMemoryBudgetPropertiesEXT::heapUsage is the memory used by
+ * the whole process, so it has to account for allocations made through any
+ * instance. There is only one V3D in the system, so a single counter is enough.
+ */
+static alignas(8) uint64_t process_heap_used;
+
 static uint64_t
 compute_memory_budget(struct v3dv_physical_device *device)
 {
    uint64_t heap_size = device->memory.memoryHeaps[0].size;
-   uint64_t heap_used = p_atomic_read(&device->heap_used);
+   uint64_t heap_used = p_atomic_read(&process_heap_used);
 
 #if !USE_V3D_SIMULATOR
    /* Let's not incite the app to starve the system: report at most 90% of
@@ -1223,9 +1236,9 @@ get_device_properties(const struct v3dv_physical_device *device,
       .driverID = VK_DRIVER_ID_MESA_V3DV,
       .conformanceVersion = {
          .major = 1,
-         .minor = 3,
-         .subminor = 8,
-         .patch = 3,
+         .minor = 4,
+         .subminor = 6,
+         .patch = 2,
       },
       .supportedDepthResolveModes = VK_RESOLVE_MODE_SAMPLE_ZERO_BIT,
       .supportedStencilResolveModes = VK_RESOLVE_MODE_SAMPLE_ZERO_BIT,
@@ -1357,7 +1370,7 @@ get_device_properties(const struct v3dv_physical_device *device,
       /* VkPhysicalDevicePerformanceQueryPropertiesKHR */
       .allowCommandBufferQueryCopies = true,
 
-#if DETECT_OS_ANDROID
+#ifdef VK_USE_PLATFORM_ANDROID_KHR
       /* VkPhysicalDevicePresentationPropertiesANDROID */
       .sharedImage = !!vk_android_get_front_buffer_usage(),
 #endif
@@ -1923,7 +1936,7 @@ v3dv_GetPhysicalDeviceMemoryProperties2(VkPhysicalDevice physicalDevice,
       case VK_STRUCTURE_TYPE_PHYSICAL_DEVICE_MEMORY_BUDGET_PROPERTIES_EXT: {
          VkPhysicalDeviceMemoryBudgetPropertiesEXT *p =
             (VkPhysicalDeviceMemoryBudgetPropertiesEXT *) ext;
-         p->heapUsage[0] = device->heap_used;
+         p->heapUsage[0] = p_atomic_read(&process_heap_used);
          p->heapBudget[0] = compute_memory_budget(device);
 
          /* The heapBudget and heapUsage values must be zero for array elements
@@ -2337,7 +2350,7 @@ device_free(struct v3dv_device *device, struct v3dv_device_memory *mem)
       device_free_wsi_dumb(device->pdevice->display_fd, mem->bo->dumb_handle);
    }
 
-   p_atomic_add(&device->pdevice->heap_used, -((int64_t)mem->bo->size));
+   p_atomic_add(&process_heap_used, -((int64_t)mem->bo->size));
 
    v3dv_bo_free(device, mem->bo, vk_object_to_u64_handle(&mem->vk.base));
 }
@@ -2556,7 +2569,7 @@ v3dv_AllocateMemory(VkDevice _device,
     * maxMemoryAllocationSize must succeed. Accept one extra page over
     * the limit, which covers any sub-page padding after alignment.
     */
-   uint64_t heap_used = p_atomic_read(&pdevice->heap_used);
+   uint64_t heap_used = p_atomic_read(&process_heap_used);
    if (unlikely(alloc_size > MAX_MEMORY_ALLOCATION_SIZE + 4096u ||
       heap_used + alloc_size > pdevice->memory.memoryHeaps[0].size)) {
       vk_device_memory_report_emit(&device->vk, VK_ERROR_OUT_OF_DEVICE_MEMORY,
@@ -2626,7 +2639,7 @@ v3dv_AllocateMemory(VkDevice _device,
       if (result == VK_SUCCESS)
          close(fd_info->fd);
    } else if (mem->vk.ahardware_buffer) {
-#if DETECT_OS_ANDROID
+#ifdef VK_USE_PLATFORM_ANDROID_KHR
       const native_handle_t *handle = AHardwareBuffer_getNativeHandle(mem->vk.ahardware_buffer);
       assert(handle->numFds > 0);
       size_t size = lseek(handle->data[0], 0, SEEK_END);
@@ -2646,7 +2659,7 @@ v3dv_AllocateMemory(VkDevice _device,
       return vk_error(device, result);
    }
 
-   heap_used = p_atomic_add_return(&pdevice->heap_used, mem->bo->size);
+   heap_used = p_atomic_add_return(&process_heap_used, mem->bo->size);
    if (heap_used > pdevice->memory.memoryHeaps[0].size) {
       free_memory(device, mem, pAllocator);
       return vk_error(device, VK_ERROR_OUT_OF_DEVICE_MEMORY);
@@ -2905,7 +2918,7 @@ v3dv_BindImageMemory2(VkDevice _device,
 
    for (uint32_t i = 0; i < bindInfoCount; i++) {
       set_bind_status(pBindInfos[i].pNext, VK_SUCCESS);
-#if DETECT_OS_ANDROID
+#ifdef VK_USE_PLATFORM_ANDROID_KHR
       V3DV_FROM_HANDLE(v3dv_image, image, pBindInfos[i].image);
       if (vk_image_is_android_hardware_buffer(&image->vk) ||
           vk_image_is_android_native_buffer_alias(&image->vk)) {
@@ -2974,7 +2987,7 @@ v3dv_BindImageMemory2(VkDevice _device,
          vk_find_struct_const(pBindInfos[i].pNext,
                               BIND_IMAGE_MEMORY_SWAPCHAIN_INFO_KHR);
       if (swapchain_info && swapchain_info->swapchain) {
-#if !DETECT_OS_ANDROID
+#ifndef VK_USE_PLATFORM_ANDROID_KHR
          VkDeviceMemory wsi_mem_handle = wsi_common_get_memory(
             swapchain_info->swapchain, swapchain_info->imageIndex);
          VkBindImageMemoryInfo swapchain_bind = {

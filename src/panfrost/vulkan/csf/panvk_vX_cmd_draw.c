@@ -189,7 +189,8 @@ panvk_per_arch(device_draw_context_init)(struct panvk_device *dev)
    VkResult result = panvk_priv_bo_create(
       dev, fns_bo_size,
       panvk_device_adjust_bo_flags(dev, PAN_KMOD_BO_FLAG_WB_MMAP),
-      VK_SYSTEM_ALLOCATION_SCOPE_DEVICE, &dev->draw_ctx->fns_bo);
+      VK_SYSTEM_ALLOCATION_SCOPE_DEVICE, "Provoking vertex functions",
+      &dev->draw_ctx->fns_bo);
    if (result != VK_SUCCESS)
       goto free_draw_ctx;
 
@@ -1899,7 +1900,7 @@ get_fb_descs(struct panvk_cmd_buffer *cmdbuf)
    fbd_info.store = &render->fb.store;
 
    /* Wait for IR info push to complete */
-   cs_wait_slot(b, SB_ID(LS));
+   cs_wait_ls(b);
 
    if (copy_fbds) {
       struct cs_index cur_tiler = cs_reg64(b, PANVK_CS_REG_TILER_DESC_PTR);
@@ -4561,7 +4562,7 @@ issue_fragment_jobs(struct panvk_cmd_buffer *cmdbuf)
    if (PANVK_DEBUG(IMPLICIT_OTHERS_INV)) {
       cs_flush_caches(b, MALI_CS_FLUSH_MODE_NONE, MALI_CS_FLUSH_MODE_NONE,
                       MALI_CS_OTHER_FLUSH_MODE_INVALIDATE, length_reg,
-                      cs_defer(0x0, SB_ID(IMM_FLUSH)));
+                      cs_defer(SB_IMM_MASK, SB_ID(IMM_FLUSH)));
       cs_wait_slot(b, SB_ID(IMM_FLUSH));
    }
 

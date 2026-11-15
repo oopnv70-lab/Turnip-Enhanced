@@ -816,16 +816,16 @@ v3d_lower_nir(struct v3d_compile *c)
 
         if (c->s->info.zero_initialize_shared_memory &&
             c->s->info.shared_size > 0) {
-                /* All our BOs allocate full pages, so the underlying allocation
-                 * for shared memory will always be a multiple of 4KB. This
-                 * ensures that we can do an exact number of full chunk_size
-                 * writes to initialize the memory independently of the actual
-                 * shared_size used by the shader, which is a requirement of
-                 * the initialization pass.
+                /* The initialization pass writes whole chunks and workgroups
+                 * in flight are laid out at a stride of shared_size, so round
+                 * the size up to the chunk size: the stride and the allocation
+                 * then cover the clear.
                  */
                 const unsigned chunk_size = 16; /* max single store size */
+                c->s->info.shared_size = align(c->s->info.shared_size,
+                                               chunk_size);
                 NIR_PASS(_, c->s, nir_zero_initialize_shared_memory,
-                         align(c->s->info.shared_size, chunk_size), chunk_size);
+                         c->s->info.shared_size, chunk_size);
         }
 
         NIR_PASS(_, c->s, nir_lower_compute_system_values, NULL);
@@ -1292,8 +1292,6 @@ v3d_nir_lower_fs_early(struct v3d_compile *c)
 
         if (c->fs_key->software_blend) {
                 if (c->fs_key->sample_alpha_to_coverage) {
-                        assert(c->fs_key->msaa);
-
                         NIR_PASS(_, c->s, nir_lower_alpha_to_coverage,
                                  true, NULL);
                 }
@@ -2002,6 +2000,9 @@ v3d_attempt_compile(struct v3d_compile *c)
 
         NIR_PASS(_, c->s, v3d_nir_lower_io, c);
         NIR_PASS(_, c->s, v3d_nir_lower_txf_ms);
+        NIR_PASS(_, c->s, v3d_nir_lower_txf_buffer_rgb32,
+                 c->key->sampler_buffer_rgb32);
+
         /* On V3D 4.2, txf instructions with an out-of-bounds LOD do not
          * return robust values (zero) as required by robustImageAccess2.
          * This pass rewrites the fetch to a guaranteed out-of-bounds

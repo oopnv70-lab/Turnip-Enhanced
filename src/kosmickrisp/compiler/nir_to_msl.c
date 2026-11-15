@@ -100,6 +100,9 @@ emit_inputs(struct nir_to_msl_ctx *ctx, nir_shader *shader)
    default:
       break;
    }
+   if (!(ctx->disabled_workarounds & BITFIELD64_BIT(19))) {
+      P_IND(ctx, "threadgroup uint32_t *kk_wa19_tg [[threadgroup(0)]],\n");
+   }
    P_IND(ctx, "constant Buffer &buf0 [[buffer(0)]],\n");
    P_IND(ctx, "constant SamplerTable &sampler_table [[buffer(1)]]");
    if (ctx->uses_per_draw_data) {
@@ -254,6 +257,15 @@ alu_funclike_precise(struct nir_to_msl_ctx *ctx, nir_alu_instr *instr,
       alu_src_to_msl(ctx, instr, 1);                                           \
    } while (0)
 
+static bool
+alu_has_const_src(const nir_alu_instr *instr, unsigned count)
+{
+   for (unsigned i = 0; i < count; i++)
+      if (nir_src_is_const(instr->src[i].src))
+         return true;
+   return false;
+}
+
 static void
 alu_fcmp_to_msl(struct nir_to_msl_ctx *ctx, nir_alu_instr *instr,
                 const char *op)
@@ -298,7 +310,8 @@ alu_to_msl(struct nir_to_msl_ctx *ctx, nir_alu_instr *instr)
    case nir_op_fmul:
       if (!(ctx->disabled_workarounds & BITFIELD64_BIT(14)) &&
           (nir_alu_instr_is_inf_preserve(instr) ||
-           nir_alu_instr_is_nan_preserve(instr)))
+           nir_alu_instr_is_nan_preserve(instr)) &&
+          alu_has_const_src(instr, 2))
          P(ctx, "!&buf0.contents[0] ? 1 : ")
       ALU_BINOP("*");
       break;
@@ -477,7 +490,8 @@ alu_to_msl(struct nir_to_msl_ctx *ctx, nir_alu_instr *instr)
          P(ctx, ") * (");
          if (!(ctx->disabled_workarounds & BITFIELD64_BIT(14)) &&
              (nir_alu_instr_is_inf_preserve(instr) ||
-              nir_alu_instr_is_nan_preserve(instr)))
+              nir_alu_instr_is_nan_preserve(instr)) &&
+             alu_has_const_src(instr, 3))
             P(ctx, "!&buf0.contents[0] ? 1 : ")
          alu_src_to_msl(ctx, instr, 2);
          P(ctx, ")");
@@ -1367,23 +1381,9 @@ intrinsic_to_msl(struct nir_to_msl_ctx *ctx, nir_intrinsic_instr *instr)
       break;
    }
    case nir_intrinsic_load_global_constant_offset: {
-      enum gl_access_qualifier access = nir_intrinsic_access(instr);
-      const char *type = msl_type_for_def(ctx->types, &instr->def);
-      const char *qualifier = global_access_qualifier(ctx, access);
-      if (access & ACCESS_ATOMIC) {
-         assert(instr->num_components == 1u &&
-                "We can only do single component with atomics");
-         P(ctx, "atomic_load_explicit((%s atomic_%s*)(", qualifier, type);
-         src_to_msl(ctx, &instr->src[0]);
-         P(ctx, "+");
-         src_to_msl(ctx, &instr->src[1]);
-         P(ctx, ", memory_order_relaxed);\n");
-      } else {
-         src_to_packed_load_offset(ctx, &instr->src[0], &instr->src[1],
-                                   qualifier,
-                                   msl_type_for_def(ctx->types, &instr->def),
-                                   instr->def.num_components);
-      }
+      src_to_packed_load_offset(ctx, &instr->src[0], &instr->src[1], "constant",
+                                msl_type_for_def(ctx->types, &instr->def),
+                                instr->def.num_components);
       P(ctx, ";\n");
       break;
    }
@@ -1988,8 +1988,11 @@ tex_to_msl(struct nir_to_msl_ctx *ctx, nir_tex_instr *tex)
       src_to_msl(ctx, sampler);
       P(ctx, ", ");
       src_to_msl(ctx, coord);
-      P(ctx, ") + ");
-      src_to_msl(ctx, bias);
+      P(ctx, ")");
+      if (bias) {
+         P(ctx, " + ");
+         src_to_msl(ctx, bias);
+      }
       P(ctx, ", ");
       src_to_msl(ctx, min);
       P(ctx, ", ");
@@ -2525,6 +2528,17 @@ nir_to_msl(nir_shader *shader, struct nir_to_msl_options *options)
    P(&ctx, ")\n");
    P(&ctx, "{\n");
    ctx.indentlevel++;
+
+   /* KK_WORKAROUND_19 */
+   if (!(ctx.disabled_workarounds & BITFIELD64_BIT(19))) {
+      P_IND(&ctx, "/* KK_WORKAROUND_19 */\n");
+      P_IND(&ctx, "if (buf0.contents[0] == 0xFFFFFFFFFFFFFFFFul) {\n"
+                  "    kk_wa19_tg[0] = 1u;\n"
+                  "    threadgroup_barrier(mem_flags::mem_threadgroup);\n"
+                  "    *(device uint *)(buf0.contents[0]) = kk_wa19_tg[1];\n"
+                  "}\n");
+   }
+
    msl_emit_output_var(&ctx, shader);
    emit_local_vars(&ctx, shader);
    predeclare_ssa_values(&ctx, impl);

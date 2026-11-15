@@ -137,18 +137,9 @@ brw_compile_cs(const struct brw_compiler *compiler,
       prog_data->local_size[0] = nir->info.workgroup_size[0];
       prog_data->local_size[1] = nir->info.workgroup_size[1];
       prog_data->local_size[2] = nir->info.workgroup_size[2];
-
-      if (nir->info.workgroup_size[0] * nir->info.workgroup_size[1] % 32 == 0) {
-         struct nir_shader_compiler_options *options =
-            ralloc(nir, struct nir_shader_compiler_options);
-
-         *options = *nir->options;
-         options->divergence_analysis_options = nir_divergence_options(
-            options->divergence_analysis_options |
-            nir_divergence_uniform_local_invocation_id_z);
-         nir->options = options;
-      }
    }
+
+   brw_nir_select_divergence_options(compiler, nir, false);
 
    brw_pass_tracker pt_ = {
       .nir = nir,
@@ -207,15 +198,11 @@ brw_compile_cs(const struct brw_compiler *compiler,
 
       const brw_shader_params shader_params = {
          .compiler                = compiler,
-         .mem_ctx                 = params->mem_ctx,
+         .compile_params          = params,
          .nir                     = shader,
-         .key                     = &key->base,
-         .prog_data               = &prog_data->base,
          .dispatch_width          = dispatch_width,
          .needs_register_pressure = params->stats != NULL,
-         .log_data                = params->log_data,
          .debug_enabled           = debug_enabled,
-         .archiver                = params->archiver,
       };
       v[simd] = std::make_unique<brw_shader>(&shader_params);
 

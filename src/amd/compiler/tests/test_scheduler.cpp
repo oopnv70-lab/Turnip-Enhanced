@@ -424,3 +424,137 @@ BEGIN_TEST(vopd_sched.dot2acc_from_vop2_inline)
 
    finish_schedule_vopd_test();
 END_TEST
+
+BEGIN_TEST(ilp_sched.partial_operand_latency)
+   for (amd_gfx_level gfx : {GFX9, GFX12}) {
+      if (!setup_cs(NULL, gfx))
+         continue;
+
+      //>> v1: %0:v[0] = v_mul_f32 %0:v[12], %0:v[13]
+      //! v1: %0:v[1] = v_mul_f32 %0:v[12], %0:v[13]
+      //! v1: %0:v[10] = v_add_f32 %0:v[0], %0:v[14]
+      //! v2: %0:v[4-5] = v_add_f64 %0:v[0-1], %0:v[8-9]
+      bld.vop2(aco_opcode::v_mul_f32, Definition(PhysReg(256), v1), Operand(PhysReg(268), v1),
+               Operand(PhysReg(269), v1));
+      bld.vop2(aco_opcode::v_mul_f32, Definition(PhysReg(257), v1), Operand(PhysReg(268), v1),
+               Operand(PhysReg(269), v1));
+      bld.vop3(aco_opcode::v_add_f64, Definition(PhysReg(260), v2), Operand(PhysReg(256), v2),
+               Operand(PhysReg(264), v2));
+      bld.vop2(aco_opcode::v_add_f32, Definition(PhysReg(266), v1), Operand(PhysReg(256), v1),
+               Operand(PhysReg(270), v1));
+
+      finish_schedule_ilp_test();
+   }
+END_TEST
+
+BEGIN_TEST(ilp_sched.transitive_dependents)
+   for (amd_gfx_level gfx : {GFX9, GFX12}) {
+      if (!setup_cs(NULL, gfx))
+         continue;
+
+      /* Two immediate users versus a longer chain with only one immediate user. */
+      //>> v1: %0:v[7] = v_mov_b32 1.0
+      //! v1: %0:v[4] = v_mov_b32 0
+      bld.vop1(aco_opcode::v_mov_b32, Definition(PhysReg(260), v1), Operand::zero());
+      bld.vop1(aco_opcode::v_mov_b32, Definition(PhysReg(263), v1), Operand::c32(0x3f800000));
+      bld.vop2(aco_opcode::v_add_f32, Definition(PhysReg(261), v1), Operand(PhysReg(260), v1),
+               Operand::c32(0x3f800000));
+      bld.vop2(aco_opcode::v_mul_f32, Definition(PhysReg(262), v1), Operand(PhysReg(260), v1),
+               Operand::c32(0x40000000));
+      bld.vop2(aco_opcode::v_add_f32, Definition(PhysReg(264), v1), Operand(PhysReg(263), v1),
+               Operand::c32(0x3f800000));
+      bld.vop2(aco_opcode::v_add_f32, Definition(PhysReg(265), v1), Operand(PhysReg(264), v1),
+               Operand::c32(0x3f800000));
+      bld.vop2(aco_opcode::v_add_f32, Definition(PhysReg(266), v1), Operand(PhysReg(265), v1),
+               Operand::c32(0x3f800000));
+
+      finish_schedule_ilp_test();
+   }
+END_TEST
+
+BEGIN_TEST(ilp_sched.pending_prolog_input)
+   for (amd_gfx_level gfx : {GFX9, GFX12}) {
+      for (unsigned component : {0u, 1u}) {
+         if (!setup_cs(NULL, gfx, CHIP_UNKNOWN, component ? "_hi" : "_lo"))
+            continue;
+
+         program->args_pending_vmem.emplace_back(PhysReg(260), v2);
+         //>> v1: %0:v[11] = v_mov_b32 0
+         //~.*_lo! v1: %0:v[6] = v_add_f32 %0:v[4], 1.0
+         //~.*_hi! v1: %0:v[6] = v_add_f32 %0:v[5], 1.0
+         bld.vop2(aco_opcode::v_add_f32, Definition(PhysReg(262), v1),
+                  Operand(PhysReg(260 + component), v1), Operand::c32(0x3f800000));
+         bld.vop1(aco_opcode::v_mov_b32, Definition(PhysReg(267), v1), Operand::zero());
+
+         finish_schedule_ilp_test();
+      }
+   }
+END_TEST
+
+BEGIN_TEST(ilp_sched.fallback_pending_input)
+   for (amd_gfx_level gfx : {GFX9, GFX10, GFX12}) {
+      if (!setup_cs(NULL, gfx))
+         continue;
+
+      program->args_pending_vmem.emplace_back(PhysReg(260), v1);
+      //>> v1: %0:v[0] = v_add_f32 %0:v[12], %0:v[13]
+      //~gfx9! v1: %0:v[8] = global_load_dword %0:v[0-1], s1: undef
+      //! v1: %0:v[11] = v_mov_b32 0
+      //~gfx1[02]! v1: %0:v[8] = global_load_dword %0:v[0-1], s1: undef
+      //! v1: %0:v[6] = v_add_f32 %0:v[4], 1.0
+      bld.vop2(aco_opcode::v_add_f32, Definition(PhysReg(256), v1), Operand(PhysReg(268), v1),
+               Operand(PhysReg(269), v1));
+      bld.global(aco_opcode::global_load_dword, Definition(PhysReg(264), v1),
+                 Operand(PhysReg(256), v2), Operand(s1));
+      bld.vop2(aco_opcode::v_add_f32, Definition(PhysReg(262), v1), Operand(PhysReg(260), v1),
+               Operand::c32(0x3f800000));
+      bld.vop1(aco_opcode::v_mov_b32, Definition(PhysReg(267), v1), Operand::zero());
+
+      finish_schedule_ilp_test();
+   }
+END_TEST
+
+BEGIN_TEST(ilp_sched.stores)
+   for (amd_gfx_level gfx : {GFX9, GFX12}) {
+      if (!setup_cs(NULL, gfx))
+         continue;
+
+      /* Move stores across independent ALU, preserving memory order and the data read. */
+      //>> global_store_dword %0:v[0-1], s1: undef, %0:v[2]
+      //! global_store_dword %0:v[0-1], s1: undef, %0:v[2] offset:4
+      //! v1: %0:v[4] = v_mov_b32 0
+      //! v1: %0:v[2] = v_mov_b32 0
+      bld.vop1(aco_opcode::v_mov_b32, Definition(PhysReg(260), v1), Operand::zero());
+      bld.global(aco_opcode::global_store_dword, Operand(PhysReg(256), v2), Operand(s1),
+                 Operand(PhysReg(258), v1));
+      bld.global(aco_opcode::global_store_dword, Operand(PhysReg(256), v2), Operand(s1),
+                 Operand(PhysReg(258), v1), 4);
+      bld.vop1(aco_opcode::v_mov_b32, Definition(PhysReg(258), v1), Operand::zero());
+
+      finish_schedule_ilp_test();
+   }
+END_TEST
+
+BEGIN_TEST(ilp_sched.ordered_boundary)
+   for (amd_gfx_level gfx : {GFX9, GFX12}) {
+      if (!setup_cs(NULL, gfx))
+         continue;
+
+      program->args_pending_vmem.emplace_back(PhysReg(256), v2);
+      /* Fill the volatile atomic's wait without crossing the call. */
+      //>> v1: %0:v[4] = v_add_f32 %0:v[12], %0:v[13]
+      //! ds_add_u32 %0:v[0], %0:v[1], %0:m0 storage:shared semantics:volatile,atomic,rmw
+      //! s2: %0:s[0-1] = s_swappc_b64 %0:s[2-3]
+      //! v1: %0:v[5] = v_mul_f32 %0:v[12], %0:v[13]
+      Instruction* instr = bld.ds(aco_opcode::ds_add_u32, Operand(PhysReg(256), v1),
+                                  Operand(PhysReg(257), v1), Operand(m0, s1));
+      instr->ds().sync = memory_sync_info(storage_shared, semantic_atomicrmw);
+      bld.vop2(aco_opcode::v_add_f32, Definition(PhysReg(260), v1), Operand(PhysReg(268), v1),
+               Operand(PhysReg(269), v1));
+      bld.sop1(aco_opcode::s_swappc_b64, Definition(PhysReg(0), s2), Operand(PhysReg(2), s2));
+      bld.vop2(aco_opcode::v_mul_f32, Definition(PhysReg(261), v1), Operand(PhysReg(268), v1),
+               Operand(PhysReg(269), v1));
+
+      finish_schedule_ilp_test();
+   }
+END_TEST

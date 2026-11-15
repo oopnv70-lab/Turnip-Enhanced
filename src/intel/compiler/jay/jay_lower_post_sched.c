@@ -12,7 +12,7 @@ set_cr0(jay_function *f, jay_cursor cursor, uint32_t *existing, uint32_t desired
    /* Only touch cr0 if we are changing bits */
    if ((*existing) != desired) {
       jay_builder b = jay_init_builder(f, cursor);
-      jay_def cr0 = jay_scalar(J_ARF, GEN_ARF_CONTROL);
+      jay_def cr0 = jay_scalar(J_ARF, 32, GEN_ARF_CONTROL);
 
       jay_XOR(&b, JAY_TYPE_U32, cr0, cr0, (*existing) ^ desired);
       *existing = desired;
@@ -53,12 +53,12 @@ insert_dummy_mov(jay_builder *b, jay_inst *u, jay_inst *v)
    bool issue_1 = ((is_mul(u) && is_mul(v)) || (is_maclh(u) && is_maclh(v))) &&
                   (u->src[1].file == UGPR && jay_num_values(u->src[1]) > 1) &&
                   (v->src[1].file == UGPR && jay_num_values(v->src[1]) == 1) &&
-                  u->src[1].reg == v->src[1].reg;
+                  (u->src[1].reg >> 1) == (v->src[1].reg >> 1);
 
    bool issue_2 = !(is_mul(u) || is_maclh(u)) &&
                   jay_num_isa_srcs(u) > 1 && is_maclh(v) &&
                   u->src[1].file == v->src[1].file &&
-                  u->src[1].reg == v->src[1].reg;
+                  (u->src[1].reg >> 1) == (v->src[1].reg >> 1);
 
    if (issue_1 || issue_2) {
       jay_MOV(b, jay_null(), 0);

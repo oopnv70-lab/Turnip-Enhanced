@@ -954,7 +954,7 @@ ac_nir_ngg_build_streamout_buffer_info(nir_builder *b,
 
       for (unsigned buffer = 0; buffer < 4; buffer++) {
          if (info->buffers_written & BITFIELD_BIT(buffer)) {
-            nir_def *buffer_size = nir_channel(b, so_buffer_ret[buffer], 2);
+            nir_def *buffer_size = ac_nir_get_buffer_num_records(b, 32, so_buffer_ret[buffer], gfx_level);
             /* In radeonsi, we may not know if a feedback buffer has been bound when
              * compile time, so have to check buffer size in runtime to disable the
              * GDS update for unbind buffer to prevent the case that previous draw
@@ -1077,9 +1077,9 @@ ac_nir_ngg_build_streamout_buffer_info(nir_builder *b,
                      /* Debug: Write the vec4 into a shader log ring buffer. */
 #if 0
                      nir_def *loaded_dwords_written = nir_unpack_64_2x32_split_y(b, oldest_result);
-                     ac_nir_store_debug_log_amd(b, nir_vec4(b, nir_u2u32(b, xfb_state_address),
-                                                            ordered_id, loaded_ordered_id,
-                                                            loaded_dwords_written));
+                     ac_nir_store_debug_log_amd(b, gfx_level, nir_vec4(b, nir_u2u32(b, xfb_state_address),
+                                                                       ordered_id, loaded_ordered_id,
+                                                                       loaded_dwords_written));
 #endif
 
                      nir_def *continue_if = nir_ieq(b, loaded_ordered_id, ordered_id);
@@ -1125,7 +1125,7 @@ ac_nir_ngg_build_streamout_buffer_info(nir_builder *b,
       nir_def *overflow_amount[4] = {undef, undef, undef, undef};
 
       u_foreach_bit(buffer, info->buffers_written) {
-         nir_def *buffer_size = nir_channel(b, so_buffer_ret[buffer], 2);
+         nir_def *buffer_size = ac_nir_get_buffer_num_records(b, 32, so_buffer_ret[buffer], gfx_level);
 
          /* Only consider overflow for valid feedback buffers because
           * otherwise the ordered operation above (GDS atomic return) might

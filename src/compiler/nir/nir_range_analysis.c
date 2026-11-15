@@ -1665,11 +1665,15 @@ get_intrinsic_uub(struct analysis_state *state, struct scalar_query q, uint32_t 
                    1u;
       }
       break;
+   case nir_intrinsic_load_local_invocation_id_intel:
    case nir_intrinsic_load_local_invocation_id:
-      if (shader->info.workgroup_size_variable)
+      if (shader->info.workgroup_size_variable) {
          *result = get_max_workgroup_invocations(shader) - 1u;
-      else
-         *result = shader->info.workgroup_size[q.scalar.comp] - 1u;
+      } else {
+         unsigned c = intrin->intrinsic == nir_intrinsic_load_local_invocation_id ?
+            q.scalar.comp : nir_intrinsic_component(intrin);
+         *result = shader->info.workgroup_size[c] - 1u;
+      }
       break;
    case nir_intrinsic_load_workgroup_id:
       *result = get_max_workgroup_count(shader, q.scalar.comp) - 1u;
@@ -1916,6 +1920,38 @@ unsigned_upper_bound_alu_supported(nir_scalar scalar)
    }
 }
 
+static uint32_t uub_iadd(uint32_t max, uint32_t x, uint32_t y)
+{
+   return MIN2((uint64_t)x + y, max);
+}
+
+static uint32_t uub_shl_const(unsigned bit_size, uint32_t max, uint32_t x, uint32_t C)
+{
+   C &= (bit_size - 1);
+   if (util_last_bit(x) + C > bit_size)
+      return (max << C) & max;
+   return x << C;
+}
+
+static uint32_t uub_imul_const(unsigned bit_size, uint32_t max, uint32_t x, uint32_t C)
+{
+   /* TODO: This is just a conservative approximation. For example:
+    * x=2 and C=129 would have a uub of 130 instead of 129.
+    */
+   uint32_t res = 0;
+
+   while (C) {
+      unsigned b = util_last_bit(C) - 1;
+      C &= ~(1u << b);
+
+      res = uub_iadd(max, res, uub_shl_const(bit_size, max, x, b));
+      /* Because we're scanning the bits in reverse, we know what the low bits are. */
+      res &= ~bitmask(b);
+   }
+
+   return res;
+}
+
 static void
 get_alu_uub(struct analysis_state *state, struct scalar_query q, uint32_t *result, const uint32_t *src)
 {
@@ -1971,31 +2007,31 @@ get_alu_uub(struct analysis_state *state, struct scalar_query q, uint32_t *resul
       break;
    }
    case nir_op_ishl: {
-      uint32_t src1 = MIN2(src[1], q.scalar.def->bit_size - 1u);
-      if (util_last_bit64(src[0]) + src1 <= q.scalar.def->bit_size) /* check overflow */
-         *result = src[0] << src1;
-      *result = MIN2(*result, max);
-
       nir_scalar src1_scalar = nir_scalar_chase_alu_src(q.scalar, 1);
       if (nir_scalar_is_const(src1_scalar)) {
-         uint32_t const_val = 1u << (nir_scalar_as_uint(src1_scalar) & (q.scalar.def->bit_size - 1u));
-         *result = MIN2(*result, max / const_val * const_val);
+         uint32_t const_val = nir_scalar_as_uint(src1_scalar);
+         *result = uub_shl_const(q.scalar.def->bit_size, max, src[0], const_val);
+      } else {
+         uint32_t src1 = MIN2(src[1], q.scalar.def->bit_size - 1u);
+         if (util_last_bit64(src[0]) + src1 <= q.scalar.def->bit_size) /* check overflow */
+            *result = src[0] << src1;
+         *result = MIN2(*result, max);
       }
       break;
    }
    case nir_op_imul: {
-      if (src[0] == 0 || (src[0] * src[1]) / src[0] == src[1]) /* check overflow */
-         *result = src[0] * src[1];
-      *result = MIN2(*result, max);
-
       nir_scalar src0_scalar = nir_scalar_chase_alu_src(q.scalar, 0);
       nir_scalar src1_scalar = nir_scalar_chase_alu_src(q.scalar, 1);
       if (nir_scalar_is_const(src0_scalar)) {
          uint32_t const_val = nir_scalar_as_uint(src0_scalar);
-         *result = const_val ? MIN2(*result, max / const_val * const_val) : 0;
+         *result = uub_imul_const(q.scalar.def->bit_size, max, src[1], const_val);
       } else if (nir_scalar_is_const(src1_scalar)) {
          uint32_t const_val = nir_scalar_as_uint(src1_scalar);
-         *result = const_val ? MIN2(*result, max / const_val * const_val) : 0;
+         *result = uub_imul_const(q.scalar.def->bit_size, max, src[0], const_val);
+      } else {
+         if (src[0] == 0 || (src[0] * src[1]) / src[0] == src[1]) /* check overflow */
+            *result = src[0] * src[1];
+         *result = MIN2(*result, max);
       }
       break;
    }
@@ -2018,9 +2054,7 @@ get_alu_uub(struct analysis_state *state, struct scalar_query q, uint32_t *resul
       break;
    }
    case nir_op_iadd:
-      if (src[0] + src[1] >= src[0]) /* check overflow */
-         *result = src[0] + src[1];
-      *result = MIN2(*result, max);
+      *result = uub_iadd(max, src[0], src[1]);
       break;
    case nir_op_umod:
       *result = src[1] ? src[1] - 1 : 0;

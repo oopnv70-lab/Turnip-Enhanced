@@ -349,7 +349,7 @@ struct si_texture {
    bool db_compatible : 1;
    bool can_sample_z : 1;
    bool can_sample_s : 1;
-   bool need_flush_after_depth_decompression: 1;
+   bool htile_pipe_misaligned : 1; /* see ac_surface_is_meta_pipe_misaligned */
    bool gfx12_force_disable_hiz : 1;
 
    /* We need to track DCC dirtiness, because st/dri usually calls
@@ -707,6 +707,7 @@ struct si_framebuffer {
    bool any_dst_linear;
    bool CB_has_shader_readable_metadata;
    bool DB_has_shader_readable_metadata;
+   bool DB_meta_pipe_misaligned;
    bool all_DCC_pipe_aligned;
    bool has_dcc_msaa;
    bool disable_vrs_flat_shading;
@@ -853,7 +854,8 @@ struct si_small_prim_cull_info {
 struct si_vertex_state {
    struct pipe_vertex_state b;
    struct si_vertex_elements velems;
-   uint32_t descriptors[4 * SI_MAX_ATTRIBS];
+   /* GFX13: 5 dwords per descriptor; GFX6-12: 4 dwords per descriptor. */
+   uint32_t descriptors[5 * SI_MAX_ATTRIBS];
 };
 
 typedef void (*pipe_draw_vertex_state_func)(struct pipe_context *ctx,
@@ -1360,7 +1362,7 @@ void si_barrier_after_simple_buffer_op(struct si_context *sctx, unsigned flags,
 void si_fb_barrier_before_rendering(struct si_context *sctx);
 void si_fb_barrier_after_rendering(struct si_context *sctx, unsigned flags);
 void si_barrier_before_image_fast_clear(struct si_context *sctx, unsigned types);
-void si_barrier_after_image_fast_clear(struct si_context *sctx);
+void si_barrier_after_image_fast_clear(struct si_context *sctx, unsigned types);
 void si_init_barrier_functions(struct si_context *sctx);
 
 /* si_buffer.c */
@@ -1573,10 +1575,7 @@ struct si_context *si_get_aux_context(struct si_screen *sscreen, struct si_aux_c
 void si_put_aux_context_flush(struct si_aux_context *ctx);
 
 /* si_perfcounters.c */
-void si_init_perfcounters(struct si_screen *screen);
 void si_destroy_perfcounters(struct si_screen *screen);
-void si_inhibit_clockgating(struct si_context *sctx, struct radeon_cmdbuf *cs, bool inhibit);
-void si_pc_emit_shaders(struct radeon_cmdbuf *cs, unsigned shaders);
 void si_emit_spm_setup(struct si_context *sctx, struct ac_spm *spm, struct radeon_cmdbuf *cs);
 bool si_spm_init(struct si_context *sctx, struct ac_spm *spm);
 void si_spm_finish(struct si_context *sctx, struct ac_spm *spm);
@@ -1834,13 +1833,16 @@ static inline void si_make_CB_shader_coherent(struct si_context *sctx, unsigned 
 }
 
 static inline void si_make_DB_shader_coherent(struct si_context *sctx, unsigned num_samples,
-                                              bool include_stencil, bool shaders_read_metadata)
+                                              bool include_stencil, bool shaders_read_metadata,
+                                              bool meta_pipe_misaligned)
 {
    sctx->barrier_flags |= AC_BARRIER_SYNC_AND_INV_DB | AC_BARRIER_INV_VMEM;
    sctx->force_shader_coherency.with_db = false;
 
    if (sctx->gfx_level >= GFX10 && sctx->gfx_level < GFX12) {
-      if (sctx->screen->info.tcc_rb_non_coherent)
+      /* DB and TC access pipe-misaligned metadata through different L2 channels. */
+      if (sctx->screen->info.tcc_rb_non_coherent ||
+          (shaders_read_metadata && meta_pipe_misaligned))
          sctx->barrier_flags |= AC_BARRIER_INV_L2;
       else if (shaders_read_metadata)
          sctx->barrier_flags |= AC_BARRIER_INV_L2_METADATA;
@@ -1979,13 +1981,30 @@ static inline unsigned si_get_num_coverage_samples(struct si_context *sctx)
    return 1;
 }
 
+static inline unsigned
+si_buffer_desc_size_in_dw(enum amd_gfx_level gfx_level)
+{
+   /* On GFX13, vertex and texel buffer descriptors require a separate format dword
+    * used by formatted buffer loads and stores.
+    */
+   return 4 + (gfx_level >= GFX13);
+}
+
 static unsigned ALWAYS_INLINE
 si_num_vbos_in_user_sgprs_inline(enum amd_gfx_level gfx_level)
 {
    /* This decreases CPU overhead if all descriptors are in user SGPRs because we don't
     * have to allocate and count references for the upload buffer.
+    *
+    * Note that GFX13 supports up to 4 vbo descriptors with 4 format dwords and GFX9-12
+    * support up to 5 in user SGPRS.
     */
-   return gfx_level >= GFX9 ? 5 : 1;
+   if (gfx_level >= GFX13)
+      return ARRAY_SIZE(((union si_vbo_args *)0)->gfx13.descriptors);
+   else if (gfx_level >= GFX9)
+      return ARRAY_SIZE(((union si_vbo_args *)0)->gfx9.descriptors);
+   else
+      return ARRAY_SIZE(((union si_vbo_args *)0)->gfx6.descriptors);
 }
 
 static inline

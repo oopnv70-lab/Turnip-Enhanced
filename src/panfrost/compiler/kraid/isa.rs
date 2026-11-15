@@ -3,7 +3,7 @@
 // SPDX-License-Identifier: MIT
 
 use crate::ir::{DataType, SmallConstant};
-use compiler::enum_as_u8::*;
+use mesa_util::enum_as_u8::*;
 
 #[derive(Debug)]
 pub enum EncodeError {
@@ -38,7 +38,6 @@ impl std::fmt::Display for EncodeError {
     }
 }
 
-#[allow(dead_code)]
 #[derive(Debug)]
 pub enum InvalidInstrError {
     Any,
@@ -135,7 +134,6 @@ pub enum ExecUnit {
     Sfu,
 }
 
-#[allow(dead_code)]
 pub trait FauSpecialPageResolver {
     type P0: TryDecode<u8> + std::fmt::Display;
     type P1: TryDecode<u8> + std::fmt::Display;
@@ -269,10 +267,55 @@ pub mod v9 {
     use kraid_proc_macros::*;
     gen_isa_encode!(9..=14);
 
-    #[cfg(kraid_disasm)]
     pub mod decode {
         use super::*;
         use crate::isa::*;
+        use rustc_hash::FxHashMap;
+
+        enum DecodeStage {
+            Inner {
+                mask: u64,
+                children: &'static [(u64, usize)],
+            },
+            // (mask, value, instr index)
+            Leaf(&'static [(u64, u64, usize)]),
+        }
+
+        fn try_decode_table(
+            instr: u64,
+            arch: u8,
+            table: &[DecodeStage],
+        ) -> Result<usize, InvalidInstrError> {
+            let mut stage_idx = 0;
+            'stages: loop {
+                match table[stage_idx] {
+                    DecodeStage::Inner { mask, children } => {
+                        let masked = instr & mask;
+                        for (val, next) in children {
+                            if masked == *val {
+                                assert!(stage_idx < *next);
+                                stage_idx = *next;
+                                continue 'stages;
+                            }
+                        }
+                        // Failed to decode
+                        return Err(InvalidInstrError::Any);
+                    }
+                    DecodeStage::Leaf(options) => {
+                        for (mask, value, instr_idx) in options {
+                            let masked = instr & mask;
+                            if masked == *value
+                                && try_instr(*instr_idx, instr, arch).is_ok()
+                            {
+                                return Ok(*instr_idx);
+                            }
+                        }
+                        // Failed to decode
+                        return Err(InvalidInstrError::Any);
+                    }
+                }
+            }
+        }
 
         enum SourceEncodingX<const IS64: bool> {
             Register {
@@ -418,6 +461,128 @@ pub mod v9 {
 
         type SourceEncoding = SourceEncodingX<false>;
         type SourceEncoding64 = SourceEncodingX<true>;
+
+        type DecodeResult<T> = Result<Option<Box<T>>, InvalidInstrError>;
+        type DecodeFn = fn(
+            u32,
+            &FxHashMap<&'static str, u32>,
+            u8,
+            &PrintCtx,
+        ) -> DecodeResult<dyn std::fmt::Display>;
+
+        enum LoadFn {
+            Physical(fn(u64) -> u32),
+            Virtual(
+                fn(
+                    &FxHashMap<&'static str, u32>,
+                    u8,
+                ) -> Result<u32, EncodeError>,
+            ),
+        }
+
+        struct Field {
+            name: &'static str,
+            is_mod: bool,
+            load: LoadFn,
+            decode: DecodeFn,
+        }
+
+        pub struct Instr {
+            name: &'static str,
+            variant: Option<&'static str>,
+            fields: &'static [u32],
+        }
+
+        impl Instr {
+            /// Iterate over fields in the order they appear in the asm syntax.
+            fn iter_fields(&self) -> impl Iterator<Item = &Field> {
+                self.fields.iter().map(|idx| &FIELDS[*idx as usize])
+            }
+        }
+
+        fn try_instr(
+            instr_idx: usize,
+            val: u64,
+            arch: u8,
+        ) -> Result<(), InvalidInstrError> {
+            print_instr_int(
+                &DISASM_TABLE[instr_idx],
+                val,
+                arch,
+                &mut std::io::sink(),
+                &Default::default(),
+            )
+            .map_err(|e| e.into_invalid_instr())
+        }
+
+        pub fn print_instr(
+            instr: &Instr,
+            val: u64,
+            arch: u8,
+            f: &mut dyn std::io::Write,
+            ctx: &PrintCtx,
+        ) -> std::io::Result<()> {
+            let res = print_instr_int(instr, val, arch, f, ctx);
+            match res {
+                Err(PrintError::InvalidInstr(e)) => write!(f, "{}", e),
+                Err(PrintError::Fmt(_)) => write!(f, "<format error>"),
+                Err(PrintError::Io(e)) => Err(e),
+                Ok(()) => Ok(()),
+            }
+        }
+
+        fn print_instr_int(
+            instr: &Instr,
+            val: u64,
+            arch: u8,
+            f: &mut dyn std::io::Write,
+            ctx: &PrintCtx,
+        ) -> Result<(), PrintError> {
+            let mut values: FxHashMap<&'static str, u32> = Default::default();
+
+            for field in instr.iter_fields() {
+                let LoadFn::Physical(load) = &field.load else {
+                    continue;
+                };
+                values.insert(field.name, load(val));
+            }
+
+            for field in instr.iter_fields() {
+                let LoadFn::Virtual(load) = &field.load else {
+                    continue;
+                };
+                values.insert(field.name, load(&values, arch)?);
+            }
+
+            write!(f, "{}", instr.name)?;
+            if let Some(variant) = instr.variant {
+                write!(f, ".{}", variant)?;
+            }
+
+            let mut had_non_mod = false;
+
+            for field in instr.iter_fields() {
+                if let Some(val) = (field.decode)(
+                    *values.get(field.name).unwrap(),
+                    &values,
+                    arch,
+                    ctx,
+                )? {
+                    if field.is_mod {
+                        write!(f, ".")?;
+                    } else if had_non_mod {
+                        write!(f, ", ")?;
+                    } else {
+                        write!(f, " ")?;
+                    }
+                    write!(f, "{val}")?;
+
+                    had_non_mod |= !field.is_mod;
+                }
+            }
+
+            Ok(())
+        }
 
         gen_isa_decode!(9..=14);
     }

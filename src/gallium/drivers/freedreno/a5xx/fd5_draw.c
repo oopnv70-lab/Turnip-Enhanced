@@ -44,7 +44,23 @@ draw_impl(struct fd_context *ctx, struct fd_ringbuffer *ring,
                      info->restart_index
                                           : 0xffffffff);
 
-   fd5_emit_render_cntl(ctx, false, emit->binning_pass);
+   /* in sysmem the fetch reads memory behind the colour cache */
+   if (fd5_emit_get_fp(emit)->fb_read && !emit->binning_pass) {
+      struct fd5_context *fd5_ctx = fd5_context(ctx);
+
+      OUT_PKT7(ring, CP_COND_EXEC, 6);
+      OUT_RELOC(ring, fd5_ctx->fb_read_params,
+                offsetof(struct fd5_fb_read_params, sysmem), 0, 0);
+      OUT_RELOC(ring, fd5_ctx->fb_read_params,
+                offsetof(struct fd5_fb_read_params, timestamp), 0, 0);
+      OUT_RING(ring, 1);
+      OUT_RING(ring, 6);
+      fd5_event_write(ctx->batch, ring, PC_CCU_FLUSH_COLOR_TS, true);
+      OUT_PKT7(ring, CP_WAIT_FOR_IDLE, 0);
+   }
+
+   fd5_emit_render_cntl(ctx, false, emit->binning_pass,
+                        fd5_emit_get_fp(emit)->fb_read);
    fd5_draw_emit(ctx->batch, ring, primtype,
                  emit->binning_pass ? IGNORE_VISIBILITY : USE_VISIBILITY, info,
                  emit->indirect, emit->draw, index_offset);
@@ -159,7 +175,7 @@ fd5_clear_lrz(struct fd_batch *batch, struct fd_resource *zsbuf, double depth)
    OUT_WFI5(ring);
 
    OUT_PKT4(ring, REG_A5XX_RB_CCU_CNTL, 1);
-   OUT_RING(ring, 0x10000000);
+   OUT_RING(ring, fd5_ccu_cntl_bypass(batch->ctx->screen));
 
    OUT_PKT4(ring, REG_A5XX_HLSQ_UPDATE_CNTL, 1);
    OUT_RING(ring, 0x20fffff);
@@ -230,7 +246,7 @@ fd5_clear(struct fd_context *ctx, enum fd_buffer_mask buffers,
        is_z32(pfb->zsbuf.format))
       return false;
 
-   fd5_emit_render_cntl(ctx, true, false);
+   fd5_emit_render_cntl(ctx, true, false, false);
 
    if (buffers & FD_BUFFER_COLOR) {
       for (int i = 0; i < pfb->nr_cbufs; i++) {

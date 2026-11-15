@@ -32,7 +32,6 @@ dEQP-GLES2.functional.uniform_api.info_query.nested_structs_arrays.mat4_mat2_fra
 dEQP-GLES2.functional.uniform_api.info_query.struct_in_array.mat4_mat2_both,Fail
 dEQP-GLES2.functional.uniform_api.info_query.struct_in_array.mat4_mat2_fragment,Fail
 dEQP-GLES2.functional.uniform_api.random.13,Fail
-dEQP-GLES2.functional.uniform_api.random.20,Fail
 dEQP-GLES2.functional.uniform_api.random.23,Fail
 dEQP-GLES2.functional.uniform_api.random.81,Fail
 dEQP-GLES2.functional.uniform_api.value.assigned.basic_array_assign_full.array_in_struct.mat4_mat2_both,Fail
@@ -295,10 +294,6 @@ spec@ext_texture_srgb@texwrap formats@GL_SRGB8_ALPHA8,Fail
 spec@ext_texture_srgb@texwrap formats@GL_SRGB8_ALPHA8- NPOT,Fail
 spec@ext_texture_srgb@texwrap formats@GL_SRGB8_ALPHA8- swizzled,Fail
 
-spec@glsl-1.10@execution@built-in-functions@fs-atan-float-float,Fail
-spec@glsl-1.10@execution@built-in-functions@fs-atan-vec2-vec2,Fail
-spec@glsl-1.10@execution@built-in-functions@fs-atan-vec3-vec3,Fail
-spec@glsl-1.10@execution@built-in-functions@fs-atan-vec4-vec4,Fail
 spec@glsl-1.10@execution@built-in-functions@fs-degrees-float,Fail
 spec@glsl-1.10@execution@built-in-functions@fs-degrees-vec2,Fail
 spec@glsl-1.10@execution@built-in-functions@fs-degrees-vec3,Fail
@@ -646,7 +641,6 @@ spec@khr_texture_compression_astc@basic-gles,Fail
 spec@khr_texture_compression_astc@miptree-gl srgb-fp@sRGB decode full precision,Fail
 
 shaders@glsl-derivs,Fail
-shaders@glsl-fs-fogscale@vs and fs,Fail
 shaders@glsl-fs-loop,Fail
 shaders@glsl-fs-loop-nested,Fail
 shaders@glsl-fs-raytrace-bug27060,Fail

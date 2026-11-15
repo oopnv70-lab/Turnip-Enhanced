@@ -184,13 +184,13 @@ def emit_unmarshal(typeInfo, param, cgen, output = False, destroy = False, noUnb
         lenAccessGuard = cgen.generalLengthAccessGuard(param)
         if None == lenAccess or "1" == lenAccess:
             cgen.stmt("boxed_%s_preserve = %s" % (param.paramName, param.paramName))
-            cgen.stmt("%s = try_unbox_%s(%s)" % (param.paramName, param.typeName, param.paramName))
+            cgen.stmt("%s = try_unbox_%s(Boxed<%s>(%s))" % (param.paramName, param.typeName, param.typeName, param.paramName))
         else:
             if lenAccessGuard is not None:
                 cgen.beginIf(lenAccessGuard)
             cgen.beginFor("uint32_t i = 0", "i < %s" % lenAccess, "++i")
             cgen.stmt("boxed_%s_preserve[i] = %s[i]" % (param.paramName, param.paramName))
-            cgen.stmt("((%s*)(%s))[i] = try_unbox_%s(%s[i])" % (param.typeName, param.paramName, param.typeName, param.paramName))
+            cgen.stmt("((%s*)(%s))[i] = try_unbox_%s(Boxed<%s>(%s[i]))" % (param.typeName, param.paramName, param.typeName, param.typeName, param.paramName))
             cgen.endFor()
             if lenAccessGuard is not None:
                 cgen.endIf()
@@ -228,15 +228,15 @@ def emit_dispatch_unmarshal(typeInfo: VulkanTypeInfo, param: VulkanType, cgen, g
         dynAlloc=True))
 
     if not globalWrapped:
-        cgen.stmt("auto unboxed_%s = unbox_%s(%s)" %
-                  (param.paramName, param.typeName, param.paramName))
-        cgen.stmt("auto vk = dispatch_%s(%s)" %
-                  (param.typeName, param.paramName))
+        cgen.stmt("auto unboxed_%s = unbox_%s(Boxed<%s>(%s))" %
+                  (param.paramName, param.typeName, param.typeName, param.paramName))
+        cgen.stmt("auto vk = dispatch_%s(Boxed<%s>(%s))" %
+                  (param.typeName, param.typeName, param.paramName))
         cgen.stmt("// End manual dispatchable handle unboxing for %s" % param.paramName)
     else:
         # Still need to check dispatcher validity to handle threads with fatal errors
-        cgen.stmt("auto vk = dispatch_%s(%s)" %
-                  (param.typeName, param.paramName))
+        cgen.stmt("auto vk = dispatch_%s(Boxed<%s>(%s))" %
+                  (param.typeName, param.typeName, param.paramName))
 
 
 def emit_transform(typeInfo, param, cgen, variant="tohost"):
@@ -486,19 +486,19 @@ def emit_destroyed_handle_cleanup(api, cgen):
             if destroy:
                 if None == lenAccess or "1" == lenAccess:
                     if api.name in DELAYED_DECODER_DELETES:
-                        cgen.stmt("delayed_delete_%s(boxed_%s_preserve, unboxed_device, delayed_remove_callback)" % (p.typeName, p.paramName))
+                        cgen.stmt("delayed_delete_%s(Boxed<%s>(boxed_%s_preserve), unboxed_device, delayed_remove_callback)" % (p.typeName, p.typeName, p.paramName))
                     elif api.name in DELAYED_DECODER_DELETE_DICT_ENTRIES:
-                        cgen.stmt("delayed_delete_%s(boxed_%s_preserve, unboxed_device, nullptr)" % (p.typeName, p.paramName))
+                        cgen.stmt("delayed_delete_%s(Boxed<%s>(boxed_%s_preserve), unboxed_device, nullptr)" % (p.typeName, p.typeName, p.paramName))
                     else:
-                        cgen.stmt("delete_%s(boxed_%s_preserve)" % (p.typeName, p.paramName))
+                        cgen.stmt("delete_%s(Boxed<%s>(boxed_%s_preserve))" % (p.typeName, p.typeName, p.paramName))
                 else:
                     if lenAccessGuard is not None:
                         cgen.beginIf(lenAccessGuard)
                     cgen.beginFor("uint32_t i = 0", "i < %s" % lenAccess, "++i")
                     if api.name in DELAYED_DECODER_DELETES:
-                        cgen.stmt("delayed_delete_%s(boxed_%s_preserve[i], unboxed_device, delayed_remove_callback)" % (p.typeName, p.paramName))
+                        cgen.stmt("delayed_delete_%s(Boxed<%s>(boxed_%s_preserve[i]), unboxed_device, delayed_remove_callback)" % (p.typeName, p.typeName, p.paramName))
                     else:
-                        cgen.stmt("delete_%s(boxed_%s_preserve[i])" % (p.typeName, p.paramName))
+                        cgen.stmt("delete_%s(Boxed<%s>(boxed_%s_preserve[i]))" % (p.typeName, p.typeName, p.paramName))
                     cgen.endFor()
                     if lenAccessGuard is not None:
                         cgen.endIf()
@@ -506,8 +506,8 @@ def emit_destroyed_handle_cleanup(api, cgen):
 def emit_pool_free(cgen):
     cgen.stmt("%s->clearPool()" % READ_STREAM)
 
-def emit_seqno_incr(api, cgen):
-    cgen.stmt("if (m_queueSubmitWithCommandsEnabled) seqnoPtr->fetch_add(1, std::memory_order_seq_cst)")
+def emit_seqno_incr(api, cgen, condition="m_queueSubmitWithCommandsEnabled"):
+    cgen.stmt("if (%s) seqnoPtr->fetch_add(1, std::memory_order_seq_cst)" % condition)
 
 def emit_snapshot(typeInfo, api, cgen):
     additionalParams = [ \
@@ -547,7 +547,7 @@ def emit_decoding(typeInfo, api, cgen, globalWrapped=False, context=False):
     emit_decode_parameters(typeInfo, api, cgen, globalWrapped)
 
     if isAcquire:
-        emit_seqno_incr(api, cgen)
+        emit_seqno_incr(api, cgen, "m_queueSubmitWithCommandsEnabled && !m_snapshotsEnabled")
 
     if globalWrapped:
         emit_global_state_wrapped_call(api, cgen, context)
@@ -561,7 +561,9 @@ def emit_decoding(typeInfo, api, cgen, globalWrapped=False, context=False):
     emit_destroyed_handle_cleanup(api, cgen)
     emit_pool_free(cgen)
 
-    if not isAcquire:
+    if isAcquire:
+        emit_seqno_incr(api, cgen, "m_queueSubmitWithCommandsEnabled && m_snapshotsEnabled")
+    else:
         emit_seqno_incr(api, cgen)
 
 def emit_default_decoding(typeInfo, api, cgen):
@@ -748,6 +750,9 @@ custom_decodes = {
     "vkGetImageMemoryRequirements2" : emit_global_state_wrapped_decoding,
     "vkGetImageMemoryRequirements2KHR" : emit_global_state_wrapped_decoding,
     "vkGetImageSubresourceLayout" : emit_global_state_wrapped_decoding,
+    "vkGetImageSubresourceLayout2" : emit_global_state_wrapped_decoding,
+    "vkGetImageSubresourceLayout2KHR" : emit_global_state_wrapped_decoding,
+    "vkGetImageSubresourceLayout2EXT" : emit_global_state_wrapped_decoding,
     "vkGetBufferMemoryRequirements" : emit_global_state_wrapped_decoding,
     "vkGetBufferMemoryRequirements2": emit_global_state_wrapped_decoding,
     "vkGetBufferMemoryRequirements2KHR": emit_global_state_wrapped_decoding,
@@ -778,8 +783,8 @@ custom_decodes = {
     "vkMapMemory2" : emit_global_state_wrapped_decoding,
     "vkMapMemory2KHR" : emit_global_state_wrapped_decoding,
     "vkUnmapMemory" : emit_global_state_wrapped_decoding,
-    "vkMapMemory2" : emit_global_state_wrapped_decoding,
-    "vkMapMemory2KHR" : emit_global_state_wrapped_decoding,
+    "vkUnmapMemory2" : emit_global_state_wrapped_decoding,
+    "vkUnmapMemory2KHR" : emit_global_state_wrapped_decoding,
     "vkFlushMappedMemoryRanges" : decode_vkFlushMappedMemoryRanges,
     "vkInvalidateMappedMemoryRanges" : decode_vkInvalidateMappedMemoryRanges,
 
@@ -815,10 +820,11 @@ custom_decodes = {
     "vkDestroyEvent" : emit_global_state_wrapped_decoding,
     "vkSetEvent" : emit_global_state_wrapped_decoding,
     "vkResetEvent" : emit_global_state_wrapped_decoding,
-    "vkDestroyFramebuffer" : emit_global_state_wrapped_decoding,
     "vkCmdBeginRenderPass" : emit_global_state_wrapped_decoding,
     "vkCmdBeginRenderPass2" : emit_global_state_wrapped_decoding,
     "vkCmdBeginRenderPass2KHR" : emit_global_state_wrapped_decoding,
+    "vkCmdBeginRendering" : emit_global_state_wrapped_decoding,
+    "vkCmdBeginRenderingKHR" : emit_global_state_wrapped_decoding,
 
     "vkCreateSamplerYcbcrConversion": emit_global_state_wrapped_decoding,
     "vkDestroySamplerYcbcrConversion": emit_global_state_wrapped_decoding,
@@ -881,8 +887,6 @@ custom_decodes = {
     "vkCollectDescriptorPoolIdsGOOGLE" : emit_global_state_wrapped_decoding,
     "vkQueueSignalReleaseImageANDROIDAsyncGOOGLE" : emit_global_state_wrapped_decoding,
 
-    "vkQueueBindSparse" : emit_global_state_wrapped_decoding,
-
     # VK_KHR_xcb_surface
     "vkCreateXcbSurfaceKHR": decode_unsupported_api,
     "vkGetPhysicalDeviceXcbPresentationSupportKHR": decode_unsupported_api,
@@ -929,6 +933,16 @@ custom_decodes = {
     # VK_EXT_debug_utils
     "vkSetDebugUtilsObjectNameEXT" : emit_global_state_wrapped_decoding,
     "vkSetDebugUtilsObjectTagEXT" : emit_global_state_wrapped_decoding,
+
+    # VK_EXT_host_image_copy / VK_VERSION_1_4
+    "vkCopyMemoryToImage" : emit_global_state_wrapped_decoding,
+    "vkCopyMemoryToImageEXT" : emit_global_state_wrapped_decoding,
+    "vkCopyImageToMemory" : emit_global_state_wrapped_decoding,
+    "vkCopyImageToMemoryEXT" : emit_global_state_wrapped_decoding,
+    "vkCopyImageToImage" : emit_global_state_wrapped_decoding,
+    "vkCopyImageToImageEXT" : emit_global_state_wrapped_decoding,
+    "vkTransitionImageLayout" : emit_global_state_wrapped_decoding,
+    "vkTransitionImageLayoutEXT" : emit_global_state_wrapped_decoding,
 }
 
 class VulkanDecoder(VulkanWrapperGenerator):
@@ -1004,6 +1018,7 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
             }
             if (seqnoPtr && !m_forSnapshotLoad) {
                 {
+                    uint32_t spinCount = 0;
                     while ((seqno - seqnoPtr->load(std::memory_order_seq_cst) != 1)) {
                         if (shouldExit.load(std::memory_order_relaxed) ||
                             (processResources && processResources->isGuestProcessDead())) {
@@ -1015,7 +1030,12 @@ size_t VkDecoder::Impl::decode(void* buf, size_t len, IOStream* ioStream,
                         _mm_pause();
                         #elif (defined(__GNUC__) && (defined(__i386__) || defined(__x86_64__)))
                         __asm__ __volatile__("pause;");
+                        #elif (defined(__GNUC__) && defined(__aarch64__))
+                        __asm__ __volatile__("yield" ::: "memory");
                         #endif
+                        if (++spinCount > 1000) {
+                            std::this_thread::yield();
+                        }
                     }
                     m_prevSeqno = seqno;
                 }

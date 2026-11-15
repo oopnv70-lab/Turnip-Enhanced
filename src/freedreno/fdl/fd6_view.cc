@@ -684,19 +684,19 @@ fdl6_buffer_view_init(uint32_t *descriptor, enum pipe_format format,
          }
 
          uint64_t encoded_size = (uint64_t) size << 6ull;
-         descriptor[7] = A6XX_TEX_MEMOBJ_7_FLAG_LO(encoded_size & 0x7FFFFFF);
-         descriptor[8] = A6XX_TEX_MEMOBJ_8_FLAG_HI(encoded_size >> 26);
-         descriptor[11] = iova;
-         descriptor[12] = iova >> 32;
+         descriptor[FDL6_EMULATED_BUFFER_SIZE_DWORD] =
+            A6XX_TEX_MEMOBJ_7_FLAG_LO(encoded_size & 0x7FFFFFF);
+         descriptor[FDL6_EMULATED_BUFFER_SIZE_DWORD + 1] =
+            A6XX_TEX_MEMOBJ_8_FLAG_HI(encoded_size >> 26);
+         descriptor[FDL6_EMULATED_SSBO_ADDR_DWORD] = iova;
+         descriptor[FDL6_EMULATED_SSBO_ADDR_DWORD + 1] = iova >> 32;
       }
    } else if (CHIP >= A8XX) {
       descriptor[0] = A8XX_TEX_MEMOBJ_0_INSTANCE_DESC_BASE_LO(iova);
       descriptor[1] = A8XX_TEX_MEMOBJ_1_BASE_HI(iova >> 32) |
                       A8XX_TEX_MEMOBJ_1_TYPE(A6XX_TEX_BUFFER) |
                       A8XX_TEX_MEMOBJ_1_STRUCTSIZETEXELS(struct_size_texels);
-      descriptor[2] = A8XX_TEX_MEMOBJ_2_WIDTH(elements & ((1 << 15) - 1)) |
-                      A8XX_TEX_MEMOBJ_2_HEIGHT(elements >> 15) |
-                      A8XX_TEX_MEMOBJ_2_SAMPLES(MSAA_ONE);
+      descriptor[2] = A8XX_TEX_MEMOBJ_2_NUM_ELEMENTS(elements);
       descriptor[3] = A8XX_TEX_MEMOBJ_3_FMT(fd6_texture_format(buffer_format, TILE6_LINEAR, false)) |
                       A8XX_TEX_MEMOBJ_3_SWAP(fd6_texture_swap(buffer_format, TILE6_LINEAR, false)) |
                       fdl6_texswiz<CHIP>(&args, false);

@@ -1209,8 +1209,9 @@ validate_tex_instr(nir_tex_instr *instr, validate_state *state)
       validate_assert(state, instr->op == nir_texop_tg4);
 
    validate_def(&instr->def, state);
-   validate_assert(state, instr->def.num_components ==
-                             nir_tex_instr_dest_size(instr));
+   unsigned dest_size = nir_tex_instr_dest_size(instr);
+   /* A zero size means variable number of components */
+   validate_assert(state, instr->def.num_components == dest_size || dest_size == 0);
 
    unsigned bit_size = nir_alu_type_get_type_size(instr->dest_type);
    validate_assert(state,
@@ -2485,15 +2486,16 @@ nir_validate_shader(nir_shader *shader, const char *when)
       nir_var_mem_global |
       nir_var_mem_push_const |
       nir_var_mem_constant |
-      nir_var_mem_pixel_local_in |
-      nir_var_mem_pixel_local_out |
-      nir_var_mem_pixel_local_inout |
+      nir_var_mem_pixel_local |
       nir_var_image |
       nir_var_resource_heap |
       nir_var_sampler_heap;
 
    if (mesa_shader_stage_is_callable(shader->info.stage))
-      valid_modes |= nir_var_shader_call_data;
+      valid_modes |= nir_var_shader_call_data_in | nir_var_shader_call_data_out;
+
+   if (shader->info.stage == MESA_SHADER_RAYGEN)
+      valid_modes |= nir_var_shader_call_data_out;
 
    if (shader->info.stage == MESA_SHADER_ANY_HIT ||
        shader->info.stage == MESA_SHADER_CLOSEST_HIT ||

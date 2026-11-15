@@ -2,9 +2,10 @@
 // SPDX-License-Identifier: MIT
 
 use crate::data_type::DataType;
-use compiler::enum_as_u8::*;
 use compiler::float16::F16;
-use kraid_proc_macros::{AsmSwizzleWiden, EnumAsU8};
+use kraid_proc_macros::AsmSwizzleWiden;
+use mesa_util::enum_as_u8::*;
+use mesa_util_proc::EnumAsU8;
 use std::fmt;
 use std::num::NonZeroU16;
 
@@ -774,6 +775,17 @@ impl Swizzle {
             }
         }
         bytes
+    }
+
+    pub fn bits_read(&self, src_bytes: u8) -> u64 {
+        let bytes_read = self.bytes_read(src_bytes);
+        let mut acc = 0;
+        for idx in 0..8 {
+            if (1 << idx) & bytes_read > 0 {
+                acc |= 0xff << (idx * 8);
+            }
+        }
+        acc
     }
 
     /// Returns true if this swizzle replicates the same byte 4 times.

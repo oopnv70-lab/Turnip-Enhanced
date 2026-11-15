@@ -431,7 +431,7 @@ anv_h264_brc_fill_init_dmem(struct anv_cmd_buffer *cmd,
    uint32_t gop = rc->gop_frame_count ? rc->gop_frame_count : 30;
    uint32_t gop_ref_dist = MAX2(rc->consecutive_b_frames + 1, 1);
 
-   dmem->BRCFunc_U8 = 0;
+   dmem->BRCFunc_U8 = rc->frame_counter ? 2 : 0;
    dmem->INIT_BRCFlag_U16 =
       is_cbr ? ANV_HUC_AVC_BRC_FLAG_CBR : ANV_HUC_AVC_BRC_FLAG_VBR;
    dmem->INIT_FrameWidth_U16 = width;
@@ -534,7 +534,7 @@ anv_h264_brc_fill_update_dmem(struct anv_cmd_buffer *cmd,
    dmem->BRCFunc_U8 = 1;
    uint64_t target_acc =
       (uint64_t)MIN2(rc->vbv_initial_fullness_bits, rc->vbv_size_bits) +
-      (uint64_t)rc->frame_counter * input_bits_per_frame;
+      (uint64_t)(rc->frame_counter - rc->brc_init_frame) * input_bits_per_frame;
    dmem->UPD_TARGETSIZE_U32 = rc->vbv_size_bits ?
       (uint32_t)(target_acc % rc->vbv_size_bits) : (uint32_t)target_acc;
 
@@ -603,15 +603,6 @@ anv_h264_emit_vdenc_avc_img_state(struct anv_cmd_buffer *cmd,
                                   const VkVideoEncodeInfoKHR *enc_info,
                                   const uint8_t *dpb_idx);
 #endif
-
-static struct anv_address
-anv_brc_mem_addr(struct anv_video_session *vid, uint32_t mem_idx)
-{
-   return (struct anv_address) {
-      vid->vid_mem[mem_idx].mem->bo,
-      vid->vid_mem[mem_idx].offset,
-   };
-}
 
 /* Build the SLBB input read buffer the HuC BRC Update kernel parses and
  * patches: the H.264 image-state group (MFX_AVC_IMG_STATE + VDENC image state
@@ -701,7 +692,7 @@ anv_h264_brc_emit_huc_flush_and_status(struct anv_cmd_buffer *cmd)
 {
    struct anv_video_session *vid = cmd->video.vid;
    struct anv_address pak_mmio_addr =
-      anv_brc_mem_addr(vid, ANV_VID_MEM_BRC_PAK_MMIO_SEM);
+      ANV_VID_MEM_ADDR(vid, ANV_VID_MEM_BRC_PAK_MMIO_SEM);
 
    anv_batch_emit(&cmd->batch, GENX(VD_PIPELINE_FLUSH), flush) {
       flush.HEVCPipelineDone = true;
@@ -723,7 +714,7 @@ anv_h264_brc_emit_huc_flush_and_status(struct anv_cmd_buffer *cmd)
    }
 
    struct anv_address huc_err_addr =
-      anv_brc_mem_addr(vid, ANV_VID_MEM_BRC_HUC_ERR_SEM);
+      ANV_VID_MEM_ADDR(vid, ANV_VID_MEM_BRC_HUC_ERR_SEM);
 
    anv_batch_emit(&cmd->batch, GENX(MI_STORE_DATA_IMM), sdi) {
       sdi.Address = anv_address_add(huc_err_addr, 4);
@@ -788,6 +779,8 @@ anv_h264_brc_emit_huc_init(struct anv_cmd_buffer *cmd,
 
    memset(dmem_state.map, 0, dmem_size);
    anv_h264_brc_fill_init_dmem(cmd, sps, dmem_state.map);
+   vid->rc.brc_init_frame = vid->rc.frame_counter;
+   vid->rc.brc_reset = false;
 
    anv_h264_brc_emit_huc_common(cmd, ANV_HUC_AVC_BRC_INIT_KERNEL_DESCRIPTOR,
                                 anv_cmd_buffer_temporary_state_address(cmd, dmem_state),
@@ -795,7 +788,7 @@ anv_h264_brc_emit_huc_init(struct anv_cmd_buffer *cmd,
 
    anv_batch_emit(&cmd->batch, GENX(HUC_VIRTUAL_ADDR_STATE), va) {
       va.HUCVirtualAddressRegion[0] = (struct GENX(HUC_VIRTUAL_ADDR_REGION)) {
-         .Address = anv_brc_mem_addr(vid, ANV_VID_MEM_BRC_HISTORY),
+         .Address = ANV_VID_MEM_ADDR(vid, ANV_VID_MEM_BRC_HISTORY),
          .AddressAttributes = {
             .MOCS = anv_mocs(device, NULL, 0),
          },
@@ -848,7 +841,7 @@ anv_h264_brc_emit_huc_update(struct anv_cmd_buffer *cmd,
    struct anv_address dmem_addr =
       anv_cmd_buffer_temporary_state_address(cmd, dmem_state);
    struct anv_address pak_info =
-      anv_brc_mem_addr(vid, ANV_VID_MEM_BRC_PAK_INFO);
+      ANV_VID_MEM_ADDR(vid, ANV_VID_MEM_BRC_PAK_INFO);
    mi_memcpy(&b, anv_address_add(dmem_addr, ANV_H264_BRC_DMEM_FRAME_BYTE_COUNT_OFFSET),
              pak_info, 4);
    mi_memcpy(&b, anv_address_add(dmem_addr, ANV_H264_BRC_DMEM_IMAGE_STATUS_CTRL_OFFSET),
@@ -870,13 +863,13 @@ anv_h264_brc_emit_huc_update(struct anv_cmd_buffer *cmd,
    anv_batch_emit(&cmd->batch, GENX(HUC_VIRTUAL_ADDR_STATE), va) {
       struct anv_address regions[16] = { 0 };
 
-      regions[0] = anv_brc_mem_addr(vid, ANV_VID_MEM_BRC_HISTORY);
-      regions[1] = anv_brc_mem_addr(vid, ANV_VID_MEM_BRC_VDENC_STATS);
-      regions[2] = anv_brc_mem_addr(vid, ANV_VID_MEM_BRC_PAK_STATS);
+      regions[0] = ANV_VID_MEM_ADDR(vid, ANV_VID_MEM_BRC_HISTORY);
+      regions[1] = ANV_VID_MEM_ADDR(vid, ANV_VID_MEM_BRC_VDENC_STATS);
+      regions[2] = ANV_VID_MEM_ADDR(vid, ANV_VID_MEM_BRC_PAK_STATS);
       regions[3] = anv_cmd_buffer_temporary_state_address(cmd, input_slb_state);
       regions[5] = anv_cmd_buffer_temporary_state_address(cmd, cd_state);
-      regions[6] = anv_brc_mem_addr(vid, ANV_VID_MEM_BRC_EXEC_SLB);
-      regions[15] = anv_brc_mem_addr(vid, ANV_VID_MEM_BRC_DEBUG);
+      regions[6] = ANV_VID_MEM_ADDR(vid, ANV_VID_MEM_BRC_EXEC_SLB);
+      regions[15] = ANV_VID_MEM_ADDR(vid, ANV_VID_MEM_BRC_DEBUG);
 
       for (uint32_t i = 0; i < 16; i++) {
          va.HUCVirtualAddressRegion[i] = (struct GENX(HUC_VIRTUAL_ADDR_REGION)) {
@@ -1616,7 +1609,7 @@ anv_h265_brc_emit_huc_flush_and_status(struct anv_cmd_buffer *cmd)
 {
    struct anv_video_session *vid = cmd->video.vid;
    struct anv_address pak_mmio_addr =
-      anv_brc_mem_addr(vid, ANV_VID_MEM_BRC_PAK_MMIO_SEM);
+      ANV_VID_MEM_ADDR(vid, ANV_VID_MEM_BRC_PAK_MMIO_SEM);
 
    anv_batch_emit(&cmd->batch, GENX(VD_PIPELINE_FLUSH), flush) {
       flush.HEVCPipelineDone = true;
@@ -1639,7 +1632,7 @@ anv_h265_brc_emit_huc_flush_and_status(struct anv_cmd_buffer *cmd)
 
 #if GFX_VERx10 < 125
    struct anv_address huc_err_addr =
-      anv_brc_mem_addr(vid, ANV_VID_MEM_BRC_HUC_ERR_SEM);
+      ANV_VID_MEM_ADDR(vid, ANV_VID_MEM_BRC_HUC_ERR_SEM);
 
    anv_batch_emit(&cmd->batch, GENX(MI_STORE_DATA_IMM), sdi) {
       sdi.Address = anv_address_add(huc_err_addr, 4);
@@ -1731,6 +1724,7 @@ anv_h265_brc_emit_huc_init(struct anv_cmd_buffer *cmd,
 
    memset(dmem_state.map, 0, dmem_size);
    anv_h265_brc_fill_init_dmem(cmd, sps, is_low_delay, dmem_state.map);
+   vid->rc.brc_reset = false;
 
    anv_h265_brc_emit_huc_common(cmd, ANV_HUC_HEVC_BRC_INIT_KERNEL_DESCRIPTOR,
                                 anv_cmd_buffer_temporary_state_address(cmd, dmem_state),
@@ -1738,7 +1732,7 @@ anv_h265_brc_emit_huc_init(struct anv_cmd_buffer *cmd,
 
    anv_batch_emit(&cmd->batch, GENX(HUC_VIRTUAL_ADDR_STATE), va) {
       va.HUCVirtualAddressRegion[0] = (struct GENX(HUC_VIRTUAL_ADDR_REGION)) {
-         .Address = anv_brc_mem_addr(vid, ANV_VID_MEM_BRC_HISTORY),
+         .Address = ANV_VID_MEM_ADDR(vid, ANV_VID_MEM_BRC_HISTORY),
          .AddressAttributes = {
             .MOCS = anv_mocs(device, NULL, 0),
          },
@@ -1771,16 +1765,16 @@ anv_h265_brc_emit_huc_update(struct anv_cmd_buffer *cmd,
    anv_batch_emit(&cmd->batch, GENX(HUC_VIRTUAL_ADDR_STATE), va) {
       struct anv_address regions[16] = { 0 };
 
-      regions[0] = anv_brc_mem_addr(vid, ANV_VID_MEM_BRC_HISTORY);
-      regions[1] = anv_brc_mem_addr(vid, ANV_VID_MEM_H265_VDENC_STATS_STREAMOUT);
-      regions[2] = anv_brc_mem_addr(vid, ANV_VID_MEM_H265_FRAME_STATS_STREAMOUT);
+      regions[0] = ANV_VID_MEM_ADDR(vid, ANV_VID_MEM_BRC_HISTORY);
+      regions[1] = ANV_VID_MEM_ADDR(vid, ANV_VID_MEM_H265_VDENC_STATS_STREAMOUT);
+      regions[2] = ANV_VID_MEM_ADDR(vid, ANV_VID_MEM_H265_FRAME_STATS_STREAMOUT);
       regions[3] = anv_cmd_buffer_temporary_state_address(cmd, input_slb_state);
       regions[4] = anv_cmd_buffer_temporary_state_address(cmd, const_data_state);
-      regions[5] = anv_brc_mem_addr(vid, ANV_VID_MEM_BRC_EXEC_SLB);
-      regions[6] = anv_brc_mem_addr(vid, ANV_VID_MEM_BRC_WP_DATA);
-      regions[7] = anv_brc_mem_addr(vid, ANV_VID_MEM_H265_LCU_BASE_ADDR);
-      regions[8] = anv_brc_mem_addr(vid, ANV_VID_MEM_BRC_PAK_INFO);
-      regions[15] = anv_brc_mem_addr(vid, ANV_VID_MEM_BRC_DEBUG);
+      regions[5] = ANV_VID_MEM_ADDR(vid, ANV_VID_MEM_BRC_EXEC_SLB);
+      regions[6] = ANV_VID_MEM_ADDR(vid, ANV_VID_MEM_BRC_WP_DATA);
+      regions[7] = ANV_VID_MEM_ADDR(vid, ANV_VID_MEM_H265_LCU_BASE_ADDR);
+      regions[8] = ANV_VID_MEM_ADDR(vid, ANV_VID_MEM_BRC_PAK_INFO);
+      regions[15] = ANV_VID_MEM_ADDR(vid, ANV_VID_MEM_BRC_DEBUG);
 
       for (uint32_t i = 0; i < 16; i++) {
          va.HUCVirtualAddressRegion[i] = (struct GENX(HUC_VIRTUAL_ADDR_REGION)) {
@@ -1794,5 +1788,1108 @@ anv_h265_brc_emit_huc_update(struct anv_cmd_buffer *cmd,
 
    anv_h265_brc_emit_huc_tail(cmd);
 }
+
+/* AV1 encoding from here */
+#if GFX_VERx10 == 125
+#define ANV_HUC_AV1_BRC_INIT_KERNEL_DESCRIPTOR   18
+#define ANV_HUC_AV1_BRC_UPDATE_KERNEL_DESCRIPTOR 19
+#define ANV_HUC_AV1_BRC_REENCODE_MASK            (1u << 31)
+#define ANV_HUC_AV1_BRC_FLAG_CBR                 0x10
+#define ANV_HUC_AV1_BRC_FLAG_VBR                 0x20
+
+#define ANV_AV1_BRC_SLB_INLOOP_FILTER_OFFSET 16
+#define ANV_AV1_BRC_SLB_CMD1_OFFSET          80
+#define ANV_AV1_BRC_SLB_CMD2_OFFSET          216
+#define ANV_AV1_BRC_SLB_PIC_STATE_OFFSET     468
+#define ANV_AV1_BRC_SLB_SIZE                 832
+#define ANV_AV1_BRC_SLB_PIC_STATE2_OFFSET    776
+#define ANV_AV1_BRC_SLB_SIZE_MULTI_TILE      1088
+
+struct anv_huc_av1_brc_init_dmem {
+   uint32_t BRCFunc;
+   uint32_t INIT_ProfileLevelMaxFrame;
+   uint32_t INIT_InitBufFullness;
+   uint32_t INIT_BufSize;
+   uint32_t INIT_TargetBitrate;
+   uint32_t INIT_MaxRate;
+   uint32_t INIT_MinRate;
+   uint32_t INIT_FrameRateM;
+   uint32_t INIT_FrameRateD;
+   uint32_t RSVD32[8];
+   uint16_t INIT_BRCFlag;
+   uint16_t Reserved1;
+   uint16_t INIT_GopP;
+   uint16_t INIT_GopB;
+   uint16_t INIT_FrameWidth;
+   uint16_t INIT_FrameHeight;
+   uint16_t INIT_MinQP;
+   uint16_t INIT_MaxQP;
+   uint16_t INIT_LevelQP;
+   uint16_t INIT_GoldenFrameInterval;
+   uint16_t INIT_EnableScaling;
+   uint16_t INIT_OvershootCBR_pct;
+   uint16_t INIT_GopB1;
+   uint16_t INIT_GopB2;
+   uint16_t INIT_GopB3;
+   uint16_t INIT_GopPicSize;
+   uint16_t RSVD16[6];
+   int8_t   INIT_InstRateThreshP0[4];
+   int8_t   Reserved2[4];
+   int8_t   INIT_InstRateThreshI0[4];
+   int8_t   INIT_DevThreshPB0[8];
+   int8_t   INIT_DevThreshVBR0[8];
+   int8_t   INIT_DevThreshI0[8];
+   uint8_t  INIT_InitQPP;
+   uint8_t  INIT_InitQPI;
+   uint8_t  INIT_SegMapGenerating;
+   uint8_t  INIT_Total_Level;
+   uint8_t  INIT_MaxLevel_Ratio[16];
+   uint8_t  INIT_SLIDINGWINDOW_ENABLE;
+   uint8_t  INIT_SLIDINGWINDOW_SIZE;
+   uint8_t  RSVD8[22];
+};
+
+struct anv_huc_av1_brc_update_dmem {
+   int32_t  UPD_TARGET_BUF_FULLNESS;
+   uint32_t UPD_FRAMENUM;
+   int32_t  UPD_HRD_BUFF_FULLNESS;
+   int32_t  UPD_HRD_BUFF_FULLNESS_UPPER;
+   int32_t  UPD_HRD_BUFF_FULLNESS_LOWER;
+   uint32_t UPD_UserMaxFrame;
+   uint32_t UPD_TR_TargetSize;
+   uint32_t UPD_LA_TargetFULNESS;
+   uint32_t UPD_CDF_BufferSize;
+   uint32_t UPD_UserMaxFramePB;
+   uint32_t RSVD32[14];
+   uint16_t UPD_startGAdjFrame[4];
+   uint16_t UPD_CurWidth;
+   uint16_t UPD_CurHeight;
+   uint16_t UPD_Asyn;
+   uint16_t UPD_SLBBSize;
+   uint16_t UPD_AVPPiCStateCmdNum;
+   uint16_t UPD_AVPSegmentStateOffset;
+   uint16_t UPD_AVPInloopFilterStateOffset;
+   uint16_t UPD_VDEncCmd1Offset;
+   uint16_t UPD_VDEncCmd2Offset;
+   uint16_t UPD_AVPPicStateOffset;
+   uint16_t UPD_MaxBRCLevel;
+   uint16_t UPD_AdditionalHrdSizeByteCount;
+   uint16_t UPD_VDEncTileSliceStateOffset;
+   uint16_t UPD_TileNum;
+   uint16_t RSVD16[10];
+   uint16_t UPD_LoopFilterParamsBitOffset;
+   uint16_t UPD_QIndexBitOffset;
+   uint16_t UPD_SegmentationBitOffset;
+   uint16_t UPD_CDEFParamsBitOffset;
+   uint16_t UPD_CDEFParamsSizeInBits;
+   uint16_t UPD_FrameHdrOBUSizeInBits;
+   uint16_t UPD_FrameHdrOBUSizeByteOffset;
+   uint16_t UPD_FrameHdrOBUSizeInBytes;
+   uint16_t RSVD16_1[8];
+   uint8_t  UPD_FrameType;
+   uint8_t  UPD_ErrorResilientMode;
+   uint8_t  UPD_IntraOnly;
+   uint8_t  UPD_PrimaryRefFrame;
+   uint8_t  UPD_SegOn;
+   uint8_t  UPD_SegMapUpdate;
+   uint8_t  UPD_SegTemporalUpdate;
+   uint8_t  UPD_SegUpdateData;
+   uint8_t  UPD_IsFrameOBU;
+   uint8_t  UPD_EnableCDEFUpdate;
+   uint8_t  UPD_EnableLFUpdate;
+   uint8_t  UPD_PaletteOn;
+   uint8_t  RSVD8_1[20];
+   uint8_t  UPD_OverflowFlag;
+   uint8_t  UPD_MaxNumPAKs;
+   int8_t   UPD_CurrFrameType;
+   uint8_t  UPD_QPThreshold[4];
+   uint8_t  UPD_gRateRatioThreshold[6];
+   int8_t   UPD_startGAdjMult[5];
+   int8_t   UPD_startGAdjDiv[5];
+   int8_t   UPD_gRateRatioThresholdQP[7];
+   uint8_t  UPD_DistThreshldI[9];
+   uint8_t  UPD_DistThreshldP[9];
+   uint8_t  UPD_DistThreshldB[9];
+   int8_t   UPD_MaxFrameThreshI[5];
+   int8_t   UPD_MaxFrameThreshP[5];
+   int8_t   UPD_MaxFrameThreshB[5];
+   uint8_t  UPD_PAKPassNum;
+   int8_t   UPD_DeltaQPForSadZone0;
+   int8_t   UPD_DeltaQPForSadZone1;
+   int8_t   UPD_DeltaQPForSadZone2;
+   int8_t   UPD_DeltaQPForSadZone3;
+   int8_t   UPD_DeltaQPForMvZero;
+   int8_t   UPD_DeltaQPForMvZone0;
+   int8_t   UPD_DeltaQPForMvZone1;
+   int8_t   UPD_DeltaQPForMvZone2;
+   int8_t   UPD_DeltaQPForAvgLuminZone0;
+   int8_t   UPD_DeltaQPForAvgLuminZone1;
+   int8_t   UPD_DeltaQPForAvgLuminZone2;
+   int8_t   UPD_DeltaQPForAvgLuminZone3;
+   int8_t   UPD_DeltaQPForAvgLuminZone4;
+   int8_t   UPD_DeltaQPForAvgLuminZone5;
+   int8_t   UPD_DeltaQPForAvgLuminZone6;
+   int8_t   UPD_DeltaQPForAvgLuminZone7;
+   int8_t   UPD_DeltaQPForAvgLuminZone8;
+   int8_t   UPD_DeltaQPForAvgLuminZone9;
+   uint8_t  UPD_Temporal_Level;
+   uint8_t  UPD_SegMapGenerating;
+   uint8_t  UPD_Lowdelay;
+   uint8_t  UPD_Delta;
+   uint8_t  UPD_LALength;
+   uint8_t  UPD_DisableCdfUpdate;
+   uint8_t  UPD_EnableDMAForCdf;
+   uint8_t  UPD_EnableAdaptiveRounding;
+   uint8_t  UPD_TCBRC_SCENARIO;
+   uint8_t  UPD_TCBRC_REPEAT;
+   uint8_t  UPD_ROM_CURRENT;
+   uint8_t  UPD_ROM_ZERO;
+   uint8_t  UPD_CQMEnabled;
+   uint8_t  UPD_TempCurrentlayer;
+   uint8_t  UPD_TempScalable;
+   uint8_t  UPD_AdaptiveTUEnabled;
+   uint8_t  UPD_EnableDeltaQP;
+   uint8_t  UPD_QMatrixEnabled;
+   uint8_t  UPD_LADsRatio;
+   uint8_t  RSVD8[58];
+};
+
+struct anv_huc_av1_brc_mode_cost {
+   uint8_t RSVD[24];
+};
+
+struct anv_huc_av1_brc_const_data {
+   struct anv_huc_av1_brc_mode_cost CONST_ModeCosts[52];
+   int8_t  CONST_QPAdjTabI[45];
+   int8_t  CONST_QPAdjTabP[45];
+   int8_t  CONST_QPAdjTabB[45];
+   int8_t  CONST_DistQPAdjTabI[81];
+   int8_t  CONST_DistQPAdjTabP[81];
+   int8_t  CONST_DistQPAdjTabB[81];
+   uint8_t CONST_LoopFilterLevelTabLuma[256];
+   uint8_t CONST_LoopFilterLevelTabChroma[256];
+   uint8_t RSVD[38];
+};
+
+static_assert(sizeof(struct anv_huc_av1_brc_init_dmem) == 192, "huc av1 brc init dmem layout");
+static_assert(offsetof(struct anv_huc_av1_brc_init_dmem, INIT_BRCFlag) == 0x44, "huc av1 brc init dmem layout");
+static_assert(offsetof(struct anv_huc_av1_brc_init_dmem, INIT_GopPicSize) == 0x62, "huc av1 brc init dmem layout");
+static_assert(offsetof(struct anv_huc_av1_brc_init_dmem, INIT_InstRateThreshP0) == 0x70, "huc av1 brc init dmem layout");
+static_assert(offsetof(struct anv_huc_av1_brc_init_dmem, INIT_InitQPP) == 0x94, "huc av1 brc init dmem layout");
+static_assert(offsetof(struct anv_huc_av1_brc_init_dmem, INIT_SLIDINGWINDOW_ENABLE) == 0xa8, "huc av1 brc init dmem layout");
+static_assert(sizeof(struct anv_huc_av1_brc_update_dmem) == 384, "huc av1 brc update dmem layout");
+static_assert(offsetof(struct anv_huc_av1_brc_update_dmem, UPD_startGAdjFrame) == 0x60, "huc av1 brc update dmem layout");
+static_assert(offsetof(struct anv_huc_av1_brc_update_dmem, UPD_SLBBSize) == 0x6e, "huc av1 brc update dmem layout");
+static_assert(offsetof(struct anv_huc_av1_brc_update_dmem, UPD_TileNum) == 0x82, "huc av1 brc update dmem layout");
+static_assert(offsetof(struct anv_huc_av1_brc_update_dmem, UPD_LoopFilterParamsBitOffset) == 0x98, "huc av1 brc update dmem layout");
+static_assert(offsetof(struct anv_huc_av1_brc_update_dmem, UPD_FrameType) == 0xb8, "huc av1 brc update dmem layout");
+static_assert(offsetof(struct anv_huc_av1_brc_update_dmem, UPD_OverflowFlag) == 0xd8, "huc av1 brc update dmem layout");
+static_assert(offsetof(struct anv_huc_av1_brc_update_dmem, UPD_PAKPassNum) == 0x120, "huc av1 brc update dmem layout");
+static_assert(offsetof(struct anv_huc_av1_brc_update_dmem, UPD_Temporal_Level) == 0x133, "huc av1 brc update dmem layout");
+static_assert(offsetof(struct anv_huc_av1_brc_update_dmem, UPD_LADsRatio) == 0x145, "huc av1 brc update dmem layout");
+static_assert(sizeof(struct anv_huc_av1_brc_const_data) == 2176, "huc av1 brc const data layout");
+static_assert(offsetof(struct anv_huc_av1_brc_const_data, CONST_QPAdjTabI) == 0x4e0, "huc av1 brc const data layout");
+static_assert(offsetof(struct anv_huc_av1_brc_const_data, CONST_DistQPAdjTabI) == 0x567, "huc av1 brc const data layout");
+static_assert(offsetof(struct anv_huc_av1_brc_const_data, CONST_LoopFilterLevelTabLuma) == 0x65a, "huc av1 brc const data layout");
+
+static_assert(ANV_AV1_BRC_SLB_INLOOP_FILTER_OFFSET ==
+              GENX(AVP_SEGMENT_STATE_length) * 4, "huc av1 brc slb layout");
+static_assert(ANV_AV1_BRC_SLB_CMD1_OFFSET ==
+              ANV_AV1_BRC_SLB_INLOOP_FILTER_OFFSET +
+              (GENX(AVP_INLOOP_FILTER_STATE_length) + GENX(MI_BATCH_BUFFER_END_length)) * 4,
+              "huc av1 brc slb layout");
+static_assert(ANV_AV1_BRC_SLB_CMD2_OFFSET ==
+              ANV_AV1_BRC_SLB_CMD1_OFFSET +
+              (GENX(VDENC_CMD1_length) + GENX(MI_BATCH_BUFFER_END_length)) * 4,
+              "huc av1 brc slb layout");
+static_assert(ANV_AV1_BRC_SLB_PIC_STATE_OFFSET ==
+              ANV_AV1_BRC_SLB_CMD2_OFFSET +
+              (GENX(VDENC_CMD2_length) + GENX(MI_BATCH_BUFFER_END_length)) * 4,
+              "huc av1 brc slb layout");
+static_assert(ANV_AV1_BRC_SLB_SIZE ==
+              ALIGN_POT(ANV_AV1_BRC_SLB_PIC_STATE_OFFSET +
+                    (GENX(AVP_PIC_STATE_length) + GENX(MI_BATCH_BUFFER_END_length)) * 4, 64),
+              "huc av1 brc slb layout");
+static_assert(ANV_AV1_BRC_SLB_PIC_STATE2_OFFSET ==
+              ANV_AV1_BRC_SLB_PIC_STATE_OFFSET +
+              (GENX(AVP_PIC_STATE_length) + GENX(MI_BATCH_BUFFER_END_length)) * 4,
+              "huc av1 brc slb layout");
+static_assert(ANV_AV1_BRC_SLB_SIZE_MULTI_TILE ==
+              ALIGN_POT(ANV_AV1_BRC_SLB_PIC_STATE2_OFFSET +
+                    (GENX(AVP_PIC_STATE_length) + GENX(MI_BATCH_BUFFER_END_length)) * 4, 64),
+              "huc av1 brc slb layout");
+
+static const int8_t anv_av1_brc_inst_rate_thresh_i[4] = {
+    30,  50,  90, 115,
+};
+
+static const int8_t anv_av1_brc_inst_rate_thresh_p[4] = {
+    30,  50,  70, 120,
+};
+
+static const double anv_av1_brc_dev_thresh_i_neg[4] = {
+   0.80, 0.60, 0.34,  0.2,
+};
+
+static const double anv_av1_brc_dev_thresh_i_pos[4] = {
+    0.2,  0.4, 0.66,  0.9,
+};
+
+static const double anv_av1_brc_dev_thresh_pb_neg[4] = {
+   0.90, 0.66, 0.46,  0.3,
+};
+
+static const double anv_av1_brc_dev_thresh_pb_pos[4] = {
+    0.3, 0.46, 0.70, 0.90,
+};
+
+static const double anv_av1_brc_dev_thresh_vbr_neg[4] = {
+   0.90, 0.70, 0.50,  0.3,
+};
+
+static const double anv_av1_brc_dev_thresh_vbr_pos[4] = {
+    0.4,  0.5, 0.75, 0.90,
+};
+
+static const uint8_t anv_av1_brc_qp_threshold[4] = {
+    40,  80, 120, 180,
+};
+
+static const uint16_t anv_av1_brc_start_gadj_frame[4] = {
+    10,  50, 100, 150,
+};
+
+static const uint8_t anv_av1_brc_rate_ratio_threshold[6] = {
+    40,  75,  97, 103, 125, 160,
+};
+
+static const int8_t anv_av1_brc_rate_ratio_threshold_qp[7] = {
+   -6, -4, -2,  0,  2,  4,  6,
+};
+
+static const int8_t anv_av1_brc_start_gadj_mult[5] = {
+    1,  1,  3,  2,  1,
+};
+
+static const int8_t anv_av1_brc_start_gadj_div[5] = {
+   40,  5,  5,  3,  1,
+};
+
+static const uint8_t anv_av1_brc_dist_threshold[9] = {
+     4,  30,  60,  80, 120, 140, 200, 255,   0,
+};
+
+static const uint8_t anv_av1_brc_dist_threshold_b[9] = {
+     2,  20,  40,  70, 130, 160, 200, 255,   0,
+};
+
+static const int8_t anv_av1_brc_max_frame_mult_i[5] = {
+    8,  9, 10, 11, 12,
+};
+
+static const int8_t anv_av1_brc_max_frame_mult_p[5] = {
+    4,  5,  6,  6,  7,
+};
+
+static const int8_t anv_av1_brc_delta_qp_i[45] = {
+     2,   6,  10,  14,  18,
+     2,   4,   6,  10,  14,
+     0,   0,   2,   4,   8,
+     0,   0,   0,   2,   4,
+    -2,   0,   0,   0,   2,
+    -6,  -4,  -2,   0,   0,
+   -10,  -8,  -4,  -2,   0,
+   -14, -12,  -8,  -4,  -2,
+   -18, -14, -10,  -4,  -2,
+};
+
+static const int8_t anv_av1_brc_delta_qp_p[45] = {
+     2,   4,  10,  16,  20,
+     2,   4,   8,  12,  16,
+     0,   2,   4,   8,  12,
+     0,   0,   0,   2,   4,
+    -2,   0,   0,   0,   2,
+    -4,  -2,  -2,   0,   0,
+    -6,  -4,  -2,  -2,   0,
+   -10,  -6,  -4,  -2,   0,
+   -14, -12,  -8,  -4,  -2,
+};
+
+static const int8_t anv_av1_brc_dist_delta_qp_i[81] = {
+     0,   0,   0,   0,   0,   8,  12,  16,  20,
+     0,   0,   0,   0,   0,   6,  10,  14,  18,
+    -2,   0,   0,   0,   0,   6,   8,  12,  14,
+    -4,  -2,   0,   0,   0,   2,   4,   6,  10,
+    -6,  -4,  -2,   0,   0,   0,   2,   6,  10,
+    -8,  -4,  -2,   0,   0,   0,   2,   6,  10,
+   -10,  -6,  -4,  -2,   0,   0,   2,   6,  10,
+   -12,  -8,  -4,  -2,   0,   0,   2,   6,  10,
+   -12,  -8,  -4,  -2,   0,   0,   2,   6,  10,
+};
+
+static const int8_t anv_av1_brc_dist_delta_qp_p[81] = {
+     0,   0,   0,   0,   0,   6,  10,  14,  18,
+     0,   0,   0,   0,   0,   6,  10,  12,  16,
+    -2,   0,   0,   0,   0,   6,  10,  14,  16,
+    -4,  -2,   0,   0,   0,   4,   8,  10,  12,
+    -6,  -4,  -2,   0,   0,   0,   2,   8,  10,
+    -8,  -4,  -2,   0,   0,   0,   2,   8,  10,
+    -8,  -4,  -2,  -2,   0,   0,   0,   8,  10,
+    -8,  -6,  -4,  -2,   0,   0,   0,   2,  10,
+   -10,  -8,  -4,  -2,   0,   0,   0,   2,   8,
+};
+
+static const uint8_t anv_av1_brc_loop_filter_level_luma[256] = {
+    0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+    0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+    0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+    0,  0,  0,  0,  0,  0,  0,  0,  0,  1,  1,  1,  1,  1,  1,  2,
+    2,  2,  2,  2,  2,  2,  3,  3,  3,  3,  3,  3,  3,  4,  4,  4,
+    4,  4,  4,  4,  5,  5,  5,  5,  5,  5,  5,  6,  6,  6,  6,  6,
+    6,  7,  7,  7,  8,  8,  8,  8,  9,  9,  9,  9, 10, 10, 10, 10,
+   11, 11, 11, 11, 12, 12, 12, 12, 13, 13, 13, 14, 14, 14, 15, 15,
+   15, 16, 16, 16, 17, 17, 17, 17, 18, 18, 18, 19, 19, 20, 20, 20,
+   21, 21, 21, 22, 22, 22, 23, 23, 24, 24, 24, 25, 25, 25, 26, 26,
+   27, 27, 27, 28, 28, 29, 29, 29, 30, 30, 31, 31, 31, 32, 32, 33,
+   33, 34, 34, 34, 35, 35, 36, 36, 37, 37, 38, 38, 39, 39, 40, 41,
+   41, 42, 42, 43, 44, 45, 45, 46, 47, 48, 49, 50, 51, 52, 53, 55,
+   56, 58, 59, 61, 63, 63, 63, 63, 63, 63, 63, 63, 63, 63, 63, 63,
+   63, 63, 63, 63, 63, 63, 63, 63, 63, 63, 63, 63, 63, 63, 63, 63,
+   63, 63, 63, 63, 63, 63, 63, 63, 63, 63, 63, 63, 63, 63, 63, 63,
+};
+
+static const uint8_t anv_av1_brc_loop_filter_level_chroma[256] = {
+    0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+    0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+    0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,  0,
+    0,  0,  0,  0,  0,  0,  0,  1,  1,  1,  1,  1,  1,  1,  1,  2,
+    2,  2,  2,  2,  2,  2,  2,  2,  2,  3,  3,  3,  3,  3,  3,  3,
+    3,  3,  3,  4,  4,  4,  4,  4,  4,  4,  4,  4,  4,  4,  4,  4,
+    5,  5,  5,  5,  5,  5,  5,  5,  6,  6,  6,  6,  6,  6,  6,  6,
+    6,  6,  7,  7,  7,  7,  7,  7,  7,  7,  7,  7,  7,  7,  8,  8,
+    8,  8,  8,  8,  8,  8,  8,  8,  9,  9,  9,  9,  9,  9,  9, 10,
+   10, 10, 10, 10, 11, 11, 11, 11, 12, 12, 13, 13, 14, 14, 15, 15,
+   16, 17, 18, 19, 20, 21, 22, 24, 25, 26, 28, 30, 31, 31, 31, 31,
+   31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31,
+   31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31,
+   31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31,
+   31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31,
+   31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31, 31,
+};
+
+static const uint32_t anv_av1_brc_mode_costs_i[52 * 6] = {
+   0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+   0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+   0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+   0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+   0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+   0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+   0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+   0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+   0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+   0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+   0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+   0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+   0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+   0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+   0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+   0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+   0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+   0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+   0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+   0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+   0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+   0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+   0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+   0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+   0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+   0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+   0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+   0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+   0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+   0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+   0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+   0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+   0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+   0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+   0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+   0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+   0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+   0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+   0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+   0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+   0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+   0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+   0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+   0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+   0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+   0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+   0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+   0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+   0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+   0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+   0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+   0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+};
+
+static const uint32_t anv_av1_brc_mode_costs_p[52 * 6] = {
+   0x10102f1e, 0x001e1515, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+   0x10102f1e, 0x001e1515, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+   0x10102f1e, 0x001e1515, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+   0x10102f1e, 0x001e1515, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+   0x10102f1e, 0x001e1515, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+   0x10102f1e, 0x001e1515, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+   0x10102f1e, 0x001e1515, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+   0x10102f1e, 0x001e1515, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+   0x10102f1e, 0x001e1515, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+   0x10102f1e, 0x001e1515, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+   0x10102f1e, 0x001e1515, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+   0x10102f1e, 0x001e1515, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+   0x10102f1e, 0x001e1515, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+   0x10102f1e, 0x001e1515, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+   0x10102f1e, 0x001e1515, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+   0x10102f1e, 0x001e1515, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+   0x10102f1e, 0x001e1515, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+   0x10102f1e, 0x001e1515, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+   0x10102f1e, 0x001e1515, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+   0x10102f1e, 0x001e1515, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+   0x10102f1e, 0x001e1515, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+   0x10102f1e, 0x001e1515, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+   0x10102f1e, 0x001e1515, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+   0x10102f1e, 0x001e1515, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+   0x10102f1e, 0x001e1515, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+   0x10102f1e, 0x001e1515, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+   0x10102f1e, 0x001e1515, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+   0x10102f1e, 0x001e1515, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+   0x10102f1e, 0x001e1515, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+   0x10102f1e, 0x001e1515, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+   0x10102f1e, 0x001e1515, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+   0x10102f1e, 0x001e1515, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+   0x10102f1e, 0x001e1515, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+   0x10102f1e, 0x001e1515, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+   0x10102f1e, 0x001e1515, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+   0x10102f1e, 0x001e1515, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+   0x10102f1e, 0x001e1515, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+   0x10102f1e, 0x001e1515, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+   0x10102f1e, 0x001e1515, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+   0x10102f1e, 0x001e1515, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+   0x10102f1e, 0x001e1515, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+   0x10102f1e, 0x001e1515, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+   0x10102f1e, 0x001e1515, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+   0x10102f1e, 0x001e1515, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+   0x10102f1e, 0x001e1515, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+   0x10102f1e, 0x001e1515, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+   0x10102f1e, 0x001e1515, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+   0x10102f1e, 0x001e1515, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+   0x10102f1e, 0x001e1515, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+   0x10102f1e, 0x001e1515, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+   0x10102f1e, 0x001e1515, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+   0x10102f1e, 0x001e1515, 0x00000000, 0x00000000, 0x00000000, 0x00000000,
+};
+
+#endif /* GFX_VERx10 == 125 */
+
+#if GFX_VERx10 == 125
+struct anv_av1_tile_layout;
+
+static void
+anv_av1_emit_avp_segment_state(struct anv_cmd_buffer *cmd,
+                               struct anv_batch *batch,
+                               const VkVideoEncodeInfoKHR *enc_info);
+static void
+anv_av1_emit_avp_inloop_filter_state(struct anv_cmd_buffer *cmd,
+                                     struct anv_batch *batch,
+                                     const VkVideoEncodeInfoKHR *enc_info,
+                                     bool brc);
+static void
+anv_av1_emit_vdenc_cmd1(struct anv_cmd_buffer *cmd,
+                        struct anv_batch *batch,
+                        const VkVideoEncodeInfoKHR *enc_info);
+static void
+anv_av1_emit_vdenc_cmd2(struct anv_cmd_buffer *cmd,
+                        struct anv_batch *batch,
+                        const VkVideoEncodeInfoKHR *enc_info);
+static void
+anv_av1_emit_avp_pic_state(struct anv_cmd_buffer *cmd,
+                           struct anv_batch *batch,
+                           const VkVideoEncodeInfoKHR *enc_info,
+                           const struct anv_av1_tile_layout *layout,
+                           uint32_t tile_idx,
+                           bool non_first_pass);
+static size_t
+anv_av1_emit_frame_header(struct anv_cmd_buffer *cmd,
+                          struct anv_batch *batch,
+                          const VkVideoEncodeInfoKHR *enc_info,
+                          bool brc,
+                          struct vk_video_av1_frame_hdr_offsets *offsets);
+
+static const StdVideoEncodeAV1PictureInfo *
+anv_av1_brc_pic_info(const VkVideoEncodeInfoKHR *enc_info)
+{
+   const struct VkVideoEncodeAV1PictureInfoKHR *frame_info =
+      vk_find_struct_const(enc_info->pNext, VIDEO_ENCODE_AV1_PICTURE_INFO_KHR);
+
+   return frame_info->pStdPictureInfo;
+}
+
+static void
+anv_av1_brc_frame_size(const VkVideoEncodeInfoKHR *enc_info,
+                       uint32_t *width, uint32_t *height)
+{
+   const struct anv_image *img =
+      anv_image_view_from_handle(enc_info->srcPictureResource.imageViewBinding)->image;
+
+   *width = img->vk.extent.width;
+   *height = img->vk.extent.height;
+}
+
+static void
+anv_av1_brc_frame_rate(const struct anv_video_rc_state *rc,
+                       uint32_t *num, uint32_t *den)
+{
+   if (rc->frame_rate_num && rc->frame_rate_den) {
+      *num = rc->frame_rate_num;
+      *den = rc->frame_rate_den;
+   } else {
+      *num = 30;
+      *den = 1;
+   }
+}
+
+static uint32_t
+anv_av1_brc_max_rate(const struct anv_video_session *vid)
+{
+   return vid->rc_mode == VK_VIDEO_ENCODE_RATE_CONTROL_MODE_CBR_BIT_KHR ?
+          vid->rc.average_bitrate : vid->rc.max_bitrate;
+}
+
+static double
+anv_av1_brc_input_bits_per_frame(const struct anv_video_session *vid)
+{
+   uint32_t num, den;
+
+   anv_av1_brc_frame_rate(&vid->rc, &num, &den);
+
+   int32_t frame_rate = (int32_t)((double)num * 100. / (double)den);
+
+   return anv_av1_brc_max_rate(vid) * 100. / frame_rate;
+}
+
+static int32_t
+anv_av1_brc_init_qp_i(uint32_t width, uint32_t height, uint32_t fr_num,
+                      uint32_t fr_den, uint32_t bitrate, bool is_10bit,
+                      uint16_t gop_p)
+{
+   uint32_t frame_size = width * height * 3 / 2;
+   if (is_10bit)
+      frame_size = frame_size * 10 / 8;
+
+   const float x0 = 0, y0 = 1.19f, x1 = 1.75f, y1 = 1.75f;
+   int32_t qp_p = (int32_t)(1. / 1.2 * pow(10.0, (log10(frame_size * 2. / 3. *
+      (float)fr_num / ((float)bitrate * fr_den)) - x0) * (y1 - y0) / (x1 - x0) + y0) + 0.5);
+
+   qp_p = CLAMP(qp_p * 5 - 20, 1, 200);
+
+   int32_t qp_i = qp_p > 4 ? qp_p - 4 : qp_p;
+   int32_t qi_boost = CLAMP(gop_p / 30 - 1, 10, 20);
+
+   return CLAMP(qp_i - qi_boost, 1, 200);
+}
+
+static void
+anv_av1_brc_fill_init_dmem(struct anv_cmd_buffer *cmd,
+                           const VkVideoEncodeInfoKHR *enc_info,
+                           struct anv_huc_av1_brc_init_dmem *dmem)
+{
+   struct anv_video_session *vid = cmd->video.vid;
+   struct anv_video_rc_state *rc = &vid->rc;
+   const StdVideoAV1SequenceHeader *seq_hdr = &cmd->video.params->av1_enc.seq_hdr.base;
+   bool cbr = vid->rc_mode == VK_VIDEO_ENCODE_RATE_CONTROL_MODE_CBR_BIT_KHR;
+   uint32_t width, height, fr_num, fr_den;
+
+   anv_av1_brc_frame_size(enc_info, &width, &height);
+   anv_av1_brc_frame_rate(rc, &fr_num, &fr_den);
+
+   uint32_t max_rate = anv_av1_brc_max_rate(vid);
+   double bits_per_frame = anv_av1_brc_input_bits_per_frame(vid);
+   int32_t vbv_size = rc->vbv_size_bits;
+   int32_t delay = rc->vbv_initial_fullness_bits;
+
+   if (vbv_size < (int32_t)(bits_per_frame * 4))
+      vbv_size = (int32_t)(bits_per_frame * 4);
+   if (delay == 0)
+      delay = 7 * vbv_size / 8;
+   if (delay < (int32_t)(bits_per_frame * 2))
+      delay = (int32_t)(bits_per_frame * 2);
+   if (delay > vbv_size)
+      delay = vbv_size;
+
+   dmem->BRCFunc = rc->frame_counter ? 2 : 0;
+   dmem->INIT_ProfileLevelMaxFrame = width * height;
+   dmem->INIT_TargetBitrate = rc->average_bitrate;
+   dmem->INIT_MaxRate = max_rate;
+   dmem->INIT_MinRate = cbr ? rc->average_bitrate : 0;
+   dmem->INIT_FrameRateM = fr_num;
+   dmem->INIT_FrameRateD = fr_den;
+   dmem->INIT_InitBufFullness = MIN2(rc->vbv_initial_fullness_bits, rc->vbv_size_bits);
+   dmem->INIT_BufSize = vbv_size;
+   dmem->INIT_BRCFlag = cbr ? ANV_HUC_AV1_BRC_FLAG_CBR : ANV_HUC_AV1_BRC_FLAG_VBR;
+
+   uint32_t gop = rc->gop_frame_count ? rc->gop_frame_count : 30;
+   uint32_t gop_ref_dist = rc->consecutive_b_frames + 1;
+   int32_t intra_period = gop - 1;
+
+   if (gop_ref_dist > 1) {
+      if (intra_period > 0)
+         intra_period = DIV_ROUND_UP(intra_period, gop_ref_dist) * gop_ref_dist;
+      dmem->INIT_GopP = intra_period / gop_ref_dist;
+      dmem->INIT_GopB = intra_period / gop_ref_dist;
+      dmem->INIT_GopB1 = (dmem->INIT_GopP + dmem->INIT_GopB == intra_period) ?
+                         0 : dmem->INIT_GopP * 2;
+      dmem->INIT_GopB2 = intra_period - dmem->INIT_GopP - dmem->INIT_GopB -
+                         dmem->INIT_GopB1;
+   } else {
+      dmem->INIT_GopP = gop - 1;
+      dmem->INIT_GopB = 0;
+   }
+
+   dmem->INIT_FrameWidth = width;
+   dmem->INIT_FrameHeight = height;
+   dmem->INIT_MinQP = MAX2(rc->min_qp, 1);
+   dmem->INIT_MaxQP = rc->max_qp ? rc->max_qp : 255;
+   dmem->INIT_GoldenFrameInterval = 14;
+   dmem->INIT_GopPicSize = gop;
+   dmem->INIT_Total_Level = 1;
+
+   memcpy(dmem->INIT_InstRateThreshI0, anv_av1_brc_inst_rate_thresh_i,
+          sizeof(dmem->INIT_InstRateThreshI0));
+   memcpy(dmem->INIT_InstRateThreshP0, anv_av1_brc_inst_rate_thresh_p,
+          sizeof(dmem->INIT_InstRateThreshP0));
+
+   double input_bits = (double)max_rate * fr_den / fr_num;
+   double bps_ratio = CLAMP(input_bits / ((double)vbv_size / 30.0), 0.1f, 3.5);
+
+   for (uint32_t i = 0; i < 4; i++) {
+      dmem->INIT_DevThreshPB0[i] =
+         (int8_t)(-50 * pow(anv_av1_brc_dev_thresh_pb_neg[i], bps_ratio));
+      dmem->INIT_DevThreshPB0[i + 4] =
+         (int8_t)(50 * pow(anv_av1_brc_dev_thresh_pb_pos[i], bps_ratio));
+      dmem->INIT_DevThreshI0[i] =
+         (int8_t)(-50 * pow(anv_av1_brc_dev_thresh_i_neg[i], bps_ratio));
+      dmem->INIT_DevThreshI0[i + 4] =
+         (int8_t)(50 * pow(anv_av1_brc_dev_thresh_i_pos[i], bps_ratio));
+      dmem->INIT_DevThreshVBR0[i] =
+         (int8_t)(-50 * pow(anv_av1_brc_dev_thresh_vbr_neg[i], bps_ratio));
+      dmem->INIT_DevThreshVBR0[i + 4] =
+         (int8_t)(100 * pow(anv_av1_brc_dev_thresh_vbr_pos[i], bps_ratio));
+   }
+
+   int32_t qp_i = anv_av1_brc_init_qp_i(width, height, fr_num, fr_den,
+                                        rc->average_bitrate,
+                                        seq_hdr->pColorConfig->BitDepth == 10,
+                                        dmem->INIT_GopP);
+   dmem->INIT_InitQPI = qp_i;
+   dmem->INIT_InitQPP = qp_i + 20;
+
+   rc->av1_target_fullness = rc->vbv_initial_fullness_bits;
+   rc->av1_hrd_fullness = delay;
+}
+
+static bool
+anv_av1_brc_primary_ref_none(const StdVideoEncodeAV1PictureInfo *pic_info)
+{
+   return pic_info->frame_type == STD_VIDEO_AV1_FRAME_TYPE_KEY ||
+          pic_info->frame_type == STD_VIDEO_AV1_FRAME_TYPE_INTRA_ONLY ||
+          pic_info->flags.error_resilient_mode ||
+          pic_info->primary_ref_frame >= STD_VIDEO_AV1_PRIMARY_REF_NONE;
+}
+
+static void
+anv_av1_brc_fill_update_dmem(struct anv_cmd_buffer *cmd,
+                             const VkVideoEncodeInfoKHR *enc_info,
+                             uint32_t pass,
+                             bool low_delay,
+                             const struct vk_video_av1_frame_hdr_offsets *hdr,
+                             uint32_t num_tiles,
+                             struct anv_huc_av1_brc_update_dmem *dmem)
+{
+   struct anv_video_session *vid = cmd->video.vid;
+   struct anv_video_rc_state *rc = &vid->rc;
+   const StdVideoEncodeAV1PictureInfo *pic_info = anv_av1_brc_pic_info(enc_info);
+   bool is_intra = pic_info->frame_type == STD_VIDEO_AV1_FRAME_TYPE_KEY ||
+                   pic_info->frame_type == STD_VIDEO_AV1_FRAME_TYPE_INTRA_ONLY;
+   double bits_per_frame = anv_av1_brc_input_bits_per_frame(vid);
+   uint32_t width, height;
+
+   anv_av1_brc_frame_size(enc_info, &width, &height);
+
+   dmem->UPD_MaxNumPAKs = 2;
+   dmem->UPD_PAKPassNum = pass;
+
+   if (rc->av1_target_fullness > rc->vbv_size_bits && pass == 0) {
+      dmem->UPD_OverflowFlag = 1;
+      rc->av1_target_fullness -= rc->vbv_size_bits;
+   }
+
+   dmem->UPD_TARGET_BUF_FULLNESS = (uint32_t)rc->av1_target_fullness;
+   dmem->UPD_CDF_BufferSize = ANV_AV1_CDF_TABLE_SIZE;
+   dmem->UPD_FRAMENUM = rc->frame_counter;
+   dmem->UPD_HRD_BUFF_FULLNESS = rc->av1_hrd_fullness;
+   dmem->UPD_UserMaxFrame = width * height;
+   dmem->UPD_UserMaxFramePB = width * height;
+   dmem->UPD_CurWidth = width;
+   dmem->UPD_CurHeight = height;
+   dmem->UPD_EnableAdaptiveRounding = 1;
+
+   switch (rc->consecutive_b_frames + 1) {
+   case 8:
+      dmem->UPD_MaxBRCLevel = 3;
+      break;
+   case 4:
+      dmem->UPD_MaxBRCLevel = 2;
+      break;
+   case 2:
+      dmem->UPD_MaxBRCLevel = 1;
+      break;
+   default:
+      dmem->UPD_MaxBRCLevel = 0;
+      break;
+   }
+
+   if (is_intra)
+      dmem->UPD_CurrFrameType = 2;
+   else
+      dmem->UPD_CurrFrameType = low_delay ? 0 : 1;
+
+   memcpy(dmem->UPD_startGAdjFrame, anv_av1_brc_start_gadj_frame,
+          sizeof(dmem->UPD_startGAdjFrame));
+   memcpy(dmem->UPD_QPThreshold, anv_av1_brc_qp_threshold,
+          sizeof(dmem->UPD_QPThreshold));
+   memcpy(dmem->UPD_gRateRatioThreshold, anv_av1_brc_rate_ratio_threshold,
+          sizeof(dmem->UPD_gRateRatioThreshold));
+   memcpy(dmem->UPD_gRateRatioThresholdQP, anv_av1_brc_rate_ratio_threshold_qp,
+          sizeof(dmem->UPD_gRateRatioThresholdQP));
+   memcpy(dmem->UPD_startGAdjMult, anv_av1_brc_start_gadj_mult,
+          sizeof(dmem->UPD_startGAdjMult));
+   memcpy(dmem->UPD_startGAdjDiv, anv_av1_brc_start_gadj_div,
+          sizeof(dmem->UPD_startGAdjDiv));
+   memcpy(dmem->UPD_DistThreshldI, anv_av1_brc_dist_threshold,
+          sizeof(dmem->UPD_DistThreshldI));
+   memcpy(dmem->UPD_DistThreshldP, anv_av1_brc_dist_threshold,
+          sizeof(dmem->UPD_DistThreshldP));
+   memcpy(dmem->UPD_DistThreshldB, anv_av1_brc_dist_threshold_b,
+          sizeof(dmem->UPD_DistThreshldB));
+   memcpy(dmem->UPD_MaxFrameThreshI, anv_av1_brc_max_frame_mult_i,
+          sizeof(dmem->UPD_MaxFrameThreshI));
+   memcpy(dmem->UPD_MaxFrameThreshP, anv_av1_brc_max_frame_mult_p,
+          sizeof(dmem->UPD_MaxFrameThreshP));
+   memcpy(dmem->UPD_MaxFrameThreshB, anv_av1_brc_max_frame_mult_p,
+          sizeof(dmem->UPD_MaxFrameThreshB));
+
+   dmem->UPD_Lowdelay = rc->vbv_initial_fullness_bits <= bits_per_frame * 2;
+
+   dmem->UPD_SLBBSize = num_tiles > 1 ? ANV_AV1_BRC_SLB_SIZE_MULTI_TILE : ANV_AV1_BRC_SLB_SIZE;
+   dmem->UPD_AVPPiCStateCmdNum = num_tiles > 1 ? 2 : 1;
+   dmem->UPD_AVPSegmentStateOffset = 0;
+   dmem->UPD_AVPInloopFilterStateOffset = ANV_AV1_BRC_SLB_INLOOP_FILTER_OFFSET;
+   dmem->UPD_VDEncCmd1Offset = ANV_AV1_BRC_SLB_CMD1_OFFSET;
+   dmem->UPD_VDEncCmd2Offset = ANV_AV1_BRC_SLB_CMD2_OFFSET;
+   dmem->UPD_AVPPicStateOffset = ANV_AV1_BRC_SLB_PIC_STATE_OFFSET;
+   dmem->UPD_TileNum = num_tiles;
+
+   dmem->UPD_LoopFilterParamsBitOffset = hdr->loop_filter_params_bit_offset;
+   dmem->UPD_QIndexBitOffset = hdr->base_q_idx_bit_offset;
+   dmem->UPD_SegmentationBitOffset =
+      pic_info->flags.segmentation_enabled ? hdr->segmentation_bit_offset : 0;
+   dmem->UPD_CDEFParamsBitOffset = hdr->cdef_params_bit_offset;
+   dmem->UPD_CDEFParamsSizeInBits = hdr->cdef_params_size_in_bits;
+   dmem->UPD_FrameHdrOBUSizeInBits = hdr->size_in_bits;
+   dmem->UPD_FrameHdrOBUSizeByteOffset = hdr->obu_size_byte_offset;
+   dmem->UPD_FrameHdrOBUSizeInBytes = DIV_ROUND_UP(hdr->size_in_bits, 8);
+
+   dmem->UPD_ErrorResilientMode = pic_info->flags.error_resilient_mode ||
+      (pic_info->frame_type == STD_VIDEO_AV1_FRAME_TYPE_KEY && pic_info->flags.show_frame);
+   dmem->UPD_SegOn = pic_info->flags.segmentation_enabled;
+   dmem->UPD_EnableCDEFUpdate = 0;
+   dmem->UPD_EnableLFUpdate = 1;
+   if (pic_info->flags.allow_intrabc && is_intra) {
+      dmem->UPD_EnableCDEFUpdate = 0;
+      dmem->UPD_EnableLFUpdate = 0;
+   }
+
+   dmem->UPD_DisableCdfUpdate = !anv_av1_brc_primary_ref_none(pic_info);
+   dmem->UPD_EnableDMAForCdf = 1;
+   dmem->UPD_QMatrixEnabled =
+      pic_info->pQuantization && pic_info->pQuantization->flags.using_qmatrix;
+
+   if (pass == 1)
+      rc->av1_target_fullness += bits_per_frame;
+}
+
+static void
+anv_av1_brc_fill_const_data(bool is_intra,
+                            struct anv_huc_av1_brc_const_data *data)
+{
+   memcpy(data->CONST_ModeCosts,
+          is_intra ? anv_av1_brc_mode_costs_i : anv_av1_brc_mode_costs_p,
+          sizeof(data->CONST_ModeCosts));
+   memcpy(data->CONST_QPAdjTabI, anv_av1_brc_delta_qp_i, sizeof(data->CONST_QPAdjTabI));
+   memcpy(data->CONST_QPAdjTabP, anv_av1_brc_delta_qp_p, sizeof(data->CONST_QPAdjTabP));
+   memcpy(data->CONST_QPAdjTabB, anv_av1_brc_delta_qp_p, sizeof(data->CONST_QPAdjTabB));
+   memcpy(data->CONST_DistQPAdjTabI, anv_av1_brc_dist_delta_qp_i,
+          sizeof(data->CONST_DistQPAdjTabI));
+   memcpy(data->CONST_DistQPAdjTabP, anv_av1_brc_dist_delta_qp_p,
+          sizeof(data->CONST_DistQPAdjTabP));
+   memcpy(data->CONST_DistQPAdjTabB, anv_av1_brc_dist_delta_qp_p,
+          sizeof(data->CONST_DistQPAdjTabB));
+   memcpy(data->CONST_LoopFilterLevelTabLuma, anv_av1_brc_loop_filter_level_luma,
+          sizeof(data->CONST_LoopFilterLevelTabLuma));
+   /* TODO: drop once the tile group obu_size position is computed on the GPU */
+   for (unsigned i = 1; i < ARRAY_SIZE(data->CONST_LoopFilterLevelTabLuma); i++)
+      data->CONST_LoopFilterLevelTabLuma[i] = MAX2(data->CONST_LoopFilterLevelTabLuma[i], 1);
+
+   memcpy(data->CONST_LoopFilterLevelTabChroma, anv_av1_brc_loop_filter_level_chroma,
+          sizeof(data->CONST_LoopFilterLevelTabChroma));
+}
+
+static void
+anv_av1_brc_slb_pad_to(struct anv_batch *slb, uint32_t target)
+{
+   assert((uint32_t)(slb->next - slb->start) <= target);
+   while ((uint32_t)(slb->next - slb->start) < target)
+      anv_batch_emit(slb, GENX(MI_NOOP), noop);
+}
+
+static void
+anv_av1_brc_build_input_slb(struct anv_cmd_buffer *cmd,
+                            const VkVideoEncodeInfoKHR *enc_info,
+                            const struct anv_av1_tile_layout *layout,
+                            uint32_t num_tiles,
+                            uint32_t pass,
+                            struct anv_state slb_state)
+{
+   struct anv_batch slb = { 0 };
+
+   anv_batch_set_storage(&slb,
+                         anv_cmd_buffer_temporary_state_address(cmd, slb_state),
+                         slb_state.map, slb_state.alloc_size);
+   memset(slb_state.map, 0, slb_state.alloc_size);
+
+   anv_av1_emit_avp_segment_state(cmd, &slb, enc_info);
+   assert((uint32_t)(slb.next - slb.start) == ANV_AV1_BRC_SLB_INLOOP_FILTER_OFFSET);
+   anv_av1_emit_avp_inloop_filter_state(cmd, &slb, enc_info, true);
+   anv_batch_emit(&slb, GENX(MI_BATCH_BUFFER_END), bbe);
+
+   assert((uint32_t)(slb.next - slb.start) == ANV_AV1_BRC_SLB_CMD1_OFFSET);
+   anv_av1_emit_vdenc_cmd1(cmd, &slb, enc_info);
+   anv_batch_emit(&slb, GENX(MI_BATCH_BUFFER_END), bbe);
+
+   assert((uint32_t)(slb.next - slb.start) == ANV_AV1_BRC_SLB_CMD2_OFFSET);
+   anv_av1_emit_vdenc_cmd2(cmd, &slb, enc_info);
+   anv_batch_emit(&slb, GENX(MI_BATCH_BUFFER_END), bbe);
+
+   assert((uint32_t)(slb.next - slb.start) == ANV_AV1_BRC_SLB_PIC_STATE_OFFSET);
+   anv_av1_emit_avp_pic_state(cmd, &slb, enc_info, layout, 0, pass > 0);
+   anv_batch_emit(&slb, GENX(MI_BATCH_BUFFER_END), bbe);
+
+   if (num_tiles > 1) {
+      assert((uint32_t)(slb.next - slb.start) == ANV_AV1_BRC_SLB_PIC_STATE2_OFFSET);
+      anv_av1_emit_avp_pic_state(cmd, &slb, enc_info, layout, 1, pass > 0);
+      anv_batch_emit(&slb, GENX(MI_BATCH_BUFFER_END), bbe);
+      anv_av1_brc_slb_pad_to(&slb, ANV_AV1_BRC_SLB_SIZE_MULTI_TILE);
+   } else {
+      anv_av1_brc_slb_pad_to(&slb, ANV_AV1_BRC_SLB_SIZE);
+   }
+}
+
+static size_t
+anv_av1_brc_predict_hdr_size(struct anv_cmd_buffer *cmd,
+                             const VkVideoEncodeInfoKHR *enc_info,
+                             size_t hdr_size)
+{
+   const StdVideoEncodeAV1PictureInfo *pic_info = anv_av1_brc_pic_info(enc_info);
+   bool mono = cmd->video.params->av1_enc.seq_hdr.color_config.flags.mono_chrome;
+   uint32_t bits = hdr_size * 8;
+
+   /* TODO: patch the tile group obu_size at a GPU computed position instead */
+   if (!pic_info->flags.allow_intrabc) {
+      if (!mono)
+         bits += 12;
+   }
+
+   return DIV_ROUND_UP(bits, 8);
+}
+
+static size_t
+anv_av1_brc_build_pak_insert(struct anv_cmd_buffer *cmd,
+                             const VkVideoEncodeInfoKHR *enc_info,
+                             struct anv_state state,
+                             struct vk_video_av1_frame_hdr_offsets *hdr)
+{
+   struct anv_batch batch = { 0 };
+
+   anv_batch_set_storage(&batch,
+                         anv_cmd_buffer_temporary_state_address(cmd, state),
+                         state.map, state.alloc_size);
+   memset(state.map, 0, state.alloc_size);
+
+   size_t hdr_size = anv_av1_emit_frame_header(cmd, &batch, enc_info, true, hdr);
+   anv_batch_emit(&batch, GENX(MI_BATCH_BUFFER_END), bbe);
+
+   return anv_av1_brc_predict_hdr_size(cmd, enc_info, hdr_size);
+}
+
+static void
+anv_av1_brc_emit_huc_common(struct anv_cmd_buffer *cmd,
+                            uint32_t kernel_descriptor,
+                            struct anv_state dmem_state,
+                            uint32_t dmem_size)
+{
+   struct anv_device *device = cmd->device;
+   struct anv_address dmem_addr =
+      anv_cmd_buffer_temporary_state_address(cmd, dmem_state);
+
+   anv_batch_emit(&cmd->batch, GENX(HUC_IMEM_STATE), imem) {
+      imem.HUCFirmwareDescriptor = kernel_descriptor;
+   }
+
+   anv_video_emit_mfx_wait(cmd, NULL);
+   anv_batch_emit(&cmd->batch, GENX(HUC_PIPE_MODE_SELECT), sel);
+   anv_video_emit_mfx_wait(cmd, NULL);
+
+   anv_batch_emit(&cmd->batch, GENX(HUC_DMEM_STATE), dmem) {
+      dmem.HUCDataSourceAddress = dmem_addr;
+      dmem.HUCDataSourceAddressAttributes = (struct GENX(MEMORYADDRESSATTRIBUTES)) {
+         .MOCS = anv_mocs(device, dmem_addr.bo, 0),
+      };
+      dmem.HUCDataDestinationAddress = (struct anv_address) {
+         NULL, ANV_HUC_DMEM_DEST_OFFSET,
+      };
+      dmem.HUCDataLength = align(dmem_size, 64) / 64;
+   }
+}
+
+static void
+anv_av1_brc_emit_huc_tail(struct anv_cmd_buffer *cmd)
+{
+   struct anv_video_session *vid = cmd->video.vid;
+   struct anv_address pak_mmio_addr =
+      ANV_VID_MEM_ADDR(vid, ANV_VID_MEM_BRC_PAK_MMIO_SEM);
+   struct anv_state status_state =
+      anv_cmd_buffer_alloc_temporary_state(cmd, 8, 8);
+
+   if (status_state.map == NULL)
+      return;
+
+   anv_batch_emit(&cmd->batch, GENX(MI_STORE_REGISTER_MEM), srm) {
+      srm.RegisterAddress = ANV_HUC_STATUS2_MMIO_OFFSET;
+      srm.AddCSMMIOStartOffset = 1;
+      srm.MemoryAddress = anv_cmd_buffer_temporary_state_address(cmd, status_state);
+   }
+
+   anv_batch_emit(&cmd->batch, GENX(HUC_START), start) {
+      start.LastStreamObject = true;
+   }
+
+   anv_batch_emit(&cmd->batch, GENX(VD_PIPELINE_FLUSH), flush) {
+      flush.VDCommandMessageParserDone = true;
+   }
+
+   anv_video_emit_mi_flush_dw(cmd, true);
+
+   anv_batch_emit(&cmd->batch, GENX(MI_STORE_DATA_IMM), sdi) {
+      sdi.Address = anv_address_add(pak_mmio_addr, 4);
+      sdi.ImmediateData = ANV_HUC_AV1_BRC_REENCODE_MASK;
+   }
+
+   anv_batch_emit(&cmd->batch, GENX(MI_STORE_REGISTER_MEM), srm) {
+      srm.RegisterAddress = ANV_HUC_STATUS_MMIO_OFFSET;
+      srm.AddCSMMIOStartOffset = 1;
+      srm.MemoryAddress = pak_mmio_addr;
+   }
+}
+
+static void
+anv_av1_brc_emit_huc_init(struct anv_cmd_buffer *cmd,
+                          struct anv_state dmem_state)
+{
+   struct anv_device *device = cmd->device;
+   struct anv_video_session *vid = cmd->video.vid;
+
+   vid->rc.brc_reset = false;
+
+   anv_av1_brc_emit_huc_common(cmd, ANV_HUC_AV1_BRC_INIT_KERNEL_DESCRIPTOR,
+                               dmem_state, sizeof(struct anv_huc_av1_brc_init_dmem));
+
+   anv_batch_emit(&cmd->batch, GENX(HUC_VIRTUAL_ADDR_STATE), va) {
+      struct anv_address history = ANV_VID_MEM_ADDR(vid, ANV_VID_MEM_BRC_HISTORY);
+
+      for (uint32_t i = 0; i < 16; i++) {
+         va.HUCVirtualAddressRegion[i] = (struct GENX(HUC_VIRTUAL_ADDR_REGION)) {
+            .Address = i == 0 ? history : ANV_NULL_ADDRESS,
+            .AddressAttributes = {
+               .MOCS = anv_mocs(device, i == 0 ? history.bo : NULL, 0),
+            },
+         };
+      }
+   }
+
+   anv_av1_brc_emit_huc_tail(cmd);
+}
+
+static void
+anv_av1_brc_emit_huc_update(struct anv_cmd_buffer *cmd,
+                            uint32_t pass,
+                            struct anv_state dmem_state,
+                            struct anv_state slb_state,
+                            struct anv_state const_state,
+                            struct anv_state pak_insert_state)
+{
+   struct anv_device *device = cmd->device;
+   struct anv_video_session *vid = cmd->video.vid;
+   uint32_t stats_idx = (vid->rc.frame_counter + (pass == 0 ? 1 : 0)) & 1;
+   struct anv_address pak_info = ANV_VID_MEM_ADDR(vid, ANV_VID_MEM_BRC_PAK_INFO);
+
+   struct mi_builder b;
+   mi_builder_init(&b, device->info, &cmd->batch);
+   mi_builder_set_mocs(&b, anv_mocs_for_address(device, &pak_info));
+   mi_store(&b, mi_mem32(pak_info),
+            mi_mem32(ANV_VID_MEM_ADDR(vid, ANV_VID_MEM_AV1_ENCODE_TILE_BITSTREAM_ACCUM)));
+   anv_batch_emit(&cmd->batch, GENX(MI_FLUSH_DW), flush) {
+      flush.DWordLength = 2;
+   };
+
+   anv_av1_brc_emit_huc_common(cmd, ANV_HUC_AV1_BRC_UPDATE_KERNEL_DESCRIPTOR,
+                               dmem_state, sizeof(struct anv_huc_av1_brc_update_dmem));
+
+   anv_batch_emit(&cmd->batch, GENX(HUC_VIRTUAL_ADDR_STATE), va) {
+      struct anv_address regions[16] = { 0 };
+
+      regions[0] = ANV_VID_MEM_ADDR(vid, ANV_VID_MEM_BRC_HISTORY);
+      regions[1] = anv_address_add(ANV_VID_MEM_ADDR(vid, ANV_VID_MEM_BRC_VDENC_STATS),
+                                   stats_idx * 4096);
+      regions[3] = anv_cmd_buffer_temporary_state_address(cmd, slb_state);
+      regions[4] = ANV_VID_MEM_ADDR(vid, ANV_VID_MEM_AV1_BRC_DATA);
+      regions[5] = anv_cmd_buffer_temporary_state_address(cmd, const_state);
+      regions[6] = ANV_VID_MEM_ADDR(vid, ANV_VID_MEM_BRC_EXEC_SLB);
+      regions[7] = pak_info;
+      regions[8] = anv_cmd_buffer_temporary_state_address(cmd, pak_insert_state);
+      regions[9] = ANV_VID_MEM_ADDR(vid, ANV_VID_MEM_AV1_BRC_PAK_INSERT_OUT);
+      regions[10] = ANV_VID_MEM_ADDR(vid, ANV_VID_MEM_AV1_BRC_CDF_TABLES);
+      regions[11] = ANV_VID_MEM_ADDR(vid, ANV_VID_MEM_AV1_BRC_CDF_ACTIVE);
+
+      for (uint32_t i = 0; i < 16; i++) {
+         va.HUCVirtualAddressRegion[i] = (struct GENX(HUC_VIRTUAL_ADDR_REGION)) {
+            .Address = regions[i],
+            .AddressAttributes = {
+               .MOCS = anv_mocs(device, regions[i].bo, 0),
+            },
+         };
+      }
+   }
+
+   anv_av1_brc_emit_huc_tail(cmd);
+}
+#endif /* GFX_VERx10 == 125 */
 
 #endif /* GENX_HUC_BRC_H */

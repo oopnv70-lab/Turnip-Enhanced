@@ -298,12 +298,18 @@ fd_init_shader_caps(struct fd_screen *screen)
          caps->max_shader_buffers = IR3_BINDLESS_SSBO_COUNT;
          caps->max_shader_images = IR3_BINDLESS_IMAGE_COUNT;
       } else if (is_a4xx(screen) || is_a5xx(screen)) {
-         /* a5xx (and a4xx for that matter) has one state-block
-          * for compute-shader SSBO's and another that is shared
-          * by VS/HS/DS/GS/FS..  so to simplify things for now
-          * just advertise SSBOs for FS and CS.  We could possibly
-          * do what blob does, and partition the space for
-          * VS/HS/DS/GS/FS.  The blob advertises:
+         /* a5xx (and a4xx for that matter) has one state-block for
+          * compute-shader SSBO's and another that is shared by VS/HS/DS/GS/FS.
+          *
+          * The SB4_CS_SSBO/ST4_UBO (base addresses) and
+          * SB4_CS_SSBO/ST4_CONSTANTS (dimensions for robustness and resinfo)
+          * are both 64 long and wrap past that, and those are shared between
+          * storage buffers and images.
+          *
+          * SB4_CS_SSBO/ST4_SHADER (constants loaded at c448) can also only fit
+          * 64 due to constant file addressing.
+          *
+          * The blob advertises:
           *
           *   GL_MAX_VERTEX_SHADER_STORAGE_BLOCKS: 4
           *   GL_MAX_GEOMETRY_SHADER_STORAGE_BLOCKS: 4
@@ -313,16 +319,37 @@ fd_init_shader_caps(struct fd_screen *screen)
           *   GL_MAX_COMPUTE_SHADER_STORAGE_BLOCKS: 24
           *   GL_MAX_COMBINED_SHADER_STORAGE_BLOCKS: 24
           *
-          * I think that way we could avoid having to patch shaders
-          * for actual SSBO indexes by using a static partitioning.
+          * a530 VK v415:
           *
-          * Note same state block is used for images and buffers,
-          * but images also need texture state for read access
-          * (isam/isam.3d)
+          * maxPerStageDescriptorSamplers                   = 16
+          * maxPerStageDescriptorUniformBuffers             = 14
+          * maxPerStageDescriptorStorageBuffers             = 24
+          * maxPerStageDescriptorSampledImages              = 128
+          * maxPerStageDescriptorStorageImages              = 4
+          * maxPerStageDescriptorInputAttachments           = 8
+          * maxPerStageResources                            = 158
+          * maxDescriptorSetSamplers                        = 96
+          * maxDescriptorSetUniformBuffers                  = 84
+          * maxDescriptorSetUniformBuffersDynamic           = 8
+          * maxDescriptorSetStorageBuffers                  = 24
+          * maxDescriptorSetStorageBuffersDynamic           = 4
+          * maxDescriptorSetSampledImages                   = 768
+          * maxDescriptorSetStorageImages                   = 24
+          * maxDescriptorSetInputAttachments                = 8
+          *
+          * For now we just support the same 24 images and 24 ssbos in the FS
+          * and CS as the blob does, and don't support them for the VS.  To add
+          * VS, we'd have to statically allocate the 64 descriptor slots between
+          * the two.
+          *
+          * However, readonly images also need texture state for read access
+          * (isam/isam.3d) so we have to limit to at most the number of textures
+          * supported (though we'll have trouble if you have texturing plus max
+          * images).
           */
          if (i == MESA_SHADER_FRAGMENT || i == MESA_SHADER_COMPUTE) {
-            caps->max_shader_buffers =
-            caps->max_shader_images = 24;
+            caps->max_shader_images = MIN2(24, caps->max_sampler_views);
+            caps->max_shader_buffers = 24;
          }
       }
    }
@@ -409,7 +436,7 @@ fd_init_screen_caps(struct fd_screen *screen)
    caps->texture_mirror_clamp_to_edge = true;
    caps->gl_spirv = true;
    caps->cl_gl_sharing = true;
-   caps->fbfetch_coherent = true;
+   caps->fbfetch_coherent = is_a5xx(screen) || is_a6xx(screen);
    caps->has_const_bw = true;
 
    caps->copy_between_compressed_and_plain_formats =
@@ -543,6 +570,13 @@ fd_init_screen_caps(struct fd_screen *screen)
 
    caps->glsl_feature_level_compatibility = caps->glsl_feature_level;
 
+   /* a702 could report this too, but exposing the OES sample extensions on
+    * it is left for a follow-up.
+    */
+   caps->fs_sample_variables =
+      is_a4xx(screen) || is_a5xx(screen) ||
+      (is_a6xx(screen) && !screen->info->props.is_a702);
+
    caps->shader_buffer_offset_alignment =
       is_a6xx(screen) ? 64 : (is_a5xx(screen) || is_a4xx(screen) ? 4 : 0);
 
@@ -559,8 +593,9 @@ fd_init_screen_caps(struct fd_screen *screen)
    caps->force_persample_interp = false;
 
    caps->fbfetch =
-      fd_device_version(screen->dev) >= FD_VERSION_GMEM_BASE && is_a6xx(screen) ?
-      screen->max_rts : 0;
+      fd_device_version(screen->dev) >= FD_VERSION_GMEM_BASE &&
+            (is_a5xx(screen) || is_a6xx(screen)) ?
+         screen->max_rts : 0;
    caps->sample_shading = is_a5xx(screen) || is_a6xx(screen);
 
    caps->context_priority_mask = screen->priority_mask;
@@ -650,7 +685,8 @@ fd_init_screen_caps(struct fd_screen *screen)
    caps->max_texture_cube_levels =
       is_a6xx(screen) || is_a5xx(screen) || is_a4xx(screen) ? 15 : 14;
 
-   caps->max_texture_3d_levels = is_a3xx(screen) ? 11 : 12;
+   caps->max_texture_3d_levels =
+      is_a2xx(screen) || is_a3xx(screen) ? 11 : 12;
 
    caps->max_texture_array_layers = is_a6xx(screen) ? 2048 :
       (is_a3xx(screen) || is_a4xx(screen) || is_a5xx(screen) ? 256 : 0);
@@ -1083,6 +1119,10 @@ fd_screen_create(int fd,
 
    screen->dev_info = info;
    screen->info = &screen->dev_info;
+
+   if (fd_pipe_get_param(screen->pipe, FD_HIGHEST_BANK_BIT, &val) || !val)
+      val = screen->info->highest_bank_bit;
+   screen->highest_bank_bit = val;
 
    switch (screen->gen) {
    case 2:

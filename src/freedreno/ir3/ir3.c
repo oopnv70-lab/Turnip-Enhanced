@@ -603,12 +603,7 @@ ir3_collect_info(struct ir3_shader_variant *v)
       }
    }
 
-   /* TODO: for a5xx and below, is there a separate regfile for
-    * half-registers?
-    */
-   unsigned regs_count =
-      info->max_reg + 1 +
-      (compiler->gen >= 6 ? ((info->max_half_reg + 2) / 2) : 0);
+   unsigned regs_count = info->max_reg + 1 + (info->max_half_reg + 2) / 2;
 
    info->double_threadsize = ir3_should_double_threadsize(v, regs_count);
 
@@ -1997,7 +1992,10 @@ ir3_valid_flags(struct ir3_instruction *instr, unsigned n, unsigned flags)
          switch (instr->opc) {
          case OPC_LDIB:
          case OPC_STIB:
-            if (n != 0 && n != 2)
+            /* a6xx+ src2 is the immediate offset, but on a5xx it's the
+             * coordinates.
+             */
+            if (n != 0 && (n != 2 || compiler->gen < 6))
                return false;
             break;
          case OPC_RESINFO:

@@ -1228,7 +1228,13 @@ static int surf_config_sanity(const struct ac_surf_config *config, unsigned flag
    return 0;
 }
 
-static unsigned bpe_to_format(const struct radeon_surf *surf)
+static bool
+is_astc_format(const struct radeon_surf *surf)
+{
+   return surf->blk_w >= 5;
+}
+
+static unsigned bpe_to_format(const struct radeon_info *info, const struct radeon_surf *surf)
 {
    if (surf->blk_w != 1 || surf->blk_h != 1) {
       if (surf->blk_w == 4 && surf->blk_h == 4) {
@@ -1246,32 +1252,38 @@ static unsigned bpe_to_format(const struct radeon_surf *surf)
          default:
             UNREACHABLE("invalid compressed bpe");
          }
-      } else if (surf->blk_w == 5 && surf->blk_h == 4)
-         return ADDR_FMT_ASTC_5x4;
-      else if (surf->blk_w == 5 && surf->blk_h == 5)
-         return ADDR_FMT_ASTC_5x5;
-      else if (surf->blk_w == 6 && surf->blk_h == 5)
-         return ADDR_FMT_ASTC_6x5;
-      else if (surf->blk_w == 6 && surf->blk_h == 6)
-         return ADDR_FMT_ASTC_6x6;
-      else if (surf->blk_w == 8 && surf->blk_h == 5)
-         return ADDR_FMT_ASTC_8x5;
-      else if (surf->blk_w == 8 && surf->blk_h == 6)
-         return ADDR_FMT_ASTC_8x6;
-      else if (surf->blk_w == 8 && surf->blk_h == 8)
-         return ADDR_FMT_ASTC_8x8;
-      else if (surf->blk_w == 10 && surf->blk_h == 5)
-         return ADDR_FMT_ASTC_10x5;
-      else if (surf->blk_w == 10 && surf->blk_h == 6)
-         return ADDR_FMT_ASTC_10x6;
-      else if (surf->blk_w == 10 && surf->blk_h == 8)
-         return ADDR_FMT_ASTC_10x8;
-      else if (surf->blk_w == 10 && surf->blk_h == 10)
-         return ADDR_FMT_ASTC_10x10;
-      else if (surf->blk_w == 12 && surf->blk_h == 10)
-         return ADDR_FMT_ASTC_12x10;
-      else if (surf->blk_w == 12 && surf->blk_h == 12)
-         return ADDR_FMT_ASTC_12x12;
+      } else if (is_astc_format(surf)) {
+         if (info->gfx_level >= GFX9) {
+            if (surf->blk_w == 5 && surf->blk_h == 4)
+               return ADDR_FMT_ASTC_5x4;
+            else if (surf->blk_w == 5 && surf->blk_h == 5)
+               return ADDR_FMT_ASTC_5x5;
+            else if (surf->blk_w == 6 && surf->blk_h == 5)
+               return ADDR_FMT_ASTC_6x5;
+            else if (surf->blk_w == 6 && surf->blk_h == 6)
+               return ADDR_FMT_ASTC_6x6;
+            else if (surf->blk_w == 8 && surf->blk_h == 5)
+               return ADDR_FMT_ASTC_8x5;
+            else if (surf->blk_w == 8 && surf->blk_h == 6)
+               return ADDR_FMT_ASTC_8x6;
+            else if (surf->blk_w == 8 && surf->blk_h == 8)
+               return ADDR_FMT_ASTC_8x8;
+            else if (surf->blk_w == 10 && surf->blk_h == 5)
+               return ADDR_FMT_ASTC_10x5;
+            else if (surf->blk_w == 10 && surf->blk_h == 6)
+               return ADDR_FMT_ASTC_10x6;
+            else if (surf->blk_w == 10 && surf->blk_h == 8)
+               return ADDR_FMT_ASTC_10x8;
+            else if (surf->blk_w == 10 && surf->blk_h == 10)
+               return ADDR_FMT_ASTC_10x10;
+            else if (surf->blk_w == 12 && surf->blk_h == 10)
+               return ADDR_FMT_ASTC_12x10;
+            else if (surf->blk_w == 12 && surf->blk_h == 12)
+               return ADDR_FMT_ASTC_12x12;
+         } else {
+            return ADDR_FMT_32_32_32_32;
+         }
+      }
    } else {
       switch (surf->bpe) {
       case 1:
@@ -1297,29 +1309,6 @@ static unsigned bpe_to_format(const struct radeon_surf *surf)
       }
    }
    return ADDR_FMT_INVALID;
-}
-
-static bool
-is_astc_format(unsigned format)
-{
-   switch (format) {
-   case ADDR_FMT_ASTC_5x4:
-   case ADDR_FMT_ASTC_5x5:
-   case ADDR_FMT_ASTC_6x5:
-   case ADDR_FMT_ASTC_6x6:
-   case ADDR_FMT_ASTC_8x5:
-   case ADDR_FMT_ASTC_8x6:
-   case ADDR_FMT_ASTC_8x8:
-   case ADDR_FMT_ASTC_10x5:
-   case ADDR_FMT_ASTC_10x6:
-   case ADDR_FMT_ASTC_10x8:
-   case ADDR_FMT_ASTC_10x10:
-   case ADDR_FMT_ASTC_12x10:
-   case ADDR_FMT_ASTC_12x12:
-      return true;
-   default:
-      return false;
-   }
 }
 
 /* The addrlib pitch alignment is forced to this number for all chips to support interop
@@ -1382,6 +1371,11 @@ static int gfx6_compute_level(struct ac_addrlib *addrlib, const struct ac_surf_c
       /* Convert blocks to pixels for compressed formats. */
       if (compressed)
          AddrSurfInfoIn->basePitch *= surf->blk_w;
+   }
+
+   if (is_astc_format(surf)) {
+      AddrSurfInfoIn->width = DIV_ROUND_UP(u_minify(config->info.width, level), surf->blk_w);
+      AddrSurfInfoIn->height = DIV_ROUND_UP(u_minify(config->info.height, level), surf->blk_h);
    }
 
    ret = AddrComputeSurfaceInfo(addrlib->handle, AddrSurfInfoIn, AddrSurfInfoOut);
@@ -1697,10 +1691,6 @@ static void ac_compute_cmask(const struct radeon_info *info, const struct ac_sur
    /* Each element of CMASK is a nibble. */
    unsigned slice_bytes = slice_elements / 2;
 
-   surf->u.legacy.color.cmask_slice_tile_max = (width * height) / (128 * 128);
-   if (surf->u.legacy.color.cmask_slice_tile_max)
-      surf->u.legacy.color.cmask_slice_tile_max -= 1;
-
    unsigned num_layers;
    if (config->is_3d)
       num_layers = config->info.depth;
@@ -1712,6 +1702,10 @@ static void ac_compute_cmask(const struct radeon_info *info, const struct ac_sur
    surf->cmask_alignment_log2 = util_logbase2(MAX2(256, base_align));
    surf->cmask_slice_size = align(slice_bytes, num_pipes * pipe_interleave_bytes);
    surf->cmask_size = surf->cmask_slice_size * num_layers;
+
+   surf->u.legacy.color.cmask_slice_tile_max = surf->cmask_slice_size / 128;
+   if (surf->u.legacy.color.cmask_slice_tile_max)
+      surf->u.legacy.color.cmask_slice_tile_max -= 1;
 
    if (info->gfx_level == GFX8 && surf->flags & RADEON_SURF_TC_COMPATIBLE_CMASK) {
       /* There is a way to calculate this, but the equation is too complicated. For simplicity,
@@ -2283,7 +2277,7 @@ static int gfx6_compute_surface(struct ac_addrlib *const addrlib,
 
    compressed = surf->blk_w == 4 && surf->blk_h == 4;
 
-   AddrSurfInfoIn.format = bpe_to_format(surf);
+   AddrSurfInfoIn.format = bpe_to_format(info, surf);
    if (!compressed)
       AddrDccIn.bpp = AddrSurfInfoIn.bpp = surf->bpe * 8;
 
@@ -3380,7 +3374,7 @@ static int gfx9_compute_surface(struct ac_addrlib *addrlib, const struct radeon_
 
    compressed = surf->blk_w == 4 && surf->blk_h == 4;
 
-   AddrSurfInfoIn.format = bpe_to_format(surf);
+   AddrSurfInfoIn.format = bpe_to_format(info, surf);
    if (!compressed)
       AddrSurfInfoIn.bpp = surf->bpe * 8;
 
@@ -4067,6 +4061,13 @@ static bool gfx12_compute_hiz_info(struct ac_addrlib *addrlib, const struct rade
    hiz->swizzle_mode = in.swizzleMode;
    hiz->alignment_log2 = out.baseAlign;
 
+   const unsigned log_bpe = util_logbase2(in.bpp / 8);
+   const unsigned log_samples = util_logbase2(in.numSamples);
+   assert(in.swizzleMode >= ADDR3_256B_2D && in.swizzleMode <= ADDR3_256KB_2D);
+   hiz->block256B_extent.width = gfx9_gfx12_block_size_256B_2D[log_samples][log_bpe].width;
+   hiz->block256B_extent.height = gfx9_gfx12_block_size_256B_2D[log_samples][log_bpe].height;
+   hiz->block256B_extent.depth = 1;
+
    for (unsigned i = 0; i < in.numMipLevels; i++) {
       if (i >= out.firstMipIdInTail) {
          /* Levels inside the mip tail share only one block and they can't be
@@ -4242,7 +4243,7 @@ static bool gfx12_compute_surface(struct ac_addrlib *addrlib, const struct radeo
       AddrSurfInfoIn.bpp = 8;
       AddrSurfInfoIn.format = ADDR_FMT_8;
    } else {
-      AddrSurfInfoIn.format = bpe_to_format(surf);
+      AddrSurfInfoIn.format = bpe_to_format(info, surf);
       if (!compressed)
          AddrSurfInfoIn.bpp = surf->bpe * 8;
    }
@@ -4294,7 +4295,7 @@ static bool gfx12_compute_surface(struct ac_addrlib *addrlib, const struct radeo
       AddrSurfInfoIn.swizzleMode = ADDR3_LINEAR;
    } else if (surf->flags & RADEON_SURF_VIDEO_REFERENCE) {
       AddrSurfInfoIn.swizzleMode = ADDR3_256B_2D;
-   } else if (is_astc_format(AddrSurfInfoIn.format)) {
+   } else if (is_astc_format(surf)) {
       AddrSurfInfoIn.swizzleMode = config->is_3d ? ADDR3_4KB_3D : ADDR3_4KB_2D;
    } else {
       AddrSurfInfoIn.swizzleMode = gfx12_select_swizzle_mode(addrlib, info, config, surf,
@@ -5431,7 +5432,7 @@ gfx9_surface_copy_mem_surface(struct ac_addrlib *addrlib, const struct radeon_in
                               const struct ac_surface_copy_region *surf_copy_region,
                               bool surface_is_dst)
 {
-   uint32_t format = bpe_to_format(surf);
+   uint32_t format = bpe_to_format(info, surf);
    uint32_t bpe = surf->bpe;
    uint32_t texel_scale = 1;
 
@@ -5515,7 +5516,7 @@ gfx12_surface_copy_mem_surface(struct ac_addrlib *addrlib, const struct radeon_i
                                const struct ac_surface_copy_region *surf_copy_region,
                                bool surface_is_dst)
 {
-   uint32_t format = bpe_to_format(surf);
+   uint32_t format = bpe_to_format(info, surf);
    uint32_t bpe = surf->bpe;
    uint32_t texel_scale = 1;
 
@@ -5734,4 +5735,44 @@ void ac_surface_print_info(FILE *out, const struct radeon_info *info,
          fprintf(out, "    StencilLayout: tilesplit=%u\n",
                  surf->u.legacy.stencil_tile_split);
    }
+}
+
+/* Return whether CB/DB and TC access the metadata of a surface with the given layout through
+ * different L2 channels (the "pipe misaligned" metadata issue). If so, L2 must be invalidated
+ * between CB/DB writes and shader reads of the metadata on gfx10-11.5.
+ *
+ * bpe is the bytes per element of the color or depth plane.
+ */
+bool ac_surface_is_meta_pipe_misaligned(const struct radeon_info *info, unsigned bpe,
+                                        unsigned num_samples, unsigned num_layers, bool is_depth)
+{
+   assert(info->gfx_level >= GFX10 && info->gfx_level < GFX12);
+
+   if (info->tcc_rb_non_coherent)
+      return true;
+
+   const int log2_samples = util_logbase2(num_samples);
+   int log2_bpp = util_logbase2(bpe);
+   int log2_bpp_and_samples;
+
+   if (info->gfx_level >= GFX10_3) {
+      log2_bpp_and_samples = log2_bpp + log2_samples;
+   } else {
+      if (is_depth && num_layers >= 8)
+         log2_bpp = 2;
+
+      log2_bpp_and_samples = MIN2(6, log2_bpp + log2_samples);
+   }
+
+   const int num_pipes = G_0098F8_NUM_PIPES(info->gb_addr_config);
+   const int overlap = MAX2(0, log2_bpp_and_samples + num_pipes - 8);
+
+   if (is_depth)
+      return overlap > 0;
+
+   const int max_compressed_frags = G_0098F8_MAX_COMPRESSED_FRAGS(info->gb_addr_config);
+   const int log2_samples_frag_diff = MAX2(0, log2_samples - max_compressed_frags);
+   const int samples_overlap = MIN2(log2_samples, overlap);
+
+   return samples_overlap > log2_samples_frag_diff;
 }

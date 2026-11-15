@@ -129,6 +129,14 @@ struct tu_knl {
    VkResult (*device_init)(struct tu_device *dev);
    void (*device_finish)(struct tu_device *dev);
    int (*device_get_gpu_timestamp)(struct tu_device *dev, uint64_t *ts);
+   /* Optional. Samples several time domains together, returns
+    * VK_ERROR_FEATURE_NOT_PRESENT if any of the domains is not supported.
+    */
+   VkResult (*device_get_calibrated_timestamps)(struct tu_device *dev,
+                                                uint32_t count,
+                                                const VkCalibratedTimestampInfoKHR *infos,
+                                                uint64_t *ts,
+                                                uint64_t *max_deviation);
    int (*device_get_suspend_count)(struct tu_device *dev, uint64_t *suspend_count);
    VkResult (*device_check_status)(struct tu_device *dev);
    int (*submitqueue_new)(struct tu_device *dev, struct tu_queue *queue);
@@ -143,13 +151,6 @@ struct tu_knl {
    VkResult (*bo_init_dmabuf)(struct tu_device *dev, struct tu_bo **out_bo,
                               uint64_t size, uint64_t align,
                               enum tu_bo_alloc_flags flags, int prime_fd);
-   VkResult (*bo_init_userptr)(struct tu_device *dev,
-                               struct vk_object_base *base,
-                               struct tu_bo **out_bo, uint64_t size,
-                               uint64_t align,
-                               VkMemoryPropertyFlags mem_property,
-                               enum tu_bo_alloc_flags flags,
-                               void *host_ptr, const char *name);
    int (*bo_export_dmabuf)(struct tu_device *dev, struct tu_bo *bo);
    VkResult (*bo_alloc_lazy)(struct tu_device *dev, struct tu_bo *bo);
    VkResult (*bo_map)(struct tu_device *dev, struct tu_bo *bo, void *placed_addr);
@@ -222,17 +223,6 @@ tu_bo_init_new(struct tu_device *dev, struct vk_object_base *base,
          VK_MEMORY_PROPERTY_HOST_COHERENT_BIT,
       flags, NULL, name);
 }
-
-VkResult
-tu_bo_init_userptr(struct tu_device *dev,
-                   struct vk_object_base *base,
-                   struct tu_bo **bo,
-                   uint64_t size,
-                   uint64_t align,
-                   VkMemoryPropertyFlags mem_property,
-                   enum tu_bo_alloc_flags flags,
-                   void *host_ptr,
-                   const char *name);
 
 VkResult
 tu_bo_init_dmabuf(struct tu_device *dev,
@@ -312,6 +302,13 @@ tu_drm_device_finish(struct tu_device *dev);
 int
 tu_device_get_gpu_timestamp(struct tu_device *dev,
                             uint64_t *ts);
+
+VkResult
+tu_device_get_calibrated_timestamps(struct tu_device *dev,
+                                    uint32_t count,
+                                    const VkCalibratedTimestampInfoKHR *infos,
+                                    uint64_t *ts,
+                                    uint64_t *max_deviation);
 
 int
 tu_device_get_suspend_count(struct tu_device *dev,

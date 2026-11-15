@@ -183,6 +183,8 @@ TRIVIAL_TRANSFORMED_TYPES = [
 NON_TRIVIAL_TRANSFORMED_TYPES = [
     "VkExternalMemoryProperties",
     "VkImageCreateInfo",
+    "VkMemoryToImageCopy",
+    "VkImageToMemoryCopy",
 ]
 
 TRANSFORMED_TYPES = TRIVIAL_TRANSFORMED_TYPES + NON_TRIVIAL_TRANSFORMED_TYPES
@@ -202,7 +204,7 @@ STRUCT_MEMBER_STREAM_FEATURE = {
 STRUCT_ENV_STR = {
     "VkGraphicsPipelineCreateInfo": {
         "hasTessellation": "(arrayany pStages 0 stageCount (lambda ((s VkPipelineShaderStageCreateInfo)) (or (eq (getfield s stage) VK_SHADER_STAGE_TESSELLATION_CONTROL_BIT) (eq (getfield s stage) VK_SHADER_STAGE_TESSELLATION_EVALUATION_BIT))))",
-        "hasRasterization" : "(or (if (eq 0 pRasterizationState) 0 (not (getfield pRasterizationState rasterizerDiscardEnable))) (if (eq 0 pDynamicState) 0 (arrayany (getfield pDynamicState pDynamicStates) 0 (getfield pDynamicState dynamicStateCount) (lambda ((s VkDynamicState)) (eq s VK_DYNAMIC_STATE_RASTERIZER_DISCARD_ENABLE)))))"
+        "hasRasterization" : "(or (if (eq 0 pRasterizationState) 1 (not (getfield pRasterizationState rasterizerDiscardEnable))) (if (eq 0 pDynamicState) 0 (arrayany (getfield pDynamicState pDynamicStates) 0 (getfield pDynamicState dynamicStateCount) (lambda ((s VkDynamicState)) (eq s VK_DYNAMIC_STATE_RASTERIZER_DISCARD_ENABLE)))))"
     },
 }
 
@@ -260,6 +262,19 @@ STRUCT_MEMBER_IGNORE_OPTIONAL = {
     "vkCmdBindVertexBuffers.local_pBuffers",
     "vkCmdClearColorImage.pColor",
     "vkCmdClearColorImage.local_pColor",
+    # Vulkan 1.4.367
+    "VkDeviceQueueCreateInfo.pQueuePriorities",
+}
+
+# vk.xml removed optional from some of the existing fields. For backward
+# compatibility we need to keep treating those as optional, so that the
+# null-check placeholder (the 8-byte pointer value written before the pointed-to
+# data) stays in the encoded stream.
+STRUCT_MEMBER_KEEP_OPTIONAL = {
+    # Vulkan 1.4.366
+    "VkTimelineSemaphoreSubmitInfo.pWaitSemaphoreValues",
+    "VkTimelineSemaphoreSubmitInfo.pSignalSemaphoreValues",
+    "VkBindDescriptorSetsInfo.pDynamicOffsets",
 }
 
 # Holds information about a Vulkan type instance (i.e., not a type definition).
@@ -377,7 +392,10 @@ class VulkanType(object):
     # Good for inferring which things need to be marshaled in
     # versus marshaled out for Vulkan API calls
     def possiblyOutput(self,):
-        return self.pointerIndirectionLevels > 0 and (not self.isConst)
+        return self.pointerIndirectionLevels > 0 and (
+            (not self.isConst)
+            or (self.typeName in ["VkCopyImageToMemoryInfo", "VkCopyImageToMemoryInfoEXT"])
+        )
 
     def isVoidWithNoSize(self,):
         return self.typeName == "void" and self.pointerIndirectionLevels == 0
@@ -511,20 +529,31 @@ class VulkanType(object):
 
         return None
     def isOptionalPointer(self) -> bool:
-        return self.isOptional and \
-               (not self.isForceOptional()) and\
+        return (self.isOptional or self.isKeepOptional()) and \
+               (not self.isIgnoreOptional()) and \
                self.pointerIndirectionLevels > 0 and \
                (not self.isNextPointer())
 
-    def isForceOptional(self) -> bool:
+    def isIgnoreOptional(self) -> bool:
         """
-        Returns true if we should generate a placeholder for null.
+        Returns true if we should not generate a placeholder for null.
 
         Vulkan updates change certain pointers from non-optional to
         optional. We want to keep our encoder/decoder backward compatible.
-        Thus we should generate a placeholder for such APIs.
+        Thus we should not generate a placeholder for such APIs.
         """
         return self.getFullName() in STRUCT_MEMBER_IGNORE_OPTIONAL
+
+    def isKeepOptional(self) -> bool:
+        """
+        Returns true if we should generate a placeholder for null even though
+        the spec no longer marks the pointer as optional.
+
+        Vulkan updates change certain pointers from optional to
+        non-optional. We want to keep our encoder/decoder backward compatible.
+        Thus we should keep generating a placeholder for such APIs.
+        """
+        return self.getFullName() in STRUCT_MEMBER_KEEP_OPTIONAL
 
     def getFullName(self) -> str:
         if self.parent is None:

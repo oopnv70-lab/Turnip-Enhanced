@@ -50,19 +50,19 @@
  * pass.
  */
 
-static nir_variable_mode
+static nir_parameter_mode
 get_param_mode(ir_variable *param)
 {
    switch ((enum ir_variable_mode)(param->data.mode)) {
    case ir_var_const_in:
    case ir_var_function_in:
-      return nir_var_function_in;
+      return nir_parameter_in;
 
    case ir_var_function_out:
-      return nir_var_function_out;
+      return nir_parameter_out;
 
    case ir_var_function_inout:
-      return nir_var_function_inout;
+      return nir_parameter_inout;
 
    case ir_var_auto:
    case ir_var_uniform:
@@ -478,6 +478,7 @@ nir_visitor::visit(ir_variable *ir)
    var->data.per_primitive = ir->data.per_primitive;
    var->data.yuv = ir->data.yuv;
 
+   unsigned mem_access = 0;
    switch(ir->data.mode) {
    case ir_var_auto:
       if (is_global) {
@@ -536,15 +537,15 @@ nir_visitor::visit(ir_variable *ir)
       break;
 
    case ir_var_shader_pixel_local_storage:
+      var->data.mode = nir_var_mem_pixel_local;
       switch (ir->data.pixel_local_storage) {
       case GLSL_PIXEL_LOCAL_STORAGE_IN:
-         var->data.mode = nir_var_mem_pixel_local_in;
+         mem_access |= ACCESS_NON_WRITEABLE;
          break;
       case GLSL_PIXEL_LOCAL_STORAGE_OUT:
-         var->data.mode = nir_var_mem_pixel_local_out;
+         mem_access |= ACCESS_NON_READABLE;
          break;
       case GLSL_PIXEL_LOCAL_STORAGE_INOUT:
-         var->data.mode = nir_var_mem_pixel_local_inout;
          break;
       default:
          UNREACHABLE("bad pixel local storage field");
@@ -556,15 +557,20 @@ nir_visitor::visit(ir_variable *ir)
       UNREACHABLE("not reached");
    }
 
-   unsigned mem_access = 0;
    if (ir->data.memory_read_only)
       mem_access |= ACCESS_NON_WRITEABLE;
    if (ir->data.memory_write_only)
       mem_access |= ACCESS_NON_READABLE;
    if (ir->data.memory_coherent)
       mem_access |= ACCESS_COHERENT;
+   /* From the GLSL spec, section 4.10 (Memory Qualifiers):
+    *
+    *    "Since the external source reading or writing a volatile variable
+    *    may be another shader invocation, variables declared as volatile are
+    *    automatically treated as coherent."
+    */
    if (ir->data.memory_volatile)
-      mem_access |= ACCESS_VOLATILE;
+      mem_access |= ACCESS_VOLATILE | ACCESS_COHERENT;
    if (ir->data.memory_restrict)
       mem_access |= ACCESS_RESTRICT;
 
@@ -587,7 +593,7 @@ nir_visitor::visit(ir_variable *ir)
             if (field->memory_coherent)
                mem_access |= ACCESS_COHERENT;
             if (field->memory_volatile)
-               mem_access |= ACCESS_VOLATILE;
+               mem_access |= ACCESS_VOLATILE | ACCESS_COHERENT;
             if (field->memory_restrict)
                mem_access |= ACCESS_RESTRICT;
 
@@ -637,7 +643,7 @@ nir_visitor::visit(ir_variable *ir)
    } else if (var->data.mode == nir_var_shader_out) {
       var->data.xfb.buffer = ir->data.xfb_buffer;
       var->data.xfb.stride = ir->data.xfb_stride;
-   } else if (var->data.mode & nir_var_any_pixel_local) {
+   } else if (var->data.mode == nir_var_mem_pixel_local) {
       var->data.image.format = ir->data.image_format;
    }
 
@@ -717,7 +723,7 @@ nir_visitor::create_function(ir_function_signature *ir)
       func->params[np].bit_size = 32;
       func->params[np].type = ir->return_type;
       func->params[np].is_return = true;
-      func->params[np].mode = nir_var_function_out;
+      func->params[np].mode = nir_parameter_out;
       np++;
    }
 
@@ -932,7 +938,7 @@ deref_get_qualifier(nir_deref_instr *deref)
          if (field->memory_coherent)
             qualifiers |= ACCESS_COHERENT;
          if (field->memory_volatile)
-            qualifiers |= ACCESS_VOLATILE;
+            qualifiers |= ACCESS_VOLATILE | ACCESS_COHERENT;
          if (field->memory_restrict)
             qualifiers |= ACCESS_RESTRICT;
       }

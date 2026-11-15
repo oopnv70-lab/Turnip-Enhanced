@@ -426,6 +426,14 @@ emit_tmu_general_atomic_writes(struct v3d_compile *c,
         }
 }
 
+static bool
+scratch_store_needs_redirect(struct v3d_compile *c, nir_intrinsic_instr *instr)
+{
+        return c->s->info.stage == MESA_SHADER_FRAGMENT &&
+               instr->intrinsic == nir_intrinsic_store_scratch &&
+               vir_in_nonuniform_control_flow(c);
+}
+
 /**
  * For any TMU general instruction:
  *
@@ -464,6 +472,36 @@ emit_tmu_general_address_write(struct v3d_compile *c,
                 tmua = vir_reg(QFILE_MAGIC, V3D_QPU_WADDR_TMUA);
         else
                 tmua = vir_reg(QFILE_MAGIC, V3D_QPU_WADDR_TMUAU);
+
+        /* Fragment shader scratch stores are done per-quad so helper
+         * invocations write their scratch too. In non-uniform control flow
+         * the per-quad write can't be conditional, since it would also be
+         * done for the inactive lanes of the quad, so instead we redirect
+         * the inactive lanes to a dummy scratch dword of their own.
+         */
+        if (scratch_store_needs_redirect(c, instr)) {
+                struct qreg addr = base_offset;
+                if (const_offset != 0 || dynamic_src) {
+                        if (const_offset != 0)
+                                addr = vir_ADD(c, addr, vir_uniform_ui(c, const_offset));
+                        if (dynamic_src) {
+                                addr = vir_ADD(c, addr,
+                                               ntq_get_src(c, instr->src[offset_src], 0));
+                        }
+                } else {
+                        addr = vir_MOV(c, addr);
+                }
+                struct qreg dummy =
+                        vir_ADD(c, c->spill_base,
+                                vir_uniform_ui(c, V3D_CHANNELS *
+                                                  c->s->scratch_size));
+                vir_MOV_cond(c, V3D_QPU_COND_IFNA, addr, dummy);
+                struct qinst *tmu = vir_MOV_dest(c, tmua, addr);
+                tmu->uniform =
+                        vir_get_uniform_index(c, QUNIFORM_CONSTANT, config);
+                tmu->ldtmu_count = dest_components;
+                return;
+        }
 
         struct qinst *tmu;
         if (dynamic_src) {
@@ -653,12 +691,23 @@ ntq_emit_tmu_general(struct v3d_compile *c, nir_intrinsic_instr *instr,
 
                         /* Only load per-quad if we can't skip helper
                          * invocations.
+                         *
+                         * Scratch is private to each invocation, so helper
+                         * invocations must also be able to write it, or they
+                         * would read back garbage (see
+                         * emit_tmu_general_address_write for the non-uniform
+                         * control flow case).
                          */
-                        uint32_t perquad =
-                                is_load &&
+                        bool load_perquad =
                                 c->s->info.stage == MESA_SHADER_FRAGMENT &&
+                                is_load &&
                                 nir_intrinsic_has_access(instr) &&
-                                !(nir_intrinsic_access(instr) & ACCESS_SKIP_HELPERS) ?
+                                !(nir_intrinsic_access(instr) & ACCESS_SKIP_HELPERS);
+                        bool store_perquad =
+                                c->s->info.stage == MESA_SHADER_FRAGMENT &&
+                                instr->intrinsic == nir_intrinsic_store_scratch;
+                        uint32_t perquad =
+                                load_perquad || store_perquad ?
                                 GENERAL_TMU_LOOKUP_PER_QUAD :
                                 GENERAL_TMU_LOOKUP_PER_PIXEL;
                         config = 0xffffff00 | tmu_op << 3 | perquad;
@@ -1071,6 +1120,13 @@ emit_fragment_varying(struct v3d_compile *c, nir_variable *var,
                 c->interp[input_idx].vp = vary;
                 c->interp[input_idx].C = vir_MOV(c, c_reg);
                 c->interp[input_idx].mode = var->data.interpolation;
+                /* Only smooth varyings are evaluated at the centroid:
+                 * emit_noperspective_varying() has no centroid variant.
+                 */
+                c->interp[input_idx].centroid =
+                        var->data.centroid &&
+                        (var->data.interpolation == INTERP_MODE_NONE ||
+                         var->data.interpolation == INTERP_MODE_SMOOTH);
         }
 
         /* For gl_PointCoord input or distance along a line, we'll be called
@@ -3141,11 +3197,10 @@ ntq_get_barycentric_centroid(struct v3d_compile *c,
                              struct qreg *out_x,
                              struct qreg *out_y)
 {
-        struct qreg sample_mask;
-        if (c->output_sample_mask_index != -1)
-                sample_mask = c->outputs[c->output_sample_mask_index];
-        else
-                sample_mask = vir_MSF(c);
+        /* Use the sample mask the hardware used for interpolation. The
+         * shader may have written gl_SampleMask or discarded since.
+         */
+        struct qreg sample_mask = c->start_msf;
 
         struct qreg i0 = vir_uniform_ui(c, 0);
         struct qreg i1 = vir_uniform_ui(c, 1);
@@ -3204,40 +3259,133 @@ ntq_get_barycentric_centroid(struct v3d_compile *c,
         *out_y = offset_y;
 }
 
+/* Centroid sample position relative to the pixel center, plus the Jacobian
+ * of the centroid-shifted position with respect to the pixel position.
+ * Built once per interpolateAtOffset() and shared by all its components.
+ */
+struct v3d_centroid_jacobian {
+        struct qreg x, y;
+        struct qreg dxx, dxy, dyx, dyy;
+        struct qreg inv_det;
+};
+
+static void
+ntq_get_centroid_jacobian(struct v3d_compile *c,
+                          struct v3d_centroid_jacobian *j)
+{
+        ntq_get_barycentric_centroid(c, &j->x, &j->y);
+
+        struct qreg one = vir_uniform_f(c, 1.0f);
+        struct qreg zero = vir_uniform_f(c, 0.0f);
+        struct qreg dxx = vir_FADD(c, one, vir_FDX(c, j->x));
+        struct qreg dxy = vir_FDX(c, j->y);
+        struct qreg dyx = vir_FDY(c, j->x);
+        struct qreg dyy = vir_FADD(c, one, vir_FDY(c, j->y));
+        struct qreg det =
+                vir_FSUB(c, vir_FMUL(c, dxx, dyy), vir_FMUL(c, dxy, dyx));
+        struct qreg inv_det = vir_RECIP(c, det);
+
+        /* The centroid offsets of neighbouring pixels can cancel the pixel
+         * step, making the Jacobian (nearly) singular. Fall back to the
+         * identity, i.e. the unadjusted derivatives, instead of dividing by
+         * a tiny determinant. The threshold (|det| < 1/16) is a heuristic.
+         */
+        struct qreg det2 = vir_FMUL(c, det, det);
+        struct qreg degenerate =
+                vir_FSUB(c, det2, vir_uniform_f(c, 1.0f / 256.0f));
+        vir_set_pf(c, vir_MOV_dest(c, vir_nop_reg(), degenerate),
+                   V3D_QPU_PF_PUSHN);
+        j->dxx = vir_SEL(c, V3D_QPU_COND_IFA, one, dxx);
+        j->dxy = vir_SEL(c, V3D_QPU_COND_IFA, zero, dxy);
+        j->dyx = vir_SEL(c, V3D_QPU_COND_IFA, zero, dyx);
+        j->dyy = vir_SEL(c, V3D_QPU_COND_IFA, one, dyy);
+        j->inv_det = vir_SEL(c, V3D_QPU_COND_IFA, one, inv_det);
+}
+
+/* The varying values are evaluated at the centroid, so their screen-space
+ * derivatives also contain the change of the centroid position. Undo that
+ * to recover the gradient with respect to the position.
+ */
+static void
+ntq_get_centroid_adjusted_derivatives(struct v3d_compile *c,
+                                      const struct v3d_centroid_jacobian *j,
+                                      struct qreg value,
+                                      struct qreg *dx,
+                                      struct qreg *dy)
+{
+        struct qreg value_dx = vir_FDX(c, value);
+        struct qreg value_dy = vir_FDY(c, value);
+
+        *dx = vir_FMUL(c,
+                       vir_FSUB(c, vir_FMUL(c, j->dyy, value_dx),
+                                   vir_FMUL(c, j->dxy, value_dy)),
+                       j->inv_det);
+        *dy = vir_FMUL(c,
+                       vir_FSUB(c, vir_FMUL(c, j->dxx, value_dy),
+                                   vir_FMUL(c, j->dyx, value_dx)),
+                       j->inv_det);
+}
+
+/* centroid_j is NULL unless the input is a centroid-qualified smooth varying
+ * (see v3d_interp_input.centroid).
+ */
 static struct qreg
 ntq_emit_load_interpolated_input(struct v3d_compile *c,
                                  struct qreg p,
                                  struct qreg C,
                                  struct qreg offset_x,
                                  struct qreg offset_y,
-                                 unsigned mode)
+                                 unsigned mode,
+                                 const struct v3d_centroid_jacobian *centroid_j)
 {
-        if (mode == INTERP_MODE_FLAT)
-                return C;
+        /* nir_lower_io never emits load_interpolated_input for flat
+         * varyings.
+         */
+        assert(mode != INTERP_MODE_FLAT);
 
-        struct qreg sample_offset_x =
-                vir_FSUB(c, vir_FXCD(c), vir_ITOF(c, vir_XCD(c)));
-        struct qreg sample_offset_y =
-                vir_FSUB(c, vir_FYCD(c), vir_ITOF(c, vir_YCD(c)));
+        struct qreg scaleX, scaleY;
+        struct qreg p_dx, p_dy;
 
-        struct qreg scaleX =
-                vir_FADD(c, vir_FSUB(c, vir_uniform_f(c, 0.5f), sample_offset_x),
-                            offset_x);
-        struct qreg scaleY =
-                vir_FADD(c, vir_FSUB(c, vir_uniform_f(c, 0.5f), sample_offset_y),
-                            offset_y);
+        if (centroid_j) {
+                ntq_get_centroid_adjusted_derivatives(c, centroid_j, p,
+                                                      &p_dx, &p_dy);
+                scaleX = vir_FSUB(c, offset_x, centroid_j->x);
+                scaleY = vir_FSUB(c, offset_y, centroid_j->y);
+        } else {
+                struct qreg sample_offset_x =
+                        vir_FSUB(c, vir_FXCD(c), vir_ITOF(c, vir_XCD(c)));
+                struct qreg sample_offset_y =
+                        vir_FSUB(c, vir_FYCD(c), vir_ITOF(c, vir_YCD(c)));
+                scaleX =
+                        vir_FADD(c, vir_FSUB(c, vir_uniform_f(c, 0.5f),
+                                             sample_offset_x), offset_x);
+                scaleY =
+                        vir_FADD(c, vir_FSUB(c, vir_uniform_f(c, 0.5f),
+                                             sample_offset_y), offset_y);
+                p_dx = vir_FDX(c, p);
+                p_dy = vir_FDY(c, p);
+        }
 
         struct qreg pInterp =
-                vir_FADD(c, p, vir_FADD(c, vir_FMUL(c, vir_FDX(c, p), scaleX),
-                                           vir_FMUL(c, vir_FDY(c, p), scaleY)));
+                vir_FADD(c, p, vir_FADD(c, vir_FMUL(c, p_dx, scaleX),
+                                           vir_FMUL(c, p_dy, scaleY)));
 
         if (mode == INTERP_MODE_NOPERSPECTIVE)
                 return vir_FADD(c, pInterp, C);
 
-        struct qreg w = c->payload_w;
+        struct qreg w = centroid_j ? c->payload_w_centroid : c->payload_w;
+        struct qreg w_dx, w_dy;
+        if (centroid_j) {
+                ntq_get_centroid_adjusted_derivatives(c, centroid_j, w,
+                                                      &w_dx, &w_dy);
+        } else {
+                w_dx = vir_FDX(c, w);
+                w_dy = vir_FDY(c, w);
+        }
+
         struct qreg wInterp =
-                vir_FADD(c, w, vir_FADD(c, vir_FMUL(c, vir_FDX(c, w), scaleX),
-                                           vir_FMUL(c, vir_FDY(c, w), scaleY)));
+                vir_FADD(c, w, vir_FADD(c, vir_FMUL(c, w_dx, scaleX),
+                                           vir_FMUL(c, w_dy, scaleY)));
 
         return vir_FADD(c, vir_FMUL(c, pInterp, wInterp), C);
 }
@@ -3577,42 +3725,6 @@ emit_compute_barrier(struct v3d_compile *c)
 }
 
 static void
-emit_barrier(struct v3d_compile *c)
-{
-        struct qreg eidx = vir_EIDX(c);
-
-        /* The config for the TSY op should be setup like this:
-         * - Lane 0: Quorum
-         * - Lane 2: TSO id
-         * - Lane 3: TSY opcode
-         */
-
-        /* Lane 0: we want to synchronize across one subgroup. Here we write to
-         * all lanes unconditionally and will overwrite other lanes below.
-         */
-        struct qreg tsy_conf = vir_uniform_ui(c, 1);
-
-        /* Lane 2: TSO id. We choose a general purpose TSO (id=0..64) using the
-         * curent QPU index and thread index to ensure we get a unique one for
-         * this group of invocations in this core.
-         */
-        struct qreg tso_id =
-                vir_AND(c, vir_TIDX(c), vir_uniform_ui(c, 0x0000003f));
-        vir_set_pf(c, vir_XOR_dest(c, vir_nop_reg(), eidx, vir_uniform_ui(c, 2)),
-                   V3D_QPU_PF_PUSHZ);
-        vir_MOV_cond(c, V3D_QPU_COND_IFA, tsy_conf, tso_id);
-
-        /* Lane 3: TSY opcode (set_quorum_wait_inc_check) */
-        struct qreg tsy_op = vir_uniform_ui(c, 16);
-        vir_set_pf(c, vir_XOR_dest(c, vir_nop_reg(), eidx, vir_uniform_ui(c, 3)),
-                   V3D_QPU_PF_PUSHZ);
-        vir_MOV_cond(c, V3D_QPU_COND_IFA, tsy_conf, tsy_op);
-
-        /* Emit TSY sync */
-        vir_MOV_dest(c, vir_reg(QFILE_MAGIC, V3D_QPU_WADDR_SYNCB), tsy_conf);
-}
-
-static void
 ntq_emit_intrinsic(struct v3d_compile *c, nir_intrinsic_instr *instr)
 {
         switch (instr->intrinsic) {
@@ -3860,11 +3972,18 @@ ntq_emit_intrinsic(struct v3d_compile *c, nir_intrinsic_instr *instr)
                  */
                 ntq_flush_tmu(c);
 
-                if (nir_intrinsic_execution_scope(instr) != SCOPE_NONE) {
-                        if (c->s->info.stage == MESA_SHADER_COMPUTE)
-                                emit_compute_barrier(c);
-                        else
-                                emit_barrier(c);
+                /* A subgroup is the 16 lanes of a single QPU thread (that is,
+                 * V3D_CHANNELS), which execute in lockstep, so an execution
+                 * barrier with subgroup scope or narrower has nothing to wait
+                 * for. Only wider scopes need a TSY barrier.
+                 *
+                 * Only compute shaders can use workgroup scope for now. If we
+                 * ever support tessellation, we would also need a TSY barrier
+                 * here.
+                 */
+                if (nir_intrinsic_execution_scope(instr) >= SCOPE_WORKGROUP) {
+                        assert(c->s->info.stage == MESA_SHADER_COMPUTE);
+                        emit_compute_barrier(c);
 
                         /* The blocking of a TSY op only happens at the next
                          * thread switch. No texturing may be outstanding at the
@@ -4064,19 +4183,31 @@ ntq_emit_intrinsic(struct v3d_compile *c, nir_intrinsic_instr *instr)
         }
 
         case nir_intrinsic_load_interpolated_input: {
+                nir_intrinsic_instr *bary = nir_src_as_intrinsic(instr->src[0]);
+                const bool at_offset =
+                        bary && bary->intrinsic == nir_intrinsic_load_barycentric_at_offset;
+
                 assert(nir_src_is_const(instr->src[1]));
                 const uint32_t offset = nir_src_as_uint(instr->src[1]);
+
+                /* Built lazily, once per intrinsic, and shared by all the
+                 * components. Everything stays in the current block, which
+                 * the derivatives require.
+                 */
+                struct v3d_centroid_jacobian centroid_j;
+                bool centroid_j_valid = false;
 
                 for (int i = 0; i < instr->num_components; i++) {
                         const uint32_t input_idx =
                                 (nir_intrinsic_base(instr) + offset) * 4 +
                                 nir_intrinsic_component(instr) + i;
 
-                        /* If we are not in MSAA or if we are not interpolating
-                         * a user varying, just return the pre-computed
-                         * interpolated input.
+                        /* If we are not in MSAA (and not interpolating at an
+                         * offset), or if we are not interpolating a user
+                         * varying, just return the pre-computed interpolated
+                         * input.
                          */
-                        if (!c->fs_key->msaa ||
+                        if ((!c->fs_key->msaa && !at_offset) ||
                             c->interp[input_idx].vp.file == QFILE_NULL) {
                                 ntq_store_def(c, &instr->def, i,
                                               vir_MOV(c, c->inputs[input_idx]));
@@ -4088,15 +4219,24 @@ ntq_emit_intrinsic(struct v3d_compile *c, nir_intrinsic_instr *instr)
                          */
                         struct qreg p = c->interp[input_idx].vp;
                         struct qreg C = c->interp[input_idx].C;
-                        unsigned interp_mode =  c->interp[input_idx].mode;
+                        unsigned interp_mode = c->interp[input_idx].mode;
 
                         struct qreg offset_x = ntq_get_src(c, instr->src[0], 0);
                         struct qreg offset_y = ntq_get_src(c, instr->src[0], 1);
 
+                        const bool centroid =
+                                c->interp[input_idx].centroid && c->fs_key->msaa;
+                        if (centroid && !centroid_j_valid) {
+                                ntq_get_centroid_jacobian(c, &centroid_j);
+                                centroid_j_valid = true;
+                        }
+
                         struct qreg result =
                               ntq_emit_load_interpolated_input(c, p, C,
                                                                offset_x, offset_y,
-                                                               interp_mode);
+                                                               interp_mode,
+                                                               centroid ?
+                                                               &centroid_j : NULL);
                         ntq_store_def(c, &instr->def, i, result);
                 }
                 break;
@@ -4289,10 +4429,10 @@ ntq_emit_intrinsic(struct v3d_compile *c, nir_intrinsic_instr *instr)
 
 
         /* We only use this if alpha to coverage is enabled when using
-         * software blending.
+         * software blending. In Vulkan, alpha to coverage also applies to
+         * single-sampled rasterization, so this can be used without MSAA.
          */
         case nir_intrinsic_alpha_to_coverage:
-                assert(c->fs_key->msaa);
                 ntq_store_def(c, &instr->def, 0,
                               vir_FTOC(c, ntq_get_src(c, instr->src[0], 0)));
                 break;
@@ -4940,12 +5080,6 @@ nir_to_vir(struct v3d_compile *c)
                 }
                 break;
         case MESA_SHADER_COMPUTE:
-                /* Set up the TSO for barriers, assuming we do some. */
-                if (c->devinfo->ver < 42) {
-                        vir_BARRIERID_dest(c, vir_reg(QFILE_MAGIC,
-                                                      V3D_QPU_WADDR_SYNC));
-                }
-
                 if (c->devinfo->ver == 42) {
                         c->cs_payload[0] = vir_MOV(c, vir_reg(QFILE_REG, 0));
                         c->cs_payload[1] = vir_MOV(c, vir_reg(QFILE_REG, 2));
@@ -4997,6 +5131,9 @@ nir_to_vir(struct v3d_compile *c)
         if (c->s->scratch_size) {
                 v3d_setup_spill_base(c);
                 c->spill_size += V3D_CHANNELS * c->s->scratch_size;
+                /* Dummy dword for scratch stores from inactive lanes */
+                if (c->s->info.stage == MESA_SHADER_FRAGMENT)
+                        c->spill_size += V3D_CHANNELS * sizeof(uint32_t);
         }
 
         switch (c->s->info.stage) {

@@ -299,7 +299,7 @@ struct radv_cond_render_state {
    bool enabled;
    bool enabled_save;
    bool mec_inv_pred_emitted; /* To ensure we don't have to repeat inverting the VA. */
-   bool suspended;
+   uint8_t suspend_count;     /* Suspend/resume can be nested (meta ops inside barriers). */
 };
 
 struct radv_cmd_state {
@@ -376,13 +376,12 @@ struct radv_cmd_state {
    unsigned spi_shader_z_format;
    unsigned cb_shader_mask;
 
-   struct radv_multisample_state ms;
    uint32_t num_rast_samples;
 
    /* Custom blend mode for internal operations. */
    unsigned custom_blend_mode;
 
-   VkLineRasterizationModeEXT line_rast_mode;
+   VkLineRasterizationMode line_rast_mode;
    unsigned vgt_outprim_type;
 
    float guardband_clip_discard_distance_watermark;
@@ -803,7 +802,7 @@ struct radv_vbo_info {
 
    uint32_t binding;
    uint32_t stride;
-   uint32_t size;
+   uint64_t size;
 
    uint32_t attrib_offset;
    uint32_t attrib_format_size;
@@ -824,11 +823,11 @@ radv_suspend_conditional_rendering(struct radv_cmd_buffer *cmd_buffer)
 {
    struct radv_cond_render_state *cond_render = &cmd_buffer->state.cond_render;
 
-   assert(!cond_render->suspended);
+   if (cond_render->suspend_count++)
+      return;
 
    cond_render->enabled_save = cond_render->enabled;
    cond_render->enabled = false;
-   cond_render->suspended = true;
 }
 
 static inline void
@@ -836,10 +835,11 @@ radv_resume_conditional_rendering(struct radv_cmd_buffer *cmd_buffer)
 {
    struct radv_cond_render_state *cond_render = &cmd_buffer->state.cond_render;
 
-   assert(cond_render->suspended);
+   assert(cond_render->suspend_count);
+   if (--cond_render->suspend_count)
+      return;
 
    cond_render->enabled = cond_render->enabled_save;
-   cond_render->suspended = false;
 }
 
 static inline bool

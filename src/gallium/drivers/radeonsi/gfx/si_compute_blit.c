@@ -528,7 +528,7 @@ void si_init_compute_blit_functions(struct si_context *sctx)
 bool si_should_blit_clamp_to_edge(const struct pipe_blit_info *info, unsigned coord_mask)
 {
    return util_is_box_out_of_bounds(&info->src.box, coord_mask, info->src.resource->width0,
-                                    info->src.resource->height0, info->src.level);
+                                    info->src.resource->height0, 1, info->src.level);
 }
 
 bool si_compute_clear_image(struct si_context *sctx, struct pipe_resource *tex,
@@ -741,12 +741,6 @@ bool si_compute_blit(struct si_context *sctx, const struct pipe_blit_info *info,
       .info = &sctx->screen->info,
       .use_aco = sctx->screen->use_aco,
       .print_key = si_can_dump_shader(sctx->screen, MESA_SHADER_COMPUTE, SI_DUMP_SHADER_KEY),
-      /* Compute queues can't fail because there is no alternative. */
-      .fail_if_slow = sctx->is_gfx_queue && fail_if_slow &&
-                      /* Compressed and subsampled image blits can't fail because
-                       * the gfx (pixel shader) blit doesn't support them. */
-                      !((src_access | dst_access) & SI_IMAGE_ACCESS_BLOCK_FORMAT_AS_UINT) &&
-                      !(sctx->screen->debug_flags & DBG(FORCE_COMPUTE_BLIT)),
    };
 
    ac_cs_blit_description blit = {
@@ -756,6 +750,7 @@ bool si_compute_blit(struct si_context *sctx, const struct pipe_blit_info *info,
          .is_array = get_tex_is_array(sdst),
          .width0 = info->dst.resource->width0,
          .height0 = info->dst.resource->height0,
+         .depth0 = info->dst.resource->depth0,
          .num_samples = info->dst.resource->nr_samples,
          .level = info->dst.level,
          .box = info->dst.box,
@@ -767,6 +762,7 @@ bool si_compute_blit(struct si_context *sctx, const struct pipe_blit_info *info,
          .is_array = ssrc ? get_tex_is_array(ssrc) : false,
          .width0 = ssrc ? info->src.resource->width0 : 0,
          .height0 = ssrc ? info->src.resource->height0 : 0,
+         .depth0 = ssrc ? info->src.resource->depth0 : 0,
          .num_samples = ssrc ? info->src.resource->nr_samples : 0,
          .level = info->src.level,
          .box = info->src.box,
@@ -774,14 +770,23 @@ bool si_compute_blit(struct si_context *sctx, const struct pipe_blit_info *info,
       },
       .src_has_non_identity_fmask = ssrc && ssrc->surface.fmask_size,
       .sample0_only = info->sample0_only,
+      /* Compute queues can't fail because there is no alternative. */
+      .fail_if_slow = sctx->is_gfx_queue && fail_if_slow &&
+                      /* Compressed and subsampled image blits can't fail because
+                       * the gfx (pixel shader) blit doesn't support them. */
+                      !((src_access | dst_access) & SI_IMAGE_ACCESS_BLOCK_FORMAT_AS_UINT) &&
+                      !(sctx->screen->debug_flags & DBG(FORCE_COMPUTE_BLIT)),
+      .linear_filter = info->filter == PIPE_TEX_FILTER_LINEAR,
    };
 
    if (clear_color)
       blit.clear_color = *clear_color;
 
-   ac_cs_blit_dispatches out;
-   if (!ac_prepare_compute_blit(&options, &blit, &out))
+   if (!ac_should_use_compute_blit(&options, &blit))
       return false;
+
+   ac_cs_blit_dispatches out;
+   ac_prepare_compute_blit(&options, &blit, &out);
 
    if (!out.num_dispatches)
       return true;

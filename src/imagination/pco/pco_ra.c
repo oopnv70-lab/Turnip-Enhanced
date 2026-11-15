@@ -467,7 +467,8 @@ static void spill(unsigned spill_index, pco_func *func, pco_ra_ctx *ctx)
 static bool pco_ra_func(pco_func *func, pco_ra_ctx *ctx)
 {
    /* TODO: support multiple functions and calls. */
-   assert(func->type == PCO_FUNC_TYPE_ENTRYPOINT);
+   assert(func->type == PCO_FUNC_TYPE_ENTRYPOINT ||
+          func->type == PCO_FUNC_TYPE_PREAMBLE);
 
    /* TODO: loop lifetime extension.
     * TODO: track successors/predecessors.
@@ -570,6 +571,9 @@ static bool pco_ra_func(pco_func *func, pco_ra_ctx *ctx)
       pco_ref dest = instr->dest[0];
       pco_ref src = instr->src[0];
       unsigned offset = pco_ref_get_imm(instr->src[1]);
+
+      if (!pco_ref_is_ssa(dest))
+         continue;
 
       BITSET_SET(comps, dest.val);
 
@@ -737,6 +741,9 @@ static bool pco_ra_func(pco_func *func, pco_ra_ctx *ctx)
 
       pco_ref dest = instr->dest[0];
       pco_ref src_vec = instr->src[0];
+
+      if (!pco_ref_is_ssa(dest))
+         continue;
 
       struct vec_override *vec_override =
          _mesa_hash_table_u64_search(overrides, src_vec.val);
@@ -1023,8 +1030,10 @@ static bool pco_ra_func(pco_func *func, pco_ra_ctx *ctx)
          pco_instr_delete(instr);
          continue;
       } else if (instr->op == PCO_OP_COMP) {
-         pco_instr_delete(instr);
-         continue;
+         if (pco_ref_is_ssa(instr->dest[0])) {
+            pco_instr_delete(instr);
+            continue;
+         }
       }
 
       pco_foreach_instr_dest_ssa (pdest, instr) {
@@ -1188,9 +1197,34 @@ bool pco_ra(pco_shader *shader)
          alloc_max |= true;
    }
 
-   /* Perform register allocation for each function. */
    bool progress = false;
+
+   /* Perform register allocation for the preamble function, if present. */
+   pco_func *preamble = pco_preamble(shader);
+   if (preamble) {
+      /* We don't care about utilization as there's only one instance running,
+       * use up to all of the available temps (but only temps).
+       */
+      pco_ra_ctx preamble_ctx = {
+         .state = PCO_RA_CTX_STATE_MAXIMUM,
+         .allocable_temps = max_temps,
+         .allocable_vtxins = 0u,
+         .allocable_interns = 0u,
+      };
+
+      progress |= pco_ra_func(preamble, &preamble_ctx);
+      assert(preamble_ctx.state == PCO_RA_CTX_STATE_DONE);
+
+      shader->data.common.preamble_temps = preamble->temps;
+      assert(!preamble->vtxins);
+   }
+
+   /* Perform register allocation for each function. */
    pco_foreach_func_in_shader (func, shader) {
+      /* Skip preamble, has its own temps. */
+      if (func->type == PCO_FUNC_TYPE_PREAMBLE)
+         continue;
+
       ctx.state = PCO_RA_CTX_STATE_OPTIMAL;
       ctx.allocable_temps = opt_temps;
       if (alloc_max) {

@@ -91,10 +91,35 @@ static bool
 fill_operation(struct teflon_delegate *delegate, TfLiteContext *tf_context, TfLiteNode *node, TfLiteRegistration *node_registration, struct pipe_ml_operation *operation)
 {
    struct pipe_tensor *tensors = delegate->tensors;
+   unsigned input_count = node->inputs->size;
 
-   operation->input_count = node->inputs->size;
+   /*
+    * The following ops have an optional final input (the bias).
+    * For instances with no bias, the tflite format allows the tensor to be
+    * left out of the list, or present with index -1 (kTfLiteOptionalTensor).
+    * Treat the -1 case as if the tensor is completely omitted.
+    */
+   switch (node_registration->builtin_code) {
+   case kTfLiteBuiltinConv2d:
+   case kTfLiteBuiltinDepthwiseConv2d:
+   case kTfLiteBuiltinFullyConnected:
+      if (input_count == 3 && node->inputs->data[2] < 0)
+         input_count = 2;
+      break;
+   }
+
+   /*
+    * We can't handle kTfLiteOptionalTensor in any other case
+    * (this likely indicates an invalid model).
+    */
+   for (unsigned i = 0; i < input_count; i++) {
+      if (node->inputs->data[i] < 0)
+         return false;
+   }
+
+   operation->input_count = input_count;
    operation->input_tensors = calloc(operation->input_count, sizeof(void *));
-   for (unsigned i = 0; i < node->inputs->size; i++)
+   for (unsigned i = 0; i < input_count; i++)
       operation->input_tensors[i] = &tensors[node->inputs->data[i]];
 
    operation->output_count = node->outputs->size;
@@ -107,7 +132,7 @@ fill_operation(struct teflon_delegate *delegate, TfLiteContext *tf_context, TfLi
    case kTfLiteBuiltinDepthwiseConv2d: {
       operation->type = PIPE_ML_OPERATION_TYPE_CONVOLUTION;
       operation->conv.weight_tensor = &tensors[node->inputs->data[1]];
-      operation->conv.bias_tensor = &tensors[node->inputs->data[2]];
+      operation->conv.bias_tensor = input_count > 2 ? operation->input_tensors[2] : NULL;
       if (node_registration->builtin_code == kTfLiteBuiltinConv2d) {
          TfLiteConvParams *params = (TfLiteConvParams *)node->builtin_data;
 
@@ -473,7 +498,7 @@ fill_operation(struct teflon_delegate *delegate, TfLiteContext *tf_context, TfLi
 
       operation->type = PIPE_ML_OPERATION_TYPE_FULLY_CONNECTED;
       operation->fcon.weight_tensor = &tensors[node->inputs->data[1]];
-      operation->fcon.bias_tensor = &tensors[node->inputs->data[2]];
+      operation->fcon.bias_tensor = input_count > 2 ? operation->input_tensors[2] : NULL;
       operation->fcon.relu = params->activation == kTfLiteActRelu;
       break;
    }
@@ -1554,8 +1579,14 @@ PrepareDelegate(TfLiteContext *tf_context, TfLiteDelegate *tf_delegate)
                    registration->version,
                    supported ? "supported" : "unsupported");
       for (int j = 0; j < node->inputs->size; j++) {
-         teflon_debug(" %d(%s)", node->inputs->data[j],
-                      tflite_type_name(tf_context->tensors[node->inputs->data[j]].type));
+         int tensor_idx = node->inputs->data[j];
+
+         if (tensor_idx < 0) {
+            teflon_debug(" %d(none)", tensor_idx);
+            continue;
+         }
+         teflon_debug(" %d(%s)", tensor_idx,
+                      tflite_type_name(tf_context->tensors[tensor_idx].type));
       }
       teflon_debug(" out:");
       for (int j = 0; j < node->outputs->size; j++) {

@@ -1643,96 +1643,6 @@ genX(invalidate_aux_map)(struct anv_batch *batch,
 }
 
 #if GFX_VER >= 20
-ALWAYS_INLINE static void
-anv_dump_rsc_stage(struct log_stream *stream,
-                   const enum GENX(RESOURCE_BARRIER_STAGE) stage)
-{
-   u_foreach_bit(bit, stage) {
-      switch(1 << bit) {
-         case RESOURCE_BARRIER_STAGE_NONE:
-            mesa_log_stream_printf(stream, "None,");
-            break;
-         case RESOURCE_BARRIER_STAGE_TOP:
-            mesa_log_stream_printf(stream, "Top,");
-            break;
-         case RESOURCE_BARRIER_STAGE_COLOR:
-            mesa_log_stream_printf(stream, "Color,");
-            break;
-         case RESOURCE_BARRIER_STAGE_GPGPU:
-            mesa_log_stream_printf(stream, "GPGPU,");
-            break;
-         case RESOURCE_BARRIER_STAGE_GEOM:
-            mesa_log_stream_printf(stream, "Geometry,");
-            break;
-         case RESOURCE_BARRIER_STAGE_RASTER:
-            mesa_log_stream_printf(stream, "Raster,");
-            break;
-         case RESOURCE_BARRIER_STAGE_DEPTH:
-            mesa_log_stream_printf(stream, "Depth,");
-            break;
-         case RESOURCE_BARRIER_STAGE_PIXEL:
-            mesa_log_stream_printf(stream, "Pixel,");
-            break;
-         case RESOURCE_BARRIER_STAGE_COLORANDCOMPUTE:
-            mesa_log_stream_printf(stream, "ColorAndCompute,");
-            break;
-         case RESOURCE_BARRIER_STAGE_GEOMETRYANDCOMPUTE:
-            mesa_log_stream_printf(stream, "GeometryAndCompute,");
-            break;
-         default:
-            UNREACHABLE("Unknown barrier stage");
-      }
-   }
-}
-
-ALWAYS_INLINE static void
-anv_dump_rsc_barrier_body(const struct GENX(RESOURCE_BARRIER_BODY) body) {
-   if (!INTEL_DEBUG(DEBUG_PIPE_CONTROL))
-      return;
-
-   struct log_stream *stream = mesa_log_streami();
-
-   mesa_log_stream_printf(
-      stream, "rb : Type=%s ",
-      body.BarrierType == RESOURCE_BARRIER_TYPE_IMMEDIATE ? "Immediate" :
-      body.BarrierType == RESOURCE_BARRIER_TYPE_SIGNAL ? "Signal" :
-      body.BarrierType == RESOURCE_BARRIER_TYPE_WAIT ? "Wait" : "Unknown");
-
-   if (body.SignalStage) {
-      mesa_log_stream_printf(stream, " Signal=");
-      anv_dump_rsc_stage(stream, body.SignalStage);
-   }
-
-   if (body.WaitStage) {
-      mesa_log_stream_printf(stream, " Wait=");
-      anv_dump_rsc_stage(stream, body.WaitStage);
-   }
-
-   mesa_log_stream_printf(stream, " Flags=");
-   if (body.L1DataportCacheInvalidate)
-      mesa_log_stream_printf(stream, "+l1-dc-inval,");
-   if (body.DepthCache)
-      mesa_log_stream_printf(stream, "+ds-flush,");
-   if (body.ColorCache)
-      mesa_log_stream_printf(stream, "+rt-flush,");
-   if (body.L1DataportUAVFlush)
-      mesa_log_stream_printf(stream, "+l1-dp-uav-flush,");
-   if (body.TextureRO)
-      mesa_log_stream_printf(stream, "+tex-inval,");
-   if (body.StateRO)
-      mesa_log_stream_printf(stream, "+state-inval,");
-   if (body.VFRO)
-      mesa_log_stream_printf(stream, "+vf-inval,");
-   if (body.AMFS)
-      mesa_log_stream_printf(stream, "+amfs,");
-   if (body.ConstantCache)
-      mesa_log_stream_printf(stream, "+const-inval,");
-
-   mesa_log_stream_printf(stream, "\n");
-
-   mesa_log_stream_destroy(stream);
-}
-
 static inline enum intel_ds_stages
 resource_barrier_stage_to_ds(uint8_t stages)
 {
@@ -2066,7 +1976,7 @@ emit_resource_barrier(struct anv_batch *batch,
       barrier.ResourceBarrierBody.ConstantCache =
          bits & ANV_PIPE_CONSTANT_CACHE_INVALIDATE_BIT;
 
-      anv_dump_rsc_barrier_body(barrier.ResourceBarrierBody);
+      anv_dump_rsc_barrier_body(barrier.ResourceBarrierBody, "emission");
    }
 
    trace_intel_end_barrier(batch->trace,
@@ -2122,6 +2032,19 @@ genX(emit_apply_pipe_flushes)(struct anv_cmd_buffer *cmd_buffer,
    if (can_use_resource_barrier(device->info, batch->engine_class,
                                 src_stages, dst_stages, bits,
                                 signal_addr, wait_addr)) {
+
+      if (batch->engine_class == INTEL_ENGINE_CLASS_RENDER &&
+          (bits & ANV_PIPE_CONSTANT_CACHE_INVALIDATE_BIT) &&
+          (dst_stages & VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT) &&
+          (dst_stages & ~(VK_PIPELINE_STAGE_2_FRAGMENT_SHADER_BIT |
+                          VK_PIPELINE_STAGE_2_EARLY_FRAGMENT_TESTS_BIT |
+                          VK_PIPELINE_STAGE_2_COLOR_ATTACHMENT_OUTPUT_BIT_KHR)) == 0) {
+         bits &= ~ANV_PIPE_CONSTANT_CACHE_INVALIDATE_BIT;
+         cmd_buffer->state.deferred_constant_cache_stage =
+            resource_barrier_signal_stage(batch->engine_class, src_stages);
+         cmd_buffer->state.deferred_constant_cache_inval = true;
+      }
+
       emit_resource_barrier(batch, device->info,
                             src_stages, dst_stages, bits,
                             signal_addr, wait_addr);
@@ -2140,12 +2063,15 @@ genX(emit_apply_pipe_flushes)(struct anv_cmd_buffer *cmd_buffer,
       /* On a render queue, the following stages can also use a pixel shader.
        */
       pb_stall_stages |=
-         VK_PIPELINE_STAGE_2_TRANSFER_BIT |
          VK_PIPELINE_STAGE_2_RESOLVE_BIT |
          VK_PIPELINE_STAGE_2_BLIT_BIT |
          VK_PIPELINE_STAGE_2_CLEAR_BIT;
    }
    VkPipelineStageFlags2 cs_stall_stages =
+      /* Sadly transfer can use a compute dispatch so we have to assume it
+       * requires a CS stall.
+       */
+      VK_PIPELINE_STAGE_2_TRANSFER_BIT_KHR |
       VK_PIPELINE_STAGE_2_TOP_OF_PIPE_BIT |
       VK_PIPELINE_STAGE_2_DRAW_INDIRECT_BIT |
       VK_PIPELINE_STAGE_2_VERTEX_INPUT_BIT |
@@ -2167,42 +2093,35 @@ genX(emit_apply_pipe_flushes)(struct anv_cmd_buffer *cmd_buffer,
          VK_PIPELINE_STAGE_2_RESOLVE_BIT |
          VK_PIPELINE_STAGE_2_BLIT_BIT |
          VK_PIPELINE_STAGE_2_CLEAR_BIT;
-   } else if (batch->engine_class == INTEL_ENGINE_CLASS_RENDER &&
-              current_pipeline == GPGPU) {
-      /* In GPGPU mode, the render queue can also use a compute shader for
-       * transfer operations.
-       */
-      cs_stall_stages |= VK_PIPELINE_STAGE_2_TRANSFER_BIT;
    }
 
-   /* Prior to Gfx20, we can restrict pb-stall/cs-stall to some pipeline
-    * modes. Gfx20 doesn't do pipeline switches so we have to assume the worse
-    * case.
+   /* If we just have a dependency between 2 fragment/color-output, we can
+    * limit ourselves to a PB-stall.
+    *
+    * Otherwise if there is a source stage and the destination stage requires
+    * a CS stall, we need to stall.
     */
-   const bool needs_pb_stall =
-      batch->engine_class == INTEL_ENGINE_CLASS_RENDER &&
-#if GFX_VER < 20
-      current_pipeline == _3D &&
-#endif
-      (dst_stages & ~pb_stall_stages) == 0 &&
-      (dst_stages & pb_stall_stages);
-   if (needs_pb_stall) {
+    if ((batch->engine_class == INTEL_ENGINE_CLASS_RENDER ||
+               batch->engine_class == INTEL_ENGINE_CLASS_COMPUTE) &&
+              src_stages != 0 &&
+              dst_stages & cs_stall_stages) {
+      bits |= ANV_PIPE_CS_STALL_BIT;
+   } else if (batch->engine_class == INTEL_ENGINE_CLASS_RENDER &&
+       (src_stages & pb_stall_stages) &&
+       (dst_stages & pb_stall_stages) &&
+       (src_stages & ~pb_stall_stages) == 0 &&
+       (dst_stages & ~pb_stall_stages) == 0) {
       bits |= GFX_VERx10 >= 125 ?
               ANV_PIPE_PSS_STALL_SYNC_BIT :
-              ANV_PIPE_STALL_AT_SCOREBOARD_BIT;
+         ANV_PIPE_STALL_AT_SCOREBOARD_BIT;
    }
-   const bool needs_cs_stall =
-      (batch->engine_class == INTEL_ENGINE_CLASS_RENDER ||
-       batch->engine_class == INTEL_ENGINE_CLASS_COMPUTE) &&
-      (src_stages & cs_stall_stages);
-   if (needs_cs_stall)
-      bits |= ANV_PIPE_CS_STALL_BIT;
 
-   if (bits & ANV_PIPE_RT_BTI_CHANGE) {
-      bits &= ~ANV_PIPE_RT_BTI_CHANGE;
-      bits |= ANV_PIPE_STALL_AT_SCOREBOARD_BIT |
-              ANV_PIPE_RENDER_TARGET_CACHE_FLUSH_BIT;
-   }
+    if (bits & ANV_PIPE_RT_BTI_CHANGE) {
+       bits &= ~ANV_PIPE_RT_BTI_CHANGE;
+       bits |= ANV_PIPE_STALL_AT_SCOREBOARD_BIT |
+               ANV_PIPE_RENDER_TARGET_CACHE_FLUSH_BIT;
+    }
+
 
 #if GFX_VER >= 12 && GFX_VER < 20
    /* From the TGL PRM, Volume 2a, "PIPE_CONTROL":
@@ -2537,6 +2456,22 @@ genX(cmd_buffer_apply_pipe_flushes)(struct anv_cmd_buffer *cmd_buffer)
    }
 #endif
 }
+
+#if GFX_VER >= 20
+void
+genX(cmd_buffer_emit_deferred_constant_cache_inval)(struct anv_cmd_buffer *cmd_buffer)
+{
+   anv_batch_emit(&cmd_buffer->batch, GENX(RESOURCE_BARRIER), barrier) {
+      barrier.ResourceBarrierBody.BarrierType = RESOURCE_BARRIER_TYPE_IMMEDIATE;
+      barrier.ResourceBarrierBody.SignalStage = cmd_buffer->state.deferred_constant_cache_stage;
+      barrier.ResourceBarrierBody.WaitStage = RESOURCE_BARRIER_STAGE_TOP;
+      barrier.ResourceBarrierBody.ConstantCache = true;
+
+      anv_dump_rsc_barrier_body(barrier.ResourceBarrierBody,
+                                "deferred constant invalidation");
+   }
+}
+#endif
 
 static inline struct anv_state
 emit_dynamic_buffer_binding_table_entry(struct anv_cmd_buffer *cmd_buffer,
@@ -4511,6 +4446,10 @@ genX(CmdExecuteCommands)(
    genX(cmd_buffer_apply_pipe_flushes)(container);
 
    genX(cmd_buffer_flush_generated_draws)(container);
+
+#if GFX_VER >= 20
+   genX(cmd_buffer_flush_deferred_constant_cache_inval)(container);
+#endif
 
    UNUSED enum anv_shader_binding_mode binding_mode =
       container->state.current_binding_mode;

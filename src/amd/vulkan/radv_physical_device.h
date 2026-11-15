@@ -156,6 +156,9 @@ struct radv_physical_device {
    /* Bitmask of memory types that are protected. */
    uint32_t memory_types_protected;
 
+   /* Bitmask of memory types that are device coherent. */
+   uint32_t memory_types_device_coherent;
+
 #ifndef _WIN32
    int available_nodes;
    drmPciBusInfo bus_info;
@@ -296,6 +299,12 @@ radv_get_sampled_image_desc_size(const struct radv_physical_device *pdev)
 {
    /* Main descriptor + FMASK desccriptor if needed. */
    return 32 + (pdev->use_fmask || pdev->force_64_byte_sampled_image ? 32 : 0);
+}
+
+static inline uint32_t
+radv_get_texel_buffer_desc_size(const struct radv_physical_device *pdev)
+{
+   return pdev->info.gfx_level >= GFX13 ? RADV_TEXEL_BUFFER_DESC_SIZE_GFX13 : RADV_BUFFER_DESC_SIZE;
 }
 
 static inline uint32_t

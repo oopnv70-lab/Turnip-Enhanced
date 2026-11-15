@@ -15,7 +15,6 @@
 #include "pipe/p_state.h"
 #include "pipe/p_context.h"
 #include "pipe/p_screen.h"
-#include "util/detect_os.h"
 #include "util/os_memory.h"
 #include "util/u_cpu_detect.h"
 #include "util/u_inlines.h"
@@ -1283,12 +1282,8 @@ iris_resource_create_for_image(struct pipe_screen *pscreen,
                 iris_get_aux_clear_color_state_size(screen, res);
    }
 
-   /* The ISL alignment already includes AUX-TT requirements, so no additional
-    * attention required here :)
-    */
-   uint32_t alignment = MAX2(4096, res->surf.alignment_B);
-   res->bo =
-      iris_bo_alloc(screen->bufmgr, name, bo_size, alignment, memzone, flags);
+   res->bo = iris_bo_alloc(screen->bufmgr, name, bo_size,
+                           res->surf.alignment_B, memzone, flags);
 
    if (!res->bo)
       goto fail;
@@ -2222,7 +2217,7 @@ iris_map_copy_region(struct iris_transfer *map)
 
       unsigned row_pitch_B = 0;
 
-#if DETECT_OS_ANDROID
+#ifdef HAVE_ANDROID_PLATFORM
       /* Staging buffers for stall-avoidance blits don't always have the
        * same restrictions on stride as the original buffer.  For example,
        * the original buffer may be used for scanout, while the staging

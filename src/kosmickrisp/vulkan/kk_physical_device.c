@@ -184,7 +184,8 @@ kk_get_device_extensions(const struct kk_instance *instance,
       .EXT_external_memory_host = true,
       .EXT_hdr_metadata = true,
       .EXT_image_2d_view_of_3d = true,
-      .EXT_image_view_min_lod = KK_EXPERIMENTAL(IMAGE_VIEW_MIN_LOD),
+      .EXT_image_view_min_lod = pdev->info.gpu_apple_family >= 11 ||
+                                KK_EXPERIMENTAL(IMAGE_VIEW_MIN_LOD),
       .EXT_load_store_op_none = true,
       .EXT_map_memory_placed = true,
       .EXT_memory_budget = true,
@@ -219,7 +220,7 @@ kk_get_device_extensions(const struct kk_instance *instance,
 
 static void
 kk_get_device_features(
-   const struct kk_physical_device *pdev,
+   const struct kk_device_info *info, const struct kk_instance *instance,
    const struct vk_device_extension_table *supported_extensions,
    struct vk_features *features)
 {
@@ -227,7 +228,8 @@ kk_get_device_features(
       /* Vulkan 1.0 */
       .alphaToOne = true,
       .depthBiasClamp = true,
-      .depthBounds = pdev->info.gpu_apple_family >= 10,
+      .depthBounds = kk_gpu_supports_depth_bounds(info) ||
+                     instance->drirc.misc.fake_depth_bounds,
       .depthClamp = true,
       .drawIndirectFirstInstance = true,
       .dualSrcBlend = true,
@@ -260,7 +262,7 @@ kk_get_device_features(
       .shaderUniformBufferArrayDynamicIndexing = true,
       .tessellationShader = true,
       .textureCompressionASTC_LDR = true,
-      .textureCompressionBC = true,
+      .textureCompressionBC = info->supports_bc_texture_compression,
       .textureCompressionETC2 = true,
       .vertexPipelineStoresAndAtomics = true,
 
@@ -509,7 +511,7 @@ kk_get_device_features(
       .shaderBufferFloat32AtomicAdd = true,
       .shaderSharedFloat32Atomics = true,
       .shaderSharedFloat32AtomicAdd =
-         pdev->info.msl_version >= MTL_LANGUAGE_VERSION_4_1,
+         info->msl_version >= MTL_LANGUAGE_VERSION_4_1,
 
       /* VK_EXT_vertex_attribute_robustness */
       .vertexAttributeRobustness = true,
@@ -546,8 +548,9 @@ kk_get_device_properties(
    *properties = (struct vk_properties){
       .apiVersion = kk_get_vk_version(),
       .driverVersion = vk_get_driver_version(),
-      .vendorID =
-         instance->force_vk_vendor != 0 ? instance->force_vk_vendor : 0x106b,
+      .vendorID = instance->drirc.debug.force_vk_vendor != 0
+                     ? instance->drirc.debug.force_vk_vendor
+                     : 0x106b,
       .deviceID = 100,
       .deviceType = VK_PHYSICAL_DEVICE_TYPE_INTEGRATED_GPU,
 
@@ -1054,6 +1057,10 @@ get_metal_limits(struct kk_physical_device *pdev)
       mtl_device_max_buffer_length(pdev->mtl_dev_handle);
    pdev->info.max_sampler_count =
       mtl_device_max_argument_buffer_sampler_count(pdev->mtl_dev_handle);
+   pdev->info.supports_bc_texture_compression =
+      mtl_device_supports_bc_texture_compression(pdev->mtl_dev_handle);
+   pdev->info.supports_32_bit_float_filtering =
+      mtl_device_supports_32_bit_float_filtering(pdev->mtl_dev_handle);
    pdev->info.gpu_apple_family =
       mtl_device_get_gpu_apple_family(pdev->mtl_dev_handle);
 
@@ -1090,13 +1097,21 @@ kk_parse_environment_options(struct kk_physical_device *pdev)
    settings->gpu_capture_enabled =
       debug_get_bool_option("MESA_KK_GPU_CAPTURE", false);
 
+   if (settings->gpu_capture_enabled) {
+      settings->gpu_capture_dir =
+         debug_get_option("MESA_KK_GPU_CAPTURE_DIRECTORY", NULL);
+
+      settings->gpu_capture_immediately =
+         debug_get_bool_option("MESA_KK_GPU_CAPTURE_IMMEDIATELY", false);
+   }
+
    const char *list = debug_get_option("MESA_KK_DISABLE_WORKAROUNDS", "");
    const char *all_workarounds = "all";
    const size_t all_len = strlen(all_workarounds);
    for (unsigned n; n = strcspn(list, ","), *list; list += MAX2(1, n)) {
       if (n == all_len && !strncmp(list, all_workarounds, n)) {
          settings->disabled_workarounds = UINT64_MAX;
-         break;
+         return;
       }
 
       int index = atoi(list);
@@ -1124,6 +1139,10 @@ kk_parse_environment_options(struct kk_physical_device *pdev)
    /* M3+ only workarounds */
    if (pdev->info.gpu_apple_family < 9) {
       settings->disabled_workarounds |= BITFIELD64_BIT(18);
+   }
+   if (pdev->info.gpu_apple_family >= 9) {
+      settings->disabled_workarounds |= BITFIELD64_BIT(10);
+      settings->disabled_workarounds |= BITFIELD64_BIT(19);
    }
 }
 
@@ -1159,7 +1178,8 @@ kk_enumerate_physical_devices(struct vk_instance *_instance)
    kk_get_device_extensions(instance, pdev, &supported_extensions);
 
    struct vk_features supported_features;
-   kk_get_device_features(pdev, &supported_extensions, &supported_features);
+   kk_get_device_features(&pdev->info, instance, &supported_extensions,
+                          &supported_features);
 
    struct vk_properties properties;
    kk_get_device_properties(pdev, instance, &supported_extensions, &properties);

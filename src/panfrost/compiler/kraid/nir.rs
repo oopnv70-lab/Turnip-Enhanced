@@ -883,6 +883,16 @@ impl<'a> ShaderFromNir<'a> {
                     srcs: [srcs(0), srcs(1), srcs(2)],
                 });
             }
+            nir_op_fma_rscale_pan => {
+                assert!(alu.get_src(0).bit_size() == 32);
+                b.push_op(OpFmaRScale {
+                    dst: dst.into(),
+                    round: self.fround(alu.def.bit_size),
+                    clamp: FClamp::None,
+                    srcs: [srcs(0), srcs(1), srcs(2)],
+                    scale: srcs(3),
+                });
+            }
             nir_op_fmul => {
                 b.push_op(OpFma {
                     dst: dst.into(),
@@ -1025,14 +1035,6 @@ impl<'a> ShaderFromNir<'a> {
                     dst: dst.into(),
                     src: flush16.into(),
                 });
-            }
-            nir_op_fsin => {
-                assert!(alu.get_src(0).bit_size() == 32);
-                b.fsincos_32_to(dst.into(), srcs(0), false);
-            }
-            nir_op_fcos => {
-                assert!(alu.get_src(0).bit_size() == 32);
-                b.fsincos_32_to(dst.into(), srcs(0), true);
             }
             nir_op_i2i8 | nir_op_i2i16 | nir_op_i2i32 => {
                 let dst_bits = alu.def.bit_size;
@@ -1981,6 +1983,22 @@ impl<'a> ShaderFromNir<'a> {
                     },
                     coords: [x, y],
                     idx,
+                });
+            }
+            nir_intrinsic_fsin_table_pan => {
+                let dst = self.alloc_ssa(b, &intrin.def).into();
+                b.push_op(OpFSinTable {
+                    dst,
+                    src: self.get_f32_src(&srcs[0]),
+                    offset: false,
+                });
+            }
+            nir_intrinsic_fcos_table_pan => {
+                let dst = self.alloc_ssa(b, &intrin.def).into();
+                b.push_op(OpFCosTable {
+                    dst,
+                    src: self.get_f32_src(&srcs[0]),
+                    offset: false,
                 });
             }
             nir_intrinsic_ddx

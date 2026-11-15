@@ -27,7 +27,7 @@
  *
  *       | Image        | w/ FMASK   | Buffer       | NULL
  * [ 0: 3] Image[0:3]   | Image[0:3] | Buffer[0:3]  | Null[0:3]
- * [ 4: 7] Image[4:7]   | Image[4:7] | Buffer[4:7]  | 0
+ * [ 4: 7] Image[4:7]   | Image[4:7] | 0            | 0
  * [ 8:11] Null[0:3]    | Fmask[0:3] | Null[0:3]    | Null[0:3]
  * [12:15] Sampler[0:3] | Fmask[4:7] | Sampler[0:3] | Sampler[0:3]
  *
@@ -984,6 +984,9 @@ static void si_init_buffer_resources(struct si_context *sctx,
 
    si_init_descriptors(descs, shader_userdata_rel_index, 4, num_buffers);
 
+   if (sctx->gfx_level >= GFX13)
+      return;
+
    const struct ac_buffer_state buffer_state = {
       .format = PIPE_FORMAT_R32_FLOAT,
       .swizzle =
@@ -1058,12 +1061,17 @@ static void si_get_buffer_from_descriptors(struct si_buffer_resources *buffers,
    if (*buf) {
       struct si_resource *res = si_resource(*buf);
       const uint32_t *desc = descs->list + idx * 4;
-      uint64_t va;
+      const enum amd_gfx_level gfx_level = ((struct si_screen *)res->b.b.screen)->info.gfx_level;
+      uint64_t va = si_desc_extract_buffer_address(desc);
+      uint64_t num_records = ac_get_buffer_num_records(gfx_level, desc);
 
-      *size = desc[2];
+      assert(num_records <= UINT_MAX);
+      *size = (unsigned)num_records;
 
-      assert(G_008F04_STRIDE(desc[1]) == 0);
-      va = si_desc_extract_buffer_address(desc);
+      if (gfx_level >= GFX13)
+         assert(G_008F0C_STRIDE(desc[3]) == 0);
+      else
+         assert(G_008F04_STRIDE(desc[1]) == 0);
 
       assert(va >= res->gpu_address && va + *size <= res->gpu_address + res->bo_size);
       *offset = va - res->gpu_address;
@@ -1117,8 +1125,14 @@ static void si_set_constant_buffer(struct si_context *sctx, struct si_buffer_res
 
       /* Set the descriptor. */
       uint32_t *desc = descs->list + slot * 4;
-      si_set_buf_desc_address(si_resource(buffer), buffer_offset, desc);
-      desc[2] = input->buffer_size;
+      if (sctx->gfx_level >= GFX13) {
+         uint64_t va = si_resource(buffer)->gpu_address + buffer_offset;
+         ac_build_raw_buffer_descriptor(sctx->gfx_level, sctx->screen->info.compiler_info.has_desc_resource_level,
+                                        va, input->buffer_size, desc);
+      } else {
+         si_set_buf_desc_address(si_resource(buffer), buffer_offset, desc);
+         desc[2] = input->buffer_size;
+      }
 
       pipe_resource_reference(&buffers->buffers[slot], buffer);
       buffers->offsets[slot] = buffer_offset;
@@ -1126,8 +1140,13 @@ static void si_set_constant_buffer(struct si_context *sctx, struct si_buffer_res
                                 RADEON_USAGE_READ | buffers->priority_constbuf);
       buffers->enabled_mask |= 1llu << slot;
    } else {
-      /* Clear the descriptor. Only 3 dwords are cleared. The 4th dword is immutable. */
-      memset(descs->list + slot * 4, 0, sizeof(uint32_t) * 3);
+      /* Clear the descriptor.
+       * - pre-gfx13: Only 3 dwords are cleared. The 4th dword is immutable.
+       * - gfx13: clear the full 4dw descriptor
+       */
+      unsigned num_dwords_to_clear = sctx->gfx_level < GFX13 ? 3 : 4;
+      memset(descs->list + slot * 4, 0, sizeof(uint32_t) * num_dwords_to_clear);
+
       pipe_resource_reference(&buffers->buffers[slot], NULL);
       buffers->enabled_mask &= ~(1llu << slot);
    }
@@ -1257,8 +1276,13 @@ static void si_set_shader_buffer(struct si_context *sctx, struct si_buffer_resou
 
    if (!sbuffer || !sbuffer->buffer) {
       pipe_resource_reference(&buffers->buffers[slot], NULL);
-      /* Clear the descriptor. Only 3 dwords are cleared. The 4th dword is immutable. */
-      memset(desc, 0, sizeof(uint32_t) * 3);
+      /* Clear the descriptor.
+       * - pre-gfx13: Only 3 dwords are cleared. The 4th dword is immutable.
+       * - gfx13: clear the full 4dw descriptor
+       */
+      unsigned num_dwords_to_clear = sctx->gfx_level < GFX13 ? 3 : 4;
+      memset(desc, 0, sizeof(uint32_t) * num_dwords_to_clear);
+
       buffers->enabled_mask &= ~(1llu << slot);
       buffers->writable_mask &= ~(1llu << slot);
       sctx->descriptors_dirty |= 1u << descriptors_idx;
@@ -1274,8 +1298,14 @@ static void si_set_shader_buffer(struct si_context *sctx, struct si_buffer_resou
     */
    assert(sbuffer->buffer_offset + sbuffer->buffer_size <= align(buf->bo_size, 4));
 
-   si_set_buf_desc_address(buf, sbuffer->buffer_offset, desc);
-   desc[2] = sbuffer->buffer_size;
+   if (sctx->gfx_level >= GFX13) {
+      uint64_t va = buf->gpu_address + sbuffer->buffer_offset;
+      ac_build_raw_buffer_descriptor(sctx->gfx_level, sctx->screen->info.compiler_info.has_desc_resource_level,
+                                     va, sbuffer->buffer_size, desc);
+   } else {
+      si_set_buf_desc_address(buf, sbuffer->buffer_offset, desc);
+      desc[2] = sbuffer->buffer_size;
+   }
 
    pipe_resource_reference(&buffers->buffers[slot], &buf->b.b);
    buffers->offsets[slot] = sbuffer->buffer_offset;
@@ -2441,8 +2471,11 @@ void si_emit_compute_shader_pointers(struct si_context *sctx)
          unsigned desc_offset = si_get_image_slot(i) * 8;
          unsigned num_sgprs = 8;
 
-         /* Image buffers are in desc[4..7]. */
-         if (shader->info.cs_image_buffer_mask & BITFIELD_BIT(i))
+         /* On pre-GFX13 image buffer descriptors are 4 dwords. On GFX13 we upload
+          * the full 8-dword image slot for buffers.
+          */
+         if ((shader->info.cs_image_buffer_mask & BITFIELD_BIT(i)) &&
+             sctx->gfx_level < GFX13)
             num_sgprs = 4;
 
          radeon_emit_array(&desc->list[desc_offset], num_sgprs);
@@ -2661,7 +2694,11 @@ static void si_make_texture_handle_resident(struct pipe_context *ctx, uint64_t h
          struct si_texture *tex = (struct si_texture *)sview->base.texture;
 
          if (sctx->gfx_level < GFX12) {
-            if (depth_needs_decompression(tex, sview->is_stencil_sampler)) {
+            /* Unlike bound samplers, resident handles aren't updated when the texture is
+             * rendered to later, so always check depth textures for decompression. It does
+             * nothing while the texture isn't dirty.
+             */
+            if (tex->db_compatible) {
                util_dynarray_append(&sctx->resident_tex_needs_depth_decompress,
                                     tex_handle);
             }

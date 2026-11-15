@@ -102,13 +102,17 @@ RESOURCE_TRACKER_ENTRIES = [
     "vkSetBufferCollectionBufferConstraintsFUCHSIA",
     "vkGetBufferCollectionPropertiesFUCHSIA",
     "vkSetPrivateData",
-    "vkSetPrivateDataKHR",
+    "vkSetPrivateDataEXT",
     "vkGetPrivateData",
-    "vkGetPrivateDataKHR",
+    "vkGetPrivateDataEXT",
     "vkCreatePrivateDataSlot",
     "vkCreatePrivateDataSlotEXT",
     "vkDestroyPrivateDataSlot",
     "vkDestroyPrivateDataSlotEXT",
+    "vkCopyMemoryToImage",
+    "vkCopyMemoryToImageEXT",
+    "vkCopyImageToMemory",
+    "vkCopyImageToMemoryEXT",
 ]
 
 SUCCESS_VAL = {
@@ -139,7 +143,6 @@ NON_AUTOGEN_ENTRYPOINTS = [
     "vkAllocateCommandBuffers",
     "vkResetCommandPool",
     "vkFreeCommandBuffers",
-    "vkResetCommandPool",
     # Transform feedback
     "vkCmdBeginTransformFeedbackEXT",
     # Special cases to handle struct translations in the pNext chain
@@ -195,7 +198,6 @@ HANDLES_POST_CREATE_INIT_DEVICE = {
 # Types that have a corresponding method for transforming
 # an input list to its internal counterpart
 TYPES_TRANSFORM_LIST_METHOD = {
-    "VkFence": "FilterNoopFences",
     "VkSemaphore": "FilterNoopSemaphores",
     "VkSemaphoreSubmitInfo": "FilterNoopSemaphoreSubmitInfos",
 }
@@ -599,10 +601,10 @@ class VulkanFuncTable(VulkanWrapperGenerator):
             # Make encoder/resource-tracker call
             if retVar and createdObject:
                 cgen.beginIf("%s == %s" % (SUCCESS_VAL[retTypeName][0], retVar))
+                genEncoderOrResourceTrackerCall()
+                cgen.endIf()
             else:
-                cgen.beginBlock()
-            genEncoderOrResourceTrackerCall()
-            cgen.endBlock()
+                genEncoderOrResourceTrackerCall()
             # Destroy gfxstream objects
             genDestroyGfxstreamObjects()
             # Set output / return variables
